@@ -1,24 +1,27 @@
+import { CalendarGrid } from './calendar'
 import { assertConfigIsCoherent, calendarConfig, slotsPerDay } from './config'
 
-// Fail at boot rather than rendering a subtly wrong grid later (task 1.6).
+// Fail at boot rather than rendering a subtly wrong grid.
 assertConfigIsCoherent()
 
 /**
- * Placeholder shell for the calendar.
+ * The application shell.
  *
- * Task 1.5 delivers the foundation only — Tailwind, `config.ts` and the API
- * client. The grid lands in 1.6 and the booking flow in 1.7, so this renders
- * just enough to prove Tailwind compiles and the config module is wired in.
+ * Task 1.6 delivers the grid and its selection behaviour only. The selected
+ * range is reported by `onSelectionChange`, which task 1.7 will wire to a
+ * confirm action calling `POST /bookings`.
  */
 function App() {
   return (
     <main className="min-h-screen bg-slate-50 p-8 text-slate-800">
       <h1 className="text-2xl font-semibold text-slate-900">Open-Skej</h1>
-      <p className="mt-2 text-sm text-slate-600">
+      <p className="mt-2 mb-6 text-sm text-slate-600">
         Booking {slotsPerDay} slots of {calendarConfig.slotMinutes} minutes, from{' '}
         {String(calendarConfig.openHour).padStart(2, '0')}:00 to{' '}
-        {String(calendarConfig.closeHour).padStart(2, '0')}:00.
+        {String(calendarConfig.closeHour).padStart(2, '0')}:00. Times are shown in your local
+        timezone.
       </p>
+      <CalendarGrid />
     </main>
   )
 }
