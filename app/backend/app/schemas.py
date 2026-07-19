@@ -6,6 +6,7 @@ the endpoints.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -62,6 +63,26 @@ class BookingDenied(BaseModel):
 
     ``message`` is the rule engine's user-facing copy and is meant to be rendered
     verbatim in the UI.
+
+    ``error`` is a machine-readable discriminator. The status code alone is not
+    quite enough: FastAPI also returns 422 for request-validation failures, whose
+    body is ``{"detail": [...]}``. Keying off ``error`` lets the client tell a
+    friendly rule denial from a malformed request without pattern-matching on the
+    body's shape.
     """
 
+    error: Literal["rule_denied"] = "rule_denied"
+    message: str
+
+
+class BookingConflict(BaseModel):
+    """The 409 body for an overlap rejected by the data layer.
+
+    Deliberately a different status *and* a different ``error`` value from
+    :class:`BookingDenied`: a rule denial means "you may not book this", a
+    conflict means "someone else got there first". The UI reacts differently to
+    each — the second is worth a calendar refresh, the first is not.
+    """
+
+    error: Literal["overlap"] = "overlap"
     message: str
