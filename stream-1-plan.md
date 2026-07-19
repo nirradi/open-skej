@@ -26,6 +26,19 @@ task below must keep CI green.
 | Time storage | UTC in the DB, rendered in the browser's local timezone | Standard, and avoids ambiguity when Stream 2 adds multi-tenant spaces. |
 | Cancellation | Soft delete via a `status` column, not a row delete | Stream 3's real rules count booking history ("no more than twice a week"), so cancelled bookings must remain queryable. A hard delete would destroy data the rule engine needs. |
 | E2E tests | Standalone Playwright suite in `app/e2e/` | Per `.claude/rules/stream-1-booking.md`. Kept out of `app/frontend` so it can drive the real backend, not a mocked one. |
+| Error discrimination | An `error` field in the body, not the status code alone | **FastAPI already returns 422 for request-validation failures**, so a client switching on `status === 422` would render a Pydantic error dump as friendly rule copy. Rule denials carry `error: "rule_denied"`, overlaps carry `error: "overlap"`, validation errors carry no `error` key. |
+
+**API contract for the frontend (established in 1.3 — tasks 1.5/1.7/1.8 must follow it):**
+
+| Outcome | Status | Body |
+|---|---|---|
+| Created | 201 | `BookingRead` |
+| Rule denial | 422 | `{"error": "rule_denied", "message": <friendly copy>}` |
+| Overlap conflict | 409 | `{"error": "overlap", "message": <friendly copy>}` |
+| Malformed request | 422 | FastAPI validation detail, **no `error` key** |
+| Bad window / naive datetime | 400 | `{"detail": ...}` |
+
+Branch on the `error` field, never on the status code alone.
 
 Bookings are **variable length** — the grid's slot size governs selection granularity, not the
 duration a booking is allowed to be. The overlap predicate is the half-open interval test
@@ -56,7 +69,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   Stub logic: deny bookings longer than 2 hours, and deny bookings outside availability hours, each
   with a human-readable message. Unit tested.
 
-- [ ] **1.3 — Booking endpoints.** `GET /bookings?from=&to=` and `POST /bookings`. POST routes through
+- [x] **1.3 — Booking endpoints.** _(DONE — PR #4)_ `GET /bookings?from=&to=` and `POST /bookings`. POST routes through
   the stub rule engine *before* touching the driver; a rule denial returns **422** with the friendly
   message, an `OverlapError` returns **409** with a distinct message. Enable CORS for the Vite dev
   origin. `TestClient` tests for success, rule denial, and overlap conflict.
@@ -129,3 +142,12 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
 3. Are past time slots rendered as disabled, or hidden entirely?
 4. Can a booking that has already started (or finished) be cancelled, or only future ones? Assumed
    **any booking is cancellable** for now, since there is no auth or ownership model yet.
+5. **How far ahead may a booking be made?** Raised during 1.3 — the endpoints currently impose no
+   horizon at all. CLAUDE.md caps the *rule scope* at one month, which is a different constraint
+   (how far back rules look, not how far forward bookings go). Needs deciding before 1.6 builds
+   calendar navigation, or the grid will happily page into 2030.
+6. Should `get_driver` get a lifespan shutdown hook to dispose the engine? Harmless for SQLite;
+   Stream 2's Postgres driver will want it.
+7. Should the engine return *all* rule violations rather than the first? Today `evaluate` short-
+   circuits, so a booking that is both too long and after closing reports only the duration problem.
+   Changing this after 1.7 depends on the response shape would be a breaking change.
