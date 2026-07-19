@@ -1,3 +1,7 @@
+---
+description: Auth and Admin implementation
+glob: "app/**/*"
+---
 # Stream 2: Auth, Access & Admin (The "Gatekeepers")
 
 ## Objective

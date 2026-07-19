@@ -41,7 +41,17 @@ Confirm which account a key authenticates as with `ssh -T git@github-nirradi` (e
 
 * **Never** rewrite `origin` back to a bare `github.com` URL — it silently breaks pushing.
 * Clone/add remotes using the `github-nirradi` alias.
-* `gh` CLI is separately authenticated and already active as `nirradi`, so `gh pr create` etc. work
-  without the alias. Only **git transport** (push/fetch) needs it.
+* The `gh` CLI is authenticated for **both** accounts and its active account is global, machine-wide
+  state that can be left on `optinirr`. If `gh pr create` fails with `must be a collaborator`, the
+  active account is wrong. Check and fix with:
+
+  ```
+  gh auth status          # look for "Active account: true"
+  gh auth switch --user nirradi
+  ```
+
+  Do this before any `gh` write operation (`pr create`, `pr merge`, `api -X POST`). Note this is
+  separate from the SSH alias above: **git transport** needs the alias, **gh** needs the active
+  account. Both must point at `nirradi`.
 * Workflow files under `.github/workflows/` push fine over SSH. The `gh` OAuth token lacks the
   `workflow` scope, so do **not** fall back to an HTTPS remote — that would reintroduce the block.

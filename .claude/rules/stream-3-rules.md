@@ -1,3 +1,8 @@
+---
+description: Constraints and plans for the core Rule Engine
+glob: "rules/**/*"
+---
+
 # Stream 3: Rule Engine Phase 1 (The "Brain Skeleton")
 
 ## Objective

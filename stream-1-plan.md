@@ -36,7 +36,7 @@ without special-casing.
 
 Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed before merge.
 
-- [ ] **1.1 — Backend data layer.** Add SQLAlchemy to `app/backend/requirements.txt`. Define the
+- [x] **1.1 — Backend data layer.** _(DONE — PR #2)_ Add SQLAlchemy to `app/backend/requirements.txt`. Define the
   `Booking` model (`id`, `resource_id`, `user_id`, `start_at`, `end_at`, `status`, `created_at`,
   `cancelled_at`; UTC-aware). `status` is `confirmed | cancelled`.
   Create `app/backend/app/db/` with a `BookingDriver` protocol and a `SQLiteBookingDriver`
@@ -106,6 +106,12 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
 - **Per task:** CI must pass (`npm run lint`, `npm run build`; `black --check .`, `flake8 .`, `pytest`).
 - **Overlap safety (1.1):** beyond unit tests, a concurrency test firing two overlapping
   `create_booking` calls at once must result in exactly one success and one `OverlapError`.
+- **Negative controls on any concurrency assertion:** "two racing calls yield one success" is
+  satisfiable by a test that never actually races — two threads started together will typically see
+  the winner finish before the loser issues its first statement, so the test passes even with the
+  locking removed. Any such test must be validated by breaking the invariant (e.g. stripping
+  `BEGIN IMMEDIATE`) and confirming it **fails**. Force the interleaving explicitly rather than
+  relying on thread scheduling. Verified for 1.1: without the guard the test reports 2 successes.
 - **End-to-end (after 1.8):** run backend and frontend, book an empty slot → success and it appears on
   the grid; book a 3-hour range → friendly rule denial, nothing persisted; book over an existing
   booking → 409 conflict message; cancel a booking → slot frees and rebooks cleanly; reload →

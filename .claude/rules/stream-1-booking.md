@@ -1,3 +1,7 @@
+---
+description: Full stack E2E booking flow implementation
+glob: "app/**/*"
+---
 # Stream 1: Core E2E Booking (The "Happy/Sad Path")
 
 ## Objective
