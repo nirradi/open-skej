@@ -134,7 +134,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   and the conflict message for 409, visually distinct from an unexpected error. Loading and disabled
   states while in flight.
 
-- [ ] **1.8 — Cancel UI.** Selecting an existing booking offers a cancel action with a confirmation
+- [x] **1.8 — Cancel UI.** _(DONE — PR #13)_ Selecting an existing booking offers a cancel action with a confirmation
   step. On success the slot returns to available and is immediately rebookable without a page reload.
 
 - [ ] **1.9 — Playwright E2E suite.** New `app/e2e/` directory with its own `package.json` and
