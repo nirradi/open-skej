@@ -86,3 +86,25 @@ class BookingConflict(BaseModel):
 
     error: Literal["overlap"] = "overlap"
     message: str
+
+
+class BookingNotFound(BaseModel):
+    """The 404 body for a cancel targeting an id that does not exist."""
+
+    error: Literal["not_found"] = "not_found"
+    message: str
+
+
+class BookingAlreadyCancelled(BaseModel):
+    """The 409 body for cancelling a booking that is already cancelled.
+
+    Shares its status code with :class:`BookingConflict` but not its ``error``
+    value, which is exactly why the discriminator exists: both are 409 on the
+    same resource, yet one means "somebody else holds this slot" and the other
+    means "your own cancel already went through". The second is benign — a
+    double-clicked button — and the UI should treat it as success rather than
+    as a collision worth warning about.
+    """
+
+    error: Literal["already_cancelled"] = "already_cancelled"
+    message: str
