@@ -92,7 +92,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   flag defaulting to `false`, so the calendar sees only live bookings by default. Cancellation does
   **not** route through the rule engine. `TestClient` tests including cancel-then-rebook-same-slot.
 
-- [ ] **1.4b — Booking horizon rules (backend).** Add two rules to `app/backend/app/rules_stub.py`
+- [x] **1.4b — Booking horizon rules (backend).** _(DONE — PR #7)_ Add two rules to `app/backend/app/rules_stub.py`
   following the existing pattern: reject bookings starting in the past, and reject bookings starting
   more than `BOOKING_HORIZON_DAYS` (60) ahead. Both are module-level constants and both produce
   friendly messages. The backend is authoritative — the calendar must not be the only thing stopping
@@ -106,7 +106,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   client for the two endpoints, including a discriminated result type so 422 and 409 are distinguishable
   from a network failure. Keep `npm run lint` and `npm run build` green.
 
-- [ ] **1.5b — Frontend unit tests.** `app/frontend` currently has **no test runner**, so the API
+- [x] **1.5b — Frontend unit tests.** _(DONE — PR #8)_ `app/frontend` currently has **no test runner**, so the API
   client's outcome classification — the most failure-prone logic in the frontend — is unverified.
   Add Vitest, a `test` script, and a `frontend-test` step to CI. Cover `src/api/client.ts` against a
   mocked `fetch`:
@@ -187,6 +187,31 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
    unreachable.
 3. ~~Should the engine return all rule violations rather than the first?~~ **First only** — response
    shape stays a single `message`.
+
+### Interface drift with Stream 3 — needs a decision before integration
+
+`.claude/rules/stream-3-rules.md` was rewritten after task 1.2 shipped, and the real engine's
+interface has moved. Task 1.2's entire justification was mirroring that spec so Stream 3 could drop
+in without touching call sites; that is **no longer true**. Current divergence:
+
+| Concern | Stub today (`app/backend/app/rules_stub.py`) | Stream 3 spec now |
+|---|---|---|
+| Verdict model | `RuleResult(allowed: bool, message: str)` | `RuleResult(pass: bool, fail_reason: str)` |
+| Context | one `Context(history, now)` | `UserContext`, `CalendarContext`, `HistoryContext` split |
+| Rule unit | plain functions in a `RULES` tuple | `BaseRule` ABC with `evaluate(request, user, calendar, history, **kwargs)` |
+| Entry point | `evaluate(booking, context)` | `evaluate_request()` |
+| Location | `app/backend/` | isolated in `/rules` (no `os`/`sys` imports) |
+
+Both fail fast on the first denial, so the *behaviour* still matches — this is a shape mismatch, not
+a semantic one, and it does not block Stream 1. The adapter lives in one place
+(`app/routers/bookings.py` builds the request and reads the verdict), so the cost of the drift is
+bounded. Decide at integration whether to (a) retrofit the stub to the new names now, (b) leave it
+and write a thin adapter when Stream 3 lands, or (c) let Stream 3 own the adapter. Option (b) is
+cheapest given the frontend already depends on the `message` copy flowing through unchanged.
+
+Note `DEFERRED.md` §1 **confirms** the stub's approach in one respect: until config-based rejection
+moves into `Resource` DB columns, the rule engine is the sole entity running booking validations, so
+availability hours belong as Python rules exactly where 1.2 put them.
 
 ### Still open
 

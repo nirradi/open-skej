@@ -29,3 +29,5 @@ When acting as the Lead Architect (Opus), you must strictly follow this loop wit
 NOTES: 
 A. If there's no plan file, it could be that you are also the first to create the plan. Go ahead and do that, and wait for approval before starting implementation loop.  
 B. Continue with the plan until hitting hard permission blockers, or at least 2-3 product facing question. Continue on other tasks as much as possible and collect open questions instead of blocking the entire flow. 
+
+Out of Scope / Deferred: Always check DEFERRED.md before planning a task or writing a feature. If a major feature is listed there or similarly will be covered by a deferred implementation, make a not of it and move on. If the user states that something is a good idea for later, add it to the deffered md.
