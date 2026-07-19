@@ -15,7 +15,13 @@ from app.db import SQLiteBookingDriver
 from app.dependencies import get_driver
 from app.main import app
 
-DAY = datetime(2026, 7, 20, tzinfo=timezone.utc)
+# Tomorrow, not a fixed date. These tests drive the real endpoint, which calls
+# ``evaluate`` without a Context and so judges the booking horizon against the
+# wall clock. A hardcoded date would start failing as "that time has already
+# passed" the day it went by.
+DAY = (datetime.now(timezone.utc) + timedelta(days=1)).replace(
+    hour=0, minute=0, second=0, microsecond=0
+)
 
 
 def at(hour: int, minute: int = 0) -> datetime:

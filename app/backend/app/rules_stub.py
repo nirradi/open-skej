@@ -15,7 +15,7 @@ changing: they build a ``BookingRequest``, optionally a ``Context``, and read
 stay friendly and human-readable — never an error code or an exception repr.
 """
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -27,6 +27,7 @@ from app.db.constants import DEFAULT_RESOURCE_ID, DEFAULT_USER_ID
 MAX_BOOKING_DURATION = timedelta(hours=2)
 AVAILABILITY_OPEN = time(6, 0)
 AVAILABILITY_CLOSE = time(23, 0)
+BOOKING_HORIZON_DAYS = 60
 
 ALLOWED_MESSAGE = "Looks good — this slot is available."
 
@@ -62,11 +63,24 @@ class Context(BaseModel):
     purely local to the request and ignore it, but rules like "no more than twice
     a week" need it, so callers should populate it and the parameter exists from
     day one — that way Stream 3 landing does not change a single call site.
+
+    ``now`` is the clock the time-relative rules judge against. It lives here
+    rather than being read inline with ``datetime.now()`` for two reasons: rules
+    stay pure functions of ``(request, context)``, and tests can pin it instead
+    of racing the wall clock. It defaults to the current UTC instant, so no
+    existing caller has to pass it.
     """
 
     model_config = ConfigDict(frozen=True)
 
     history: tuple[BookingRequest, ...] = Field(default=())
+    now: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def _check_now_is_aware(self) -> "Context":
+        if self.now.tzinfo is None:
+            raise ValueError("now must be timezone-aware")
+        return self
 
 
 class RuleResult(BaseModel):
@@ -144,9 +158,64 @@ def _check_availability_hours(booking: BookingRequest, context: Context) -> Rule
     return RuleResult(allowed=True, message=ALLOWED_MESSAGE)
 
 
+def _check_not_in_the_past(booking: BookingRequest, context: Context) -> RuleResult:
+    """Bookings may not start before ``context.now``.
+
+    The bound is inclusive of the present instant: a booking starting exactly
+    now is allowed, one starting a minute ago is not. Only ``start_at`` is
+    tested — a booking already under way is out of bounds regardless of when it
+    ends, and ``end_at`` is guaranteed to be later anyway.
+    """
+    if booking.start_at < context.now:
+        return RuleResult(
+            allowed=False,
+            message=(
+                "That time has already passed, so it can't be booked."
+                " Please pick a time in the future."
+            ),
+        )
+    return RuleResult(allowed=True, message=ALLOWED_MESSAGE)
+
+
+def _check_within_horizon(booking: BookingRequest, context: Context) -> RuleResult:
+    """Bookings may not start more than BOOKING_HORIZON_DAYS ahead of ``now``.
+
+    The bound is inclusive: exactly BOOKING_HORIZON_DAYS ahead is the last
+    bookable instant. Measured from ``start_at`` only, so a booking that begins
+    inside the horizon is fine even if it runs a little past it.
+    """
+    horizon = context.now + timedelta(days=BOOKING_HORIZON_DAYS)
+    if booking.start_at > horizon:
+        return RuleResult(
+            allowed=False,
+            message=(
+                f"Bookings can only be made up to {BOOKING_HORIZON_DAYS} days ahead,"
+                " and this one is further out than that."
+                " Please pick an earlier date."
+            ),
+        )
+    return RuleResult(allowed=True, message=ALLOWED_MESSAGE)
+
+
 # The active rule canon, run in order. Stream 3 fetches this list per Space
 # instead of hardcoding it.
-RULES = (_check_max_duration, _check_availability_hours)
+#
+# Order is deliberate, because ``evaluate`` short-circuits on the first denial
+# and so decides which single message a user sees when a request breaks several
+# rules at once. The two date rules run first: they reject a booking on *when*
+# it is, which no amount of shortening or shifting within the day can fix.
+# Telling someone to trim a 3-hour booking that sits 90 days out would send them
+# to fix the one thing that isn't the problem — they'd shorten it, resubmit, and
+# be refused again. Duration and availability hours are both remedies the user
+# can apply to a date that is otherwise bookable, so they come after. Past and
+# horizon are mutually exclusive, so their relative order never actually
+# arbitrates a message; past is first only because it reads chronologically.
+RULES = (
+    _check_not_in_the_past,
+    _check_within_horizon,
+    _check_max_duration,
+    _check_availability_hours,
+)
 
 
 def evaluate(booking: BookingRequest, context: Context | None = None) -> RuleResult:
