@@ -85,7 +85,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   message, an `OverlapError` returns **409** with a distinct message. Enable CORS for the Vite dev
   origin. `TestClient` tests for success, rule denial, and overlap conflict.
 
-- [ ] **1.4 — Cancel endpoint.** `DELETE /bookings/{id}` calling `cancel_booking`, returning 404 for an
+- [x] **1.4 — Cancel endpoint.** _(DONE — PR #5)_ `DELETE /bookings/{id}` calling `cancel_booking`, returning 404 for an
   unknown id and 409 for an already-cancelled booking. `GET /bookings` gains an `include_cancelled`
   flag defaulting to `false`, so the calendar sees only live bookings by default. Cancellation does
   **not** route through the rule engine. `TestClient` tests including cancel-then-rebook-same-slot.
