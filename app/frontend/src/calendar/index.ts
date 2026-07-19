@@ -6,6 +6,7 @@ export {
   canGoToNextWeek,
   canGoToPreviousWeek,
   DAYS_PER_WEEK,
+  formatClockTime,
   slotTestId,
   startOfWeek,
   toDateKey,

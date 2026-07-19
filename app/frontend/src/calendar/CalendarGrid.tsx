@@ -35,6 +35,7 @@ import {
   canGoToPreviousWeek,
   DAYS_PER_WEEK,
   daysOfWeek,
+  formatClockTime,
   intervalsOverlap,
   isSlotBeyondHorizon,
   isSlotInPast,
@@ -77,6 +78,20 @@ export interface CalendarGridProps {
   config?: CalendarConfig
   /** Notified whenever the selected range changes. Task 1.7's entry point. */
   onSelectionChange?: (interval: SelectedInterval | null) => void
+  /**
+   * Bump to refetch the displayed week and drop the current selection.
+   *
+   * Task 1.7 raises this after a booking is created, and after an `overlap`
+   * denial — which means the week on screen is stale and the conflicting
+   * booking is not yet drawn. Refetching rather than splicing the new booking
+   * in locally keeps the grid showing what the server actually holds; the cost
+   * is one request, and the benefit is that the optimistic and authoritative
+   * views cannot drift apart.
+   *
+   * The selection is dropped with it because the slots it covers have just
+   * become unbookable in both cases — either we booked them or somebody else did.
+   */
+  refreshToken?: number
 }
 
 /**
@@ -101,7 +116,12 @@ const weekLabelFormat = new Intl.DateTimeFormat(undefined, {
   year: 'numeric',
 })
 
-export function CalendarGrid({ now: nowProp, config, onSelectionChange }: CalendarGridProps) {
+export function CalendarGrid({
+  now: nowProp,
+  config,
+  onSelectionChange,
+  refreshToken = 0,
+}: CalendarGridProps) {
   const resolvedConfig = config ?? calendarConfig
   const [fallbackNow] = useState(() => new Date())
   const now = nowProp ?? fallbackNow
@@ -112,8 +132,18 @@ export function CalendarGrid({ now: nowProp, config, onSelectionChange }: Calend
   const [anchor, setAnchor] = useState<{ dateKey: string; index: number } | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
 
+  // Drop the selection when the parent asks for a refresh. Adjusted during
+  // render rather than in an effect: an effect would let one frame paint with a
+  // selection highlighting slots that are about to come back as booked.
+  const [seenRefreshToken, setSeenRefreshToken] = useState(refreshToken)
+  if (seenRefreshToken !== refreshToken) {
+    setSeenRefreshToken(refreshToken)
+    setSelection(null)
+    setAnchor(null)
+  }
+
   /** Identifies the fetch the grid currently wants an answer to. */
-  const requestKey = `${weekStart.getTime()}:${reloadNonce}`
+  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}`
   const load: LoadState | { status: 'loading' } =
     settled !== null && settled.key === requestKey ? settled : { status: 'loading' }
 
@@ -420,7 +450,7 @@ export function CalendarGrid({ now: nowProp, config, onSelectionChange }: Calend
                       className="pointer-events-none absolute inset-x-0.5 overflow-hidden rounded bg-indigo-500 px-1 text-[10px] leading-tight text-white"
                       style={{ top, height: Math.max(0, bottom - top) }}
                     >
-                      {start.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                      {formatClockTime(start)}
                     </div>
                   )
                 })}

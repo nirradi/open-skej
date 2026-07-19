@@ -140,6 +140,21 @@ export function bookingTestId(bookingId: number): string {
   return `booking-${bookingId}`
 }
 
+/**
+ * A wall-clock time as `HH:MM`, in the browser's local timezone.
+ *
+ * Forced to 24-hour rather than left to the locale, so that every time in the
+ * UI reads the same way. `formatSlotLabel` renders the time axis as `HH:MM`
+ * unconditionally; a locale-dependent formatter alongside it produced a grid
+ * whose axis said `12:00` while the booking sitting on that row said
+ * `12:00 PM`, which looks like two different times at a glance.
+ */
+export function formatClockTime(value: Date): string {
+  const hh = String(value.getHours()).padStart(2, '0')
+  const mm = String(value.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
 /** The half-open interval `[start, end)` a slot occupies. */
 export function slotInterval(
   day: Date,
