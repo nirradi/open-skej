@@ -87,7 +87,7 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
 
 ## Phase A — Backend (start now; zero Stream 1 file overlap)
 
-- [ ] **2.1 — Postgres + Alembic foundation.** Root `docker-compose.yml` with Postgres 16 (named
+- [x] **2.1 — Postgres + Alembic foundation.** _(DONE — merged as `7fbdbbf`)_ Root `docker-compose.yml` with Postgres 16 (named
   volume, dev credentials). Append `psycopg[binary]`, `alembic`, `pydantic-settings` to
   `requirements.txt`. New `app/backend/app/settings.py` — a `pydantic-settings` `Settings` reading
   `DATABASE_URL`, `AUTH0_DOMAIN`, `AUTH0_API_AUDIENCE`, CORS origins from env/`.env`. New
@@ -98,7 +98,7 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
   Tests: `alembic upgrade head` then `downgrade base` runs clean. Postgres tests **skip** when
   `DATABASE_URL` is unset, so Stream 1's SQLite suite still runs standalone.
 
-- [ ] **2.2 — Identity schema.** New `app/backend/app/identity/models.py`, sharing `Base` from
+- [x] **2.2 — Identity schema.** _(DONE — merged as `20a301c`)_ New `app/backend/app/identity/models.py`, sharing `Base` from
   `app/db/models.py` and reusing its `UtcDateTime` and `utcnow` rather than redefining them:
   - `users` — `id`, `auth0_sub` (unique), `email`, `name`, `created_at`, `last_login_at`.
   - `spaces` — `id`, `public_id` (unique, unguessable), `name`, `description`,
@@ -120,6 +120,17 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
   the `users` row, refreshes `last_login_at`, and **claims any pending invitation matching the
   verified email**, creating the membership at the invited role. Additive wiring in `main.py`: an
   auth-error handler returning **401 not 500**, and `GET /me`.
+
+  **Security requirement — an invitation may only be claimed when the token's `email_verified` claim
+  is `true`.** Task 2.2 deliberately made `users.email` non-unique, and correctly so: Auth0 issues
+  distinct `sub` values for a database signup and a Google login of the same address, so a unique
+  constraint would turn an ordinary second login into a hard failure. The consequence is that an
+  email address does **not** identify a person. Without an `email_verified` gate, anyone could sign
+  up through the database connection using a victim's address, never confirm it, and inherit every
+  Space that victim was invited to — a full account-takeover path into private Spaces. An unverified
+  address must claim nothing and fall back to the normal access-request flow. A test must assert
+  exactly this: an unverified token matching a pending invitation yields **no** membership and
+  leaves the invitation `pending`.
   Tests generate an RSA keypair in-process and serve a stub JWKS — no network, no secrets. Cover as
   **separate assertions**: valid; expired; wrong audience; wrong issuer; unknown signing key;
   malformed header; missing header; `alg: none` rejected; HS256-signed-with-the-RSA-public-key
