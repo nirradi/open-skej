@@ -10,8 +10,13 @@
  * step exists to remove.
  */
 
-import { formatClockTime } from '../calendar'
-import type { SelectedInterval } from '../calendar'
+// Imported from the leaf module rather than the `../calendar` barrel. The barrel
+// re-exports `CalendarGrid`, which reaches `api/client.ts` and its
+// `import.meta.env` — so a barrel import drags a Vite-only dependency into
+// anything that touches this file, including the Playwright suite, which runs
+// in plain Node.
+import { formatClockTime } from '../calendar/week'
+import type { SelectedInterval } from '../calendar/CalendarGrid'
 
 const MS_PER_MINUTE = 60 * 1000
 const MINUTES_PER_HOUR = 60
