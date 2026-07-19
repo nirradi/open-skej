@@ -28,17 +28,28 @@ task below must keep CI green.
 | E2E tests | Standalone Playwright suite in `app/e2e/` | Per `.claude/rules/stream-1-booking.md`. Kept out of `app/frontend` so it can drive the real backend, not a mocked one. |
 | Error discrimination | An `error` field in the body, not the status code alone | **FastAPI already returns 422 for request-validation failures**, so a client switching on `status === 422` would render a Pydantic error dump as friendly rule copy. Rule denials carry `error: "rule_denied"`, overlaps carry `error: "overlap"`, validation errors carry no `error` key. |
 
-**API contract for the frontend (established in 1.3 — tasks 1.5/1.7/1.8 must follow it):**
+**API contract for the frontend (established in 1.3, extended in 1.4 — tasks 1.5/1.7/1.8 must follow it):**
 
 | Outcome | Status | Body |
 |---|---|---|
 | Created | 201 | `BookingRead` |
+| Cancelled | 200 | `BookingRead` (status `cancelled`, `cancelled_at` set) |
 | Rule denial | 422 | `{"error": "rule_denied", "message": <friendly copy>}` |
 | Overlap conflict | 409 | `{"error": "overlap", "message": <friendly copy>}` |
+| Cancel unknown id | 404 | `{"error": "not_found", "message": <friendly copy>}` |
+| Cancel already-cancelled | 409 | `{"error": "already_cancelled", "message": <friendly copy>}` |
 | Malformed request | 422 | FastAPI validation detail, **no `error` key** |
 | Bad window / naive datetime | 400 | `{"detail": ...}` |
 
-Branch on the `error` field, never on the status code alone.
+Branch on the `error` field, never on the status code alone. 1.4 makes this
+non-optional rather than merely advisable: **two distinct 409s now exist** on the same
+resource. `overlap` means somebody else holds the slot and the calendar is stale;
+`already_cancelled` means the user's own cancel already landed, which 1.8 should treat
+as success (a double-clicked button), not as a collision worth warning about.
+
+`DELETE /bookings/{id}` returns **200 with the cancelled `BookingRead`, not 204** — the
+client is patching a calendar already on screen and wants the authoritative `status` and
+`cancelled_at` without a second round trip.
 
 Bookings are **variable length** — the grid's slot size governs selection granularity, not the
 duration a booking is allowed to be. The overlap predicate is the half-open interval test

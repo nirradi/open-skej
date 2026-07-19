@@ -163,6 +163,110 @@ def test_get_excludes_cancelled_bookings(client, driver) -> None:
     assert [b["id"] for b in response.json()] == [live.id]
 
 
+def test_get_includes_cancelled_when_asked(client, driver) -> None:
+    live = driver.create_booking(start_at=at(10), end_at=at(11))
+    cancelled = driver.create_booking(start_at=at(12), end_at=at(13))
+    driver.cancel_booking(cancelled.id)
+
+    response = client.get(
+        "/bookings",
+        params={"from": iso(at(0)), "to": iso(at(23)), "include_cancelled": "true"},
+    )
+
+    assert response.status_code == 200
+    returned = {b["id"]: b["status"] for b in response.json()}
+    assert returned == {live.id: "confirmed", cancelled.id: "cancelled"}
+
+
+def test_cancel_returns_the_cancelled_booking(client, driver) -> None:
+    """200 with the row, not 204: the client needs status and cancelled_at back."""
+    created = client.post("/bookings", json={"start_at": iso(at(10)), "end_at": iso(at(11))}).json()
+
+    response = client.delete(f"/bookings/{created['id']}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == created["id"]
+    assert body["status"] == "cancelled"
+    assert body["cancelled_at"] is not None
+
+    stored = all_bookings(driver, include_cancelled=True)
+    # Soft delete: the row survives, because Stream 3's rules count history.
+    assert [b.id for b in stored] == [created["id"]]
+
+
+def test_cancel_unknown_id_returns_404(client) -> None:
+    response = client.delete("/bookings/4242")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "not_found"
+    assert response.json()["message"]
+
+
+def test_cancel_twice_returns_409(client) -> None:
+    created = client.post("/bookings", json={"start_at": iso(at(10)), "end_at": iso(at(11))}).json()
+    assert client.delete(f"/bookings/{created['id']}").status_code == 200
+
+    response = client.delete(f"/bookings/{created['id']}")
+
+    assert response.status_code == 409
+    # Same status as an overlap conflict, different discriminator — the whole
+    # reason the client is told to branch on ``error`` and not on the code.
+    assert response.json()["error"] == "already_cancelled"
+
+
+def test_cancel_does_not_run_the_rule_engine(client) -> None:
+    """The rule engine must not be consulted on the way out.
+
+    Asserts the ordering directly rather than via a side effect: any call to
+    ``evaluate`` from the cancel path raises, so wiring the engine in here fails
+    the test outright instead of merely changing a status code.
+    """
+    created = client.post("/bookings", json={"start_at": iso(at(10)), "end_at": iso(at(11))}).json()
+
+    def exploding_evaluate(_request):
+        raise AssertionError("the rule engine must not run on cancel")
+
+    import app.routers.bookings as bookings_module
+
+    original = bookings_module.evaluate
+    bookings_module.evaluate = exploding_evaluate
+    try:
+        response = client.delete(f"/bookings/{created['id']}")
+    finally:
+        bookings_module.evaluate = original
+
+    assert response.status_code == 200
+
+
+def test_cancelled_slot_can_be_rebooked_over_http(client, driver) -> None:
+    """The point of the soft delete: cancelling frees the interval end to end.
+
+    Exercised entirely through HTTP rather than the driver, because that is the
+    path task 1.8's cancel-then-rebook UI will take.
+    """
+    first = client.post("/bookings", json={"start_at": iso(at(10)), "end_at": iso(at(11))}).json()
+
+    # Same slot while the booking is live: refused.
+    blocked = client.post("/bookings", json={"start_at": iso(at(10)), "end_at": iso(at(11))})
+    assert blocked.status_code == 409
+    assert blocked.json()["error"] == "overlap"
+
+    assert client.delete(f"/bookings/{first['id']}").status_code == 200
+
+    # Same slot again now that it is free: accepted.
+    rebooked = client.post("/bookings", json={"start_at": iso(at(10)), "end_at": iso(at(11))})
+    assert rebooked.status_code == 201
+    assert rebooked.json()["id"] != first["id"]
+
+    # The calendar sees only the new booking...
+    live = client.get("/bookings", params={"from": iso(at(0)), "to": iso(at(23))}).json()
+    assert [b["id"] for b in live] == [rebooked.json()["id"]]
+
+    # ...while both rows are still on disk.
+    assert len(all_bookings(driver, include_cancelled=True)) == 2
+
+
 def test_get_rejects_an_inverted_window(client) -> None:
     response = client.get("/bookings", params={"from": iso(at(12)), "to": iso(at(9))})
 
