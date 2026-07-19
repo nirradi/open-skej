@@ -14,9 +14,16 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.db.models import Base
+from app.db.models import Base, UtcDateTime
 from app.migration_filter import include_object
 from app.settings import get_settings
+
+# Imported for its side effect: registering Stream 2's identity models on
+# ``Base.metadata``. Autogenerate compares the metadata against the database, so
+# a model package that is never imported produces an empty migration rather than
+# an error — a failure that is easy to miss. `noqa: F401` because the names
+# themselves are unused here.
+import app.identity  # noqa: F401
 
 config = context.config
 
@@ -24,6 +31,25 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+
+def render_item(type_: str, obj: object, autogen_context) -> object:
+    """Make autogenerate emit an import for our custom ``UtcDateTime`` type.
+
+    Without this, a timestamp column renders as the bare text
+    ``app.db.models.UtcDateTime()`` while the generated file imports only
+    ``sqlalchemy`` — so the migration raises ``NameError: name 'app' is not
+    defined`` the moment Alembic tries to load it. Every migration touching a
+    timestamp would be born broken and need the same hand-fix, so the import is
+    registered here once instead.
+
+    Returning ``False`` falls back to Alembic's default rendering for everything
+    else.
+    """
+    if type_ == "type" and isinstance(obj, UtcDateTime):
+        autogen_context.imports.add("from app.db.models import UtcDateTime")
+        return "UtcDateTime()"
+    return False
 
 
 def _database_url() -> str:
@@ -44,6 +70,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_object=include_object,
+        render_item=render_item,
         # Detect column type changes; off by default and easy to miss otherwise.
         compare_type=True,
     )
@@ -66,6 +93,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             include_object=include_object,
+            render_item=render_item,
             compare_type=True,
         )
 
