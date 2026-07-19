@@ -12,9 +12,31 @@
  *
  * ## What this component does not do
  *
- * It selects; it does not book. Task 1.7 wires `onSelectionChange` to
- * `createBooking`, and 1.8 makes booking blocks clickable for cancellation —
- * which is why they are `pointer-events-none` today.
+ * It selects; it does not book and it does not cancel. It reports two kinds of
+ * selection upward — a free range via `onSelectionChange`, and an existing
+ * booking via `onBookingSelect` — and leaves both round trips to the panels.
+ *
+ * ## Why booking blocks can be clicked without eating the drag (task 1.8)
+ *
+ * Booking blocks are absolutely positioned over the slot buttons, so until 1.8
+ * they carried `pointer-events-none` to stop them shadowing the drag handlers
+ * underneath. Simply removing that would be a real hazard — except that a block
+ * can only ever cover slots that are already unselectable.
+ *
+ * The block's rectangle is derived from the same interval that `blockedReason`
+ * reads: every slot the interval overlaps reports `'booked'` and renders
+ * `disabled`, and the block is laid out from exactly those minutes. So every
+ * pixel a block occupies belongs to a slot that would have refused the drag
+ * anyway, and the events it now intercepts are events that previously did
+ * nothing. Dragging *past* a booking is unchanged too: `rangeBetween` already
+ * refused to span a blocked slot, so a range that stopped short of a booking
+ * before still stops short of it now.
+ *
+ * That invariant — a block never covers a selectable slot — is what makes this
+ * safe, so it is asserted directly in `CalendarGrid.test.tsx` rather than left
+ * to this comment. jsdom has no layout and `fireEvent` dispatches straight at
+ * its target, so no test can observe CSS hit-testing; testing the invariant is
+ * the thing that actually holds the guarantee up.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
@@ -79,17 +101,30 @@ export interface CalendarGridProps {
   /** Notified whenever the selected range changes. Task 1.7's entry point. */
   onSelectionChange?: (interval: SelectedInterval | null) => void
   /**
+   * Notified whenever the selected *existing booking* changes. Task 1.8's entry
+   * point, and the mirror image of `onSelectionChange`: one reports free time
+   * the user wants, the other reports booked time the user may want back.
+   *
+   * The two are mutually exclusive — selecting either clears the other — because
+   * a single panel column cannot sensibly offer "book this" and "cancel that" at
+   * the same time.
+   */
+  onBookingSelect?: (booking: Booking | null) => void
+  /**
    * Bump to refetch the displayed week and drop the current selection.
    *
    * Task 1.7 raises this after a booking is created, and after an `overlap`
    * denial — which means the week on screen is stale and the conflicting
-   * booking is not yet drawn. Refetching rather than splicing the new booking
-   * in locally keeps the grid showing what the server actually holds; the cost
-   * is one request, and the benefit is that the optimistic and authoritative
-   * views cannot drift apart.
+   * booking is not yet drawn. Task 1.8 raises it after a cancellation, where the
+   * refetch is what frees the slot for rebooking without a page reload.
+   * Refetching rather than splicing the change in locally keeps the grid showing
+   * what the server actually holds; the cost is one request, and the benefit is
+   * that the optimistic and authoritative views cannot drift apart.
    *
-   * The selection is dropped with it because the slots it covers have just
-   * become unbookable in both cases — either we booked them or somebody else did.
+   * Both selections are dropped with it. For a range, the slots it covers have
+   * just become unbookable — either we booked them or somebody else did. For a
+   * booking, it has just been cancelled and is about to stop existing, so
+   * leaving it selected would offer a second cancel of a booking that is gone.
    */
   refreshToken?: number
 }
@@ -120,6 +155,7 @@ export function CalendarGrid({
   now: nowProp,
   config,
   onSelectionChange,
+  onBookingSelect,
   refreshToken = 0,
 }: CalendarGridProps) {
   const resolvedConfig = config ?? calendarConfig
@@ -131,8 +167,9 @@ export function CalendarGrid({
   const [settled, setSettled] = useState<LoadState | null>(null)
   const [anchor, setAnchor] = useState<{ dateKey: string; index: number } | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
+  const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null)
 
-  // Drop the selection when the parent asks for a refresh. Adjusted during
+  // Drop both selections when the parent asks for a refresh. Adjusted during
   // render rather than in an effect: an effect would let one frame paint with a
   // selection highlighting slots that are about to come back as booked.
   const [seenRefreshToken, setSeenRefreshToken] = useState(refreshToken)
@@ -140,6 +177,7 @@ export function CalendarGrid({
     setSeenRefreshToken(refreshToken)
     setSelection(null)
     setAnchor(null)
+    setSelectedBookingId(null)
   }
 
   /** Identifies the fetch the grid currently wants an answer to. */
@@ -244,6 +282,34 @@ export function CalendarGrid({
     onSelectionChange?.(selectedInterval)
   }, [onSelectionChange, selectedInterval])
 
+  // ---- Selecting an existing booking (to cancel it) ---------------------
+
+  /**
+   * The selected booking, resolved against the week currently loaded.
+   *
+   * Derived from an id rather than held as an object so it cannot outlive the
+   * booking it names: once a cancellation lands and the refetch returns a list
+   * without it, this resolves to `null` on its own and the cancel panel stops
+   * offering to cancel something that is already gone.
+   */
+  const selectedBooking = useMemo(
+    () => bookings.find((candidate) => candidate.id === selectedBookingId) ?? null,
+    [bookings, selectedBookingId],
+  )
+
+  useEffect(() => {
+    onBookingSelect?.(selectedBooking)
+  }, [onBookingSelect, selectedBooking])
+
+  /** Clicking a block selects it; clicking it again puts the panel away. */
+  const toggleBooking = useCallback((bookingId: number) => {
+    setSelectedBookingId((current) => (current === bookingId ? null : bookingId))
+    // A booking and a free range are two answers to the same question, so
+    // picking one retracts the other.
+    setSelection(null)
+    setAnchor(null)
+  }, [])
+
   const extendTo = useCallback(
     (dayIndex: number, index: number) => {
       if (anchor === null) return
@@ -265,6 +331,7 @@ export function CalendarGrid({
       const dateKey = toDateKey(days[dayIndex])
       setAnchor({ dateKey, index })
       setSelection({ dateKey, start: index, end: index })
+      setSelectedBookingId(null)
     },
     [blockedReason, days],
   )
@@ -300,6 +367,7 @@ export function CalendarGrid({
     setWeekStart((current) => addDays(current, deltaWeeks * DAYS_PER_WEEK))
     setSelection(null)
     setAnchor(null)
+    setSelectedBookingId(null)
   }
 
   const dayHeight = slotsPerDay * SLOT_ROW_HEIGHT_PX
@@ -434,24 +502,35 @@ export function CalendarGrid({
                   // A booking rendered on a day it did not start on is a
                   // continuation, and must not duplicate the canonical testid.
                   const isContinuation = start.getTime() < dayStart.getTime()
+                  const isSelected = booking.id === selectedBookingId
 
                   return (
-                    <div
+                    <button
                       key={booking.id}
+                      type="button"
                       data-testid={
                         isContinuation
                           ? `${bookingTestId(booking.id)}-continued`
                           : bookingTestId(booking.id)
                       }
                       data-booking-id={booking.id}
-                      // Non-interactive for now; task 1.8 makes these clickable
-                      // to cancel, at which point the drag handlers below them
-                      // need to stop being shadowed.
-                      className="pointer-events-none absolute inset-x-0.5 overflow-hidden rounded bg-indigo-500 px-1 text-[10px] leading-tight text-white"
+                      data-selected={isSelected || undefined}
+                      aria-pressed={isSelected}
+                      aria-label={`Booked ${formatClockTime(start)} to ${formatClockTime(end)}`}
+                      // Interactive as of 1.8, and safe to be: see the note at
+                      // the top of this file on why intercepting these pointer
+                      // events cannot cost the grid a drag.
+                      className={[
+                        'absolute inset-x-0.5 overflow-hidden rounded px-1 text-left text-[10px] leading-tight text-white',
+                        isSelected
+                          ? 'bg-indigo-700 ring-2 ring-indigo-900'
+                          : 'bg-indigo-500 hover:bg-indigo-600',
+                      ].join(' ')}
                       style={{ top, height: Math.max(0, bottom - top) }}
+                      onClick={() => toggleBooking(booking.id)}
                     >
                       {formatClockTime(start)}
-                    </div>
+                    </button>
                   )
                 })}
               </div>

@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 
-import { BookingPanel } from './booking'
+import type { Booking } from './api'
+import { BookingPanel, CancelPanel } from './booking'
 import { CalendarGrid, type SelectedInterval } from './calendar'
 import { assertConfigIsCoherent, calendarConfig, slotsPerDay } from './config'
 
@@ -10,19 +11,29 @@ assertConfigIsCoherent()
 /**
  * The application shell.
  *
- * Owns the two pieces of state the grid and the booking panel share: the
- * selected range, and a token telling the grid to refetch. The grid reports
- * selections upward and the panel reports changes back down, so neither has to
- * know about the other.
+ * Owns the state the grid and the two panels share: the selected free range,
+ * the selected existing booking, and a token telling the grid to refetch. The
+ * grid reports both selections upward and the panels report changes back down,
+ * so none of the three has to know about the others.
+ *
+ * There is **one** refresh token, raised by whichever panel changed something.
+ * A booking and a cancellation are the same event as far as the grid is
+ * concerned — the week on screen no longer matches the server — and a second
+ * mechanism for the second panel would be two ways to say one thing.
  */
 function App() {
   const [selection, setSelection] = useState<SelectedInterval | null>(null)
+  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null)
   const [refreshToken, setRefreshToken] = useState(0)
 
   // Memoised deliberately: the grid notifies from an effect that depends on
   // this callback, so a fresh identity each render would re-fire it endlessly.
   const handleSelectionChange = useCallback((interval: SelectedInterval | null) => {
     setSelection(interval)
+  }, [])
+
+  const handleBookingSelect = useCallback((booking: Booking | null) => {
+    setSelectedBooking(booking)
   }, [])
 
   const handleCalendarChanged = useCallback(() => {
@@ -41,9 +52,14 @@ function App() {
 
       <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
         <div className="min-w-0 flex-1">
-          <CalendarGrid onSelectionChange={handleSelectionChange} refreshToken={refreshToken} />
+          <CalendarGrid
+            onSelectionChange={handleSelectionChange}
+            onBookingSelect={handleBookingSelect}
+            refreshToken={refreshToken}
+          />
         </div>
-        <div className="lg:w-80 lg:shrink-0">
+        <div className="flex flex-col gap-4 lg:w-80 lg:shrink-0">
+          <CancelPanel booking={selectedBooking} onCalendarChanged={handleCalendarChanged} />
           <BookingPanel selection={selection} onCalendarChanged={handleCalendarChanged} />
         </div>
       </div>

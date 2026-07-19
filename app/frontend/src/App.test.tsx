@@ -128,6 +128,17 @@ describe('booking end to end through the app shell', () => {
     expect(screen.queryByTestId('booking-empty')).toBeNull()
   })
 
+  it('does not open the cancel panel for a range selection', async () => {
+    vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [] })
+    render(<App />)
+    await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
+
+    selectSlot(2, 8)
+    await screen.findByTestId('booking-confirm')
+    // The two panels answer different questions and must not both be asking.
+    expect(screen.queryByTestId('cancel-panel')).toBeNull()
+  })
+
   it('refetches on an overlap so the slot that beat the user becomes visible', async () => {
     const theirs = bookingAt(2, 10, 11)
     vi.spyOn(api, 'listBookings')
@@ -147,5 +158,150 @@ describe('booking end to end through the app shell', () => {
     await screen.findByTestId('booking-conflict')
     await waitFor(() => expect(api.listBookings).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.getByTestId(bookingTestId(theirs.id))).toBeTruthy())
+  })
+})
+
+describe('cancelling end to end through the app shell', () => {
+  /**
+   * Sets up a week that holds one booking and comes back empty after a refetch,
+   * which is what a successful cancellation looks like from the grid's side.
+   */
+  function withCancellableBooking(): Booking {
+    const existing = bookingAt(2, 10, 11)
+    vi.spyOn(api, 'listBookings')
+      .mockResolvedValueOnce({ outcome: 'ok', data: [existing] })
+      .mockResolvedValue({ outcome: 'ok', data: [] })
+    return existing
+  }
+
+  /** Clicks the block, then walks the panel's two-step confirmation. */
+  async function cancelVisibleBooking(existing: Booking) {
+    fireEvent.click(await screen.findByTestId(bookingTestId(existing.id)))
+    fireEvent.click(await screen.findByTestId('cancel-start'))
+    fireEvent.click(screen.getByTestId('cancel-confirm'))
+  }
+
+  it('frees the slot for rebooking without a page reload', async () => {
+    // The claim task 1.8 is actually making, and the one no component test can
+    // reach: the block goes away *and* the slots it held become selectable.
+    const existing = withCancellableBooking()
+    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+      outcome: 'ok',
+      data: { ...existing, status: 'cancelled', cancelled_at: NOW.toISOString() },
+    })
+
+    render(<App />)
+    // 10:00–11:00 is indices 8 and 9 from a 06:00 open at 30-minute slots.
+    await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(true))
+
+    await cancelVisibleBooking(existing)
+
+    await screen.findByTestId('cancel-success')
+    // The refetch — not a reload — is what removes it.
+    await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
+    await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(false))
+
+    // And the freed time is genuinely bookable again, not merely un-greyed.
+    selectSlot(2, 8)
+    expect(await screen.findByTestId('booking-confirm')).toBeTruthy()
+  })
+
+  it('keeps the confirmation visible after the refresh clears the selection', async () => {
+    // The `App.test.tsx` bug, in its cancel-shaped form. The refetch drops the
+    // grid's selected booking, which unmounts the summary; if the panel treated
+    // that as "the user moved on", the cancellation would land silently.
+    const existing = withCancellableBooking()
+    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+      outcome: 'ok',
+      data: { ...existing, status: 'cancelled', cancelled_at: NOW.toISOString() },
+    })
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
+    await cancelVisibleBooking(existing)
+
+    await screen.findByTestId('cancel-success')
+    // The summary is gone because the booking is gone; the receipt is not.
+    await waitFor(() => expect(screen.queryByTestId('cancel-start')).toBeNull())
+    expect(screen.getByTestId('cancel-success')).toBeTruthy()
+  })
+
+  it('treats already_cancelled as success and still frees the slot', async () => {
+    // The trap the plan calls out. A double-clicked button reaches a server that
+    // has already done the work; the 409 it answers with shares a status code
+    // with `overlap` and means the opposite thing.
+    const existing = withCancellableBooking()
+    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+      outcome: 'already_cancelled',
+      message: 'That booking has already been cancelled.',
+    })
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
+    await cancelVisibleBooking(existing)
+
+    await screen.findByTestId('cancel-success')
+    expect(screen.queryByTestId('cancel-error')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    // The end state the user wanted holds, so the calendar must show it.
+    await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
+    await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(false))
+  })
+
+  it('clears a stale block on not_found without alarming the user', async () => {
+    const existing = withCancellableBooking()
+    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+      outcome: 'not_found',
+      message: 'No booking with that id.',
+    })
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
+    await cancelVisibleBooking(existing)
+
+    await screen.findByTestId('cancel-notice')
+    expect(screen.queryByRole('alert')).toBeNull()
+    await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
+  })
+
+  it('leaves the booking on the grid when the cancel fails', async () => {
+    const existing = withCancellableBooking()
+    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+      outcome: 'failed',
+      message: "We couldn't reach the server.",
+    })
+
+    render(<App />)
+    await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
+    await cancelVisibleBooking(existing)
+
+    await screen.findByTestId('cancel-error')
+    // Nothing was cancelled, so nothing may look cancelled — the opposite
+    // mistake to the one `already_cancelled` invites.
+    expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy()
+    expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(true)
+    expect(api.listBookings).toHaveBeenCalledTimes(1)
+  })
+
+  it('still allows dragging a free range after a booking has been clicked', async () => {
+    // Regression guard at the shell level: making blocks clickable must not
+    // have cost the grid its drag-to-select.
+    const existing = bookingAt(2, 10, 11)
+    vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [existing] })
+
+    render(<App />)
+    fireEvent.click(await screen.findByTestId(bookingTestId(existing.id)))
+    await screen.findByTestId('cancel-panel')
+
+    // Index 12 is 12:00, clear of the 10:00–11:00 booking.
+    fireEvent.pointerDown(slotOn(2, 12))
+    fireEvent.pointerOver(slotOn(2, 14))
+    fireEvent.pointerUp(window)
+
+    const summary = await screen.findByTestId('booking-time')
+    expect(summary.textContent).toContain('12:00')
+    expect(summary.textContent).toContain('13:30')
+    // Picking a range puts the cancel panel away.
+    expect(screen.queryByTestId('cancel-panel')).toBeNull()
   })
 })

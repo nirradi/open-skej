@@ -223,6 +223,162 @@ describe('existing bookings', () => {
   })
 })
 
+describe('selecting a booking to cancel it', () => {
+  /** A one-hour booking on Friday at 14:00 — indices 16 and 17 at 30 minutes. */
+  const FRIDAY = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4)
+  const START = new Date(FRIDAY.getFullYear(), FRIDAY.getMonth(), FRIDAY.getDate(), 14, 0)
+
+  function withBooking(id = 11) {
+    resolveWith([booking(id, START, new Date(START.getTime() + 60 * 60_000))])
+  }
+
+  it('reports the booking when its block is clicked', async () => {
+    const onBookingSelect = vi.fn()
+    withBooking()
+    await renderGrid({ onBookingSelect })
+
+    fireEvent.click(screen.getByTestId('booking-11'))
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toMatchObject({ id: 11 })
+  })
+
+  it('reports null when the same block is clicked again', async () => {
+    const onBookingSelect = vi.fn()
+    withBooking()
+    await renderGrid({ onBookingSelect })
+
+    fireEvent.click(screen.getByTestId('booking-11'))
+    fireEvent.click(screen.getByTestId('booking-11'))
+    // Clicking through is how the panel is put away without a dismiss control
+    // that would have to reach back into the grid to clear its state.
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
+  })
+
+  it('retracts a range selection, because the two are different questions', async () => {
+    withBooking()
+    await renderGrid()
+
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerUp(window)
+    expect(selectedIndices(4)).toEqual([4])
+
+    fireEvent.click(screen.getByTestId('booking-11'))
+    expect(selectedIndices(4)).toEqual([])
+    expect(screen.getByTestId('booking-11').dataset.selected).toBe('true')
+  })
+
+  it('is retracted in turn when a drag starts on a free slot', async () => {
+    const onBookingSelect = vi.fn()
+    withBooking()
+    await renderGrid({ onBookingSelect })
+
+    fireEvent.click(screen.getByTestId('booking-11'))
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerUp(window)
+
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
+    expect(screen.getByTestId('booking-11').dataset.selected).toBeUndefined()
+  })
+
+  it('reports null once a refresh removes the booking it named', async () => {
+    const onBookingSelect = vi.fn()
+    withBooking()
+    const { rerender } = await renderGrid({ onBookingSelect, refreshToken: 0 })
+    fireEvent.click(screen.getByTestId('booking-11'))
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toMatchObject({ id: 11 })
+
+    // What a successful cancel does: the week is refetched and comes back
+    // without it. Nothing may still be offering to cancel a booking that is
+    // gone, and the freed slots must be selectable again.
+    resolveWith([])
+    await act(async () => {
+      rerender(<CalendarGrid now={NOW} onBookingSelect={onBookingSelect} refreshToken={1} />)
+    })
+    await waitFor(() => expect(screen.queryByTestId('booking-11')).toBeNull())
+
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
+    expect(slot(4, 16).disabled).toBe(false)
+  })
+
+  it('drops the selected booking on a refresh even if it is still there', async () => {
+    // A refresh means the week on screen is authoritative again, so both
+    // selections reset — the same unconditional treatment the range selection
+    // gets. Distinct from the test above: there the booking vanishes, so
+    // deriving it from the loaded list would have been enough on its own. Here
+    // it survives the refetch, and only the explicit reset drops it.
+    const onBookingSelect = vi.fn()
+    withBooking()
+    const { rerender } = await renderGrid({ onBookingSelect, refreshToken: 0 })
+    fireEvent.click(screen.getByTestId('booking-11'))
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toMatchObject({ id: 11 })
+
+    await act(async () => {
+      rerender(<CalendarGrid now={NOW} onBookingSelect={onBookingSelect} refreshToken={1} />)
+    })
+    await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
+
+    expect(screen.getByTestId('booking-11')).toBeTruthy()
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
+  })
+
+  it('does not shadow the grid with a pointer-events-none block', async () => {
+    // Deliberately a class-name assertion, and the only test here that is.
+    // jsdom performs no hit-testing, so the *effect* of `pointer-events` is
+    // unobservable in this suite: restoring `pointer-events-none` would make
+    // cancelling impossible in a browser while every behavioural test above
+    // still passed, because `fireEvent` dispatches straight at its target.
+    // Pinning the mechanism is the only guard available; task 1.9's Playwright
+    // suite is what will exercise the real thing.
+    withBooking()
+    await renderGrid()
+
+    const block = screen.getByTestId('booking-11')
+    expect(block.tagName).toBe('BUTTON')
+    expect(block.className).not.toContain('pointer-events-none')
+  })
+
+  it('drops the selected booking when the week changes', async () => {
+    const onBookingSelect = vi.fn()
+    withBooking()
+    await renderGrid({ onBookingSelect })
+    fireEvent.click(screen.getByTestId('booking-11'))
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('calendar-next-week'))
+    })
+    await waitFor(() => expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull())
+  })
+
+  it('never covers a slot that was selectable', async () => {
+    // The invariant that makes clickable blocks safe. A block sits on top of
+    // the slot buttons and now intercepts their pointer events, which would be
+    // a real hazard if it could shadow a slot the user was allowed to drag
+    // through. It cannot: the block is laid out from the same interval that
+    // makes every slot it touches `blocked === 'booked'`.
+    //
+    // jsdom has no layout and `fireEvent` dispatches straight at its target, so
+    // hit-testing itself is unobservable here. Asserting the geometric
+    // invariant is what actually holds the guarantee up.
+    withBooking()
+    await renderGrid({ config: THIRTY })
+
+    const slotHeight = parseFloat(slot(4, 0).style.height)
+    const block = screen.getByTestId('booking-11')
+    const top = parseFloat(block.style.top)
+    const bottom = top + parseFloat(block.style.height)
+
+    let covered = 0
+    for (let index = 0; index < slotsPerDayFor(THIRTY); index += 1) {
+      const slotTop = index * slotHeight
+      if (slotTop < bottom && top < slotTop + slotHeight) {
+        covered += 1
+        expect(slot(4, index).disabled).toBe(true)
+      }
+    }
+    // Non-vacuous: a block of zero height would satisfy the loop trivially.
+    expect(covered).toBe(2)
+  })
+})
+
 describe('a failed load', () => {
   it('surfaces an error instead of an empty, apparently-free calendar', async () => {
     listBookings.mockResolvedValue({
@@ -343,6 +499,21 @@ describe('selection', () => {
     // Two 30-minute slots, so the range ends at the *end* of the second.
     expect(interval.end.getHours()).toBe(9)
     expect(interval.end.getMinutes()).toBe(0)
+  })
+
+  it('still drags across free slots on a day that also has a booking', async () => {
+    // The 1.8 regression guard. Booking blocks stopped being
+    // `pointer-events-none` so they could be clicked to cancel; if that had cost
+    // the grid its drag handlers, this is what would break first.
+    const day = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4)
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 14, 0)
+    resolveWith([booking(9, start, new Date(start.getTime() + 60 * 60_000))])
+    await renderGrid()
+
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerOver(slot(4, 6))
+    fireEvent.pointerUp(window)
+    expect(selectedIndices(4)).toEqual([4, 5, 6])
   })
 
   it('clears the selection when the week changes', async () => {
