@@ -1,0 +1,37 @@
+# Local development Postgres for Stream 2.
+#
+# Stream 1's SQLite driver is unaffected by this file — it reads SKEJ_DATABASE_URL
+# and defaults to an on-disk ./skej.db. Postgres is reached through DATABASE_URL,
+# a separate variable, so bringing this service up does not change Stream 1's
+# behaviour and leaving it down does not break Stream 1's tests.
+#
+#   docker compose up -d
+#   export DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej
+#   cd app/backend && alembic upgrade head
+
+services:
+  postgres:
+    image: postgres:16
+    # No explicit container_name: compose scopes the name to the project
+    # directory, so this cannot collide with another worktree's stack.
+    environment:
+      # Development-only credentials. Nothing here is deployed; production
+      # credentials will come from the environment, never from this file.
+      POSTGRES_USER: skej
+      POSTGRES_PASSWORD: skej
+      POSTGRES_DB: skej
+    ports:
+      - "5432:5432"
+    volumes:
+      - skej-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # -U/-d are required: pg_isready otherwise probes for a role named after
+      # the container's default user and reports the server unready.
+      test: ["CMD-SHELL", "pg_isready -U skej -d skej"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  skej-postgres-data:

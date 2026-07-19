@@ -35,3 +35,14 @@ uvicorn==0.51.0
 uvloop==0.22.1
 watchfiles==1.2.0
 websockets==16.1.1
+
+# Stream 2 (task 2.1) — Postgres driver, migrations, settings.
+# Appended as a block rather than merged alphabetically so Stream 1 never sees a
+# conflict on a line it owns. Transitives are pinned too, matching the freeze
+# style of the block above.
+alembic==1.18.5
+Mako==1.3.12
+MarkupSafe==3.0.3
+psycopg[binary]==3.3.4
+psycopg-binary==3.3.4
+pydantic-settings==2.14.2

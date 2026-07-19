@@ -30,6 +30,24 @@ jobs:
     defaults:
       run:
         working-directory: app/backend
+    services:
+      # Stream 2's Alembic tests need a real Postgres. Stream 1's SQLite tests
+      # ignore it entirely — they read SKEJ_DATABASE_URL, not DATABASE_URL.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: skej
+          POSTGRES_PASSWORD: skej
+          POSTGRES_DB: skej
+        ports:
+          - 5432:5432
+        # Without this the job can reach `pytest` before Postgres accepts
+        # connections; the health check makes the runner wait.
+        options: >-
+          --health-cmd "pg_isready -U skej -d skej"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -41,6 +59,8 @@ jobs:
       - run: black --check .
       - run: flake8 .
       - run: pytest
+        env:
+          DATABASE_URL: postgresql+psycopg://skej:skej@localhost:5432/skej
 
   rule-engine:
     name: Rule Engine
