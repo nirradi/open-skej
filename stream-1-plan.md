@@ -137,7 +137,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
 - [x] **1.8 — Cancel UI.** _(DONE — PR #13)_ Selecting an existing booking offers a cancel action with a confirmation
   step. On success the slot returns to available and is immediately rebookable without a page reload.
 
-- [ ] **1.9 — Playwright E2E suite.** New `app/e2e/` directory with its own `package.json` and
+- [x] **1.9 — Playwright E2E suite.** _(DONE — PR #14)_ New `app/e2e/` directory with its own `package.json` and
   `playwright.config.ts`, driving the real Vite frontend against the real FastAPI backend (via
   `webServer` config booting both, with the backend pointed at a throwaway SQLite file). Per
   `.claude/rules/stream-1-booking.md`:
