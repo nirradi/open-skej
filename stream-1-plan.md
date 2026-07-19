@@ -26,6 +26,8 @@ task below must keep CI green.
 | Time storage | UTC in the DB, rendered in the browser's local timezone | Standard, and avoids ambiguity when Stream 2 adds multi-tenant spaces. |
 | Cancellation | Soft delete via a `status` column, not a row delete | Stream 3's real rules count booking history ("no more than twice a week"), so cancelled bookings must remain queryable. A hard delete would destroy data the rule engine needs. |
 | E2E tests | Standalone Playwright suite in `app/e2e/` | Per `.claude/rules/stream-1-booking.md`. Kept out of `app/frontend` so it can drive the real backend, not a mocked one. |
+| Booking horizon | **60 days ahead; no booking or navigation into the past** | Decided 2026-07-19. Enforced in the rule engine (authoritative) *and* by disabling calendar navigation, so the UI never offers what the backend will reject. Viewing past bookings is out of scope for this phase for both users and admins — revisit when Stream 2 adds roles. |
+| Rule denial reporting | First violation only | `evaluate` short-circuits. One message, one fix at a time. Confirmed 2026-07-19 — not revisited later, since 1.7 depends on the single-`message` response shape. |
 | Error discrimination | An `error` field in the body, not the status code alone | **FastAPI already returns 422 for request-validation failures**, so a client switching on `status === 422` would render a Pydantic error dump as friendly rule copy. Rule denials carry `error: "rule_denied"`, overlaps carry `error: "overlap"`, validation errors carry no `error` key. |
 
 **API contract for the frontend (established in 1.3, extended in 1.4 — tasks 1.5/1.7/1.8 must follow it):**
@@ -90,6 +92,15 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   flag defaulting to `false`, so the calendar sees only live bookings by default. Cancellation does
   **not** route through the rule engine. `TestClient` tests including cancel-then-rebook-same-slot.
 
+- [ ] **1.4b — Booking horizon rules (backend).** Add two rules to `app/backend/app/rules_stub.py`
+  following the existing pattern: reject bookings starting in the past, and reject bookings starting
+  more than `BOOKING_HORIZON_DAYS` (60) ahead. Both are module-level constants and both produce
+  friendly messages. The backend is authoritative — the calendar must not be the only thing stopping
+  an out-of-range booking. Unit tests including the boundary (exactly 60 days ahead is allowed,
+  60 days + 1 minute is denied) with a negative control proving the boundary tests aren't vacuous.
+  Note: "starts in the past" needs a injectable clock (default `datetime.now(timezone.utc)`) or the
+  tests will be time-dependent and flaky.
+
 - [ ] **1.5 — Frontend foundation.** Add Tailwind to `app/frontend`. Create `src/config.ts` holding
   slot size and availability hours (the single place to change granularity). Add a typed `src/api/`
   client for the two endpoints, including a discriminated result type so 422 and 409 are distinguishable
@@ -99,6 +110,10 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   existing bookings from `GET /bookings` and supporting click-and-drag across contiguous slots to select
   a variable-length range. No booking submission yet. Add stable `data-testid` hooks for slots and
   bookings — task 1.9 depends on them.
+  **Horizon:** navigation is bounded — cannot page earlier than the current week, cannot page beyond
+  60 days ahead, and the prev/next controls disable at those bounds rather than silently no-op-ing.
+  Past slots within the current week render disabled, not hidden, so the week doesn't reflow as the
+  day progresses.
 
 - [ ] **1.7 — Booking flow + states.** Wire selection to a confirm action calling `POST /bookings`.
   Render a success state and optimistic calendar update; render the denial message verbatim for 422
@@ -147,18 +162,26 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
 
 ## Open Questions (non-blocking — collected, not blocked on)
 
-1. How far into the future may a booking be made? (Rule scope is capped at one month per CLAUDE.md —
-   does the calendar hard-stop navigation there?)
-2. Should the grid show a day view / configurable number of days, or is week-only sufficient for now?
-3. Are past time slots rendered as disabled, or hidden entirely?
-4. Can a booking that has already started (or finished) be cancelled, or only future ones? Assumed
-   **any booking is cancellable** for now, since there is no auth or ownership model yet.
-5. **How far ahead may a booking be made?** Raised during 1.3 — the endpoints currently impose no
-   horizon at all. CLAUDE.md caps the *rule scope* at one month, which is a different constraint
-   (how far back rules look, not how far forward bookings go). Needs deciding before 1.6 builds
-   calendar navigation, or the grid will happily page into 2030.
+### Resolved
+
+1. ~~How far ahead may a booking be made?~~ **60 days ahead, no past** (2026-07-19). Was logged twice
+   (raised at planning and again during 1.3). Enforced in the rule engine by task 1.4b and in
+   calendar navigation by 1.6. Note this is a *different* constraint from CLAUDE.md's one-month rule
+   scope, which governs how far back rules look, not how far forward bookings go.
+2. ~~Are past time slots rendered as disabled, or hidden entirely?~~ **Disabled, not hidden** — within
+   the current week only, so the grid doesn't reflow as the day progresses. Earlier weeks are
+   unreachable.
+3. ~~Should the engine return all rule violations rather than the first?~~ **First only** — response
+   shape stays a single `message`.
+
+### Still open
+
+4. Should the grid offer a day view / configurable number of days, or is week-only sufficient?
+5. Can a booking that has already started (or finished) be cancelled, or only future ones? Assumed
+   **any booking is cancellable** for now, since there is no auth or ownership model yet. Note this
+   sits slightly awkwardly against "no booking in the past" — you cannot create one but you can
+   cancel one. Probably right, but worth a deliberate confirmation once roles exist.
 6. Should `get_driver` get a lifespan shutdown hook to dispose the engine? Harmless for SQLite;
    Stream 2's Postgres driver will want it.
-7. Should the engine return *all* rule violations rather than the first? Today `evaluate` short-
-   circuits, so a booking that is both too long and after closing reports only the duration problem.
-   Changing this after 1.7 depends on the response shape would be a breaking change.
+7. Viewing past bookings is deferred entirely this phase, for users *and* admins. When Stream 2 adds
+   roles, decide whether admins get a history view and whether ordinary users need one at all.
