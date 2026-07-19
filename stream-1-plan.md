@@ -50,7 +50,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   adjacent-but-not-overlapping case (`prev.end_at == next.start_at` must be **allowed**), and
   rebooking a slot whose prior booking was cancelled.
 
-- [ ] **1.2 — Stub rule engine + schemas.** Pydantic request/response schemas for bookings. A
+- [x] **1.2 — Stub rule engine + schemas.** _(DONE — PR #3)_ Pydantic request/response schemas for bookings. A
   `app/backend/app/rules_stub.py` exposing `evaluate(booking) -> RuleResult(allowed: bool, message: str)`,
   shaped to match the real interface in `.claude/rules/stream-3-rules.md` so Stream 3 can drop in.
   Stub logic: deny bookings longer than 2 hours, and deny bookings outside availability hours, each
