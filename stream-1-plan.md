@@ -120,7 +120,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   `assertConfigIsCoherent` rejecting a non-dividing slot size.
   **No expected outcome may be delivered by a thrown exception** — that is the client's core promise.
 
-- [ ] **1.6 — Calendar grid.** A week-view time-slot grid driven entirely by `src/config.ts`, rendering
+- [x] **1.6 — Calendar grid.** _(DONE — PR #10)_ A week-view time-slot grid driven entirely by `src/config.ts`, rendering
   existing bookings from `GET /bookings` and supporting click-and-drag across contiguous slots to select
   a variable-length range. No booking submission yet. Add stable `data-testid` hooks for slots and
   bookings — task 1.9 depends on them.
