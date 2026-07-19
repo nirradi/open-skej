@@ -101,10 +101,24 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   Note: "starts in the past" needs a injectable clock (default `datetime.now(timezone.utc)`) or the
   tests will be time-dependent and flaky.
 
-- [ ] **1.5 — Frontend foundation.** Add Tailwind to `app/frontend`. Create `src/config.ts` holding
+- [x] **1.5 — Frontend foundation.** _(DONE — PR #6)_ Add Tailwind to `app/frontend`. Create `src/config.ts` holding
   slot size and availability hours (the single place to change granularity). Add a typed `src/api/`
   client for the two endpoints, including a discriminated result type so 422 and 409 are distinguishable
   from a network failure. Keep `npm run lint` and `npm run build` green.
+
+- [ ] **1.5b — Frontend unit tests.** `app/frontend` currently has **no test runner**, so the API
+  client's outcome classification — the most failure-prone logic in the frontend — is unverified.
+  Add Vitest, a `test` script, and a `frontend-test` step to CI. Cover `src/api/client.ts` against a
+  mocked `fetch`:
+  - **409 `overlap` vs 409 `already_cancelled`** map to different outcomes.
+  - **422 `rule_denied` vs a 422 FastAPI validation body (no `error` key)** map to different
+    outcomes, and the validation `detail` never surfaces as user-facing copy.
+  - Network rejection, non-JSON body, and an unmodelled 500 all resolve to `failed` rather than throw.
+  - An unrecognised `error` discriminator resolves to `failed`, not a silent mis-map.
+  - An invalid `Date` resolves to `invalid_request` rather than throwing `RangeError`.
+  Also cover `src/config.ts`: `slotsPerDay`/`formatSlotLabel` at 30 and 10 minutes, and
+  `assertConfigIsCoherent` rejecting a non-dividing slot size.
+  **No expected outcome may be delivered by a thrown exception** — that is the client's core promise.
 
 - [ ] **1.6 — Calendar grid.** A week-view time-slot grid driven entirely by `src/config.ts`, rendering
   existing bookings from `GET /bookings` and supporting click-and-drag across contiguous slots to select
