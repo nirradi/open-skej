@@ -46,12 +46,29 @@ export const calendarConfig: CalendarConfig = {
   closeHour: 23,
 }
 
+/**
+ * Length of the bookable day in minutes, for an arbitrary config.
+ *
+ * The helpers below all take an optional `config` defaulting to the module
+ * singleton. Callers pass nothing and get the configured calendar; tests pass an
+ * explicit config to prove the "change `slotMinutes` and nothing else" promise
+ * across several slot sizes. Without the parameter that promise could only be
+ * checked by hand-editing this file, which is not something CI can do.
+ */
+export function availabilityMinutesFor(config: CalendarConfig = calendarConfig): number {
+  return (config.closeHour - config.openHour) * MINUTES_PER_HOUR
+}
+
 /** Length of the bookable day in minutes. */
-export const availabilityMinutes =
-  (calendarConfig.closeHour - calendarConfig.openHour) * MINUTES_PER_HOUR
+export const availabilityMinutes = availabilityMinutesFor()
+
+/** How many slot rows the grid renders per day, for an arbitrary config. */
+export function slotsPerDayFor(config: CalendarConfig = calendarConfig): number {
+  return Math.floor(availabilityMinutesFor(config) / config.slotMinutes)
+}
 
 /** How many slot rows the grid renders per day. */
-export const slotsPerDay = Math.floor(availabilityMinutes / calendarConfig.slotMinutes)
+export const slotsPerDay = slotsPerDayFor()
 
 /**
  * Minutes from midnight to the start of slot `index` (0-based).
@@ -59,8 +76,8 @@ export const slotsPerDay = Math.floor(availabilityMinutes / calendarConfig.slotM
  * The grid's row-to-time mapping lives here rather than in the component so that
  * a slot's identity is derived the same way everywhere it is computed.
  */
-export function slotStartMinutes(index: number): number {
-  return calendarConfig.openHour * MINUTES_PER_HOUR + index * calendarConfig.slotMinutes
+export function slotStartMinutes(index: number, config: CalendarConfig = calendarConfig): number {
+  return config.openHour * MINUTES_PER_HOUR + index * config.slotMinutes
 }
 
 /**
@@ -70,8 +87,8 @@ export function slotStartMinutes(index: number): number {
  * Constructed via the `Date` constructor rather than by adding milliseconds so
  * that a slot lands on the intended wall-clock time across a DST boundary.
  */
-export function slotStart(day: Date, index: number): Date {
-  const minutes = slotStartMinutes(index)
+export function slotStart(day: Date, index: number, config: CalendarConfig = calendarConfig): Date {
+  const minutes = slotStartMinutes(index, config)
   return new Date(
     day.getFullYear(),
     day.getMonth(),
@@ -84,8 +101,8 @@ export function slotStart(day: Date, index: number): Date {
 }
 
 /** Formats a slot index as `HH:MM` for axis labels. */
-export function formatSlotLabel(index: number): string {
-  const minutes = slotStartMinutes(index)
+export function formatSlotLabel(index: number, config: CalendarConfig = calendarConfig): string {
+  const minutes = slotStartMinutes(index, config)
   const hh = String(Math.floor(minutes / MINUTES_PER_HOUR)).padStart(2, '0')
   const mm = String(minutes % MINUTES_PER_HOUR).padStart(2, '0')
   return `${hh}:${mm}`
