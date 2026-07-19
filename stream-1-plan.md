@@ -151,7 +151,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   Each test must start from a clean DB so runs are order-independent. Add an `e2e` job to
   `.github/workflows/ci.yml` installing browsers via `npx playwright install --with-deps chromium`.
 
-- [ ] **1.10 — Runbook.** A root `README.md` section covering how to run backend + frontend together
+- [x] **1.10 — Runbook.** _(DONE — PR #15)_ A root `README.md` section covering how to run backend + frontend together
   locally, seed sample data, run the E2E suite, and change the slot configuration.
 
 ## Verification
@@ -212,6 +212,23 @@ cheapest given the frontend already depends on the `message` copy flowing throug
 Note `DEFERRED.md` §1 **confirms** the stub's approach in one respect: until config-based rejection
 moves into `Resource` DB columns, the rule engine is the sole entity running booking validations, so
 availability hours belong as Python rules exactly where 1.2 put them.
+
+### Follow-ups raised during 1.9 / 1.10
+
+- **Timezone mismatch (real, currently masked).** The grid builds slot times in the browser's local
+  timezone and serialises with `toISOString()`, while `rules_stub.py` compares the resulting **UTC**
+  wall clock against `AVAILABILITY_OPEN` / `AVAILABILITY_CLOSE`. Under a non-zero offset the two
+  disagree, so a slot the grid renders as bookable can come back `rule_denied`. The E2E suite pins
+  the browser to UTC (`playwright.config.ts`) to stay deterministic — that hides the symptom, it does
+  not fix it. Needs a product decision at Stream 3 integration: are availability hours defined in the
+  space's timezone, the user's, or UTC?
+- **Duration copy is inconsistent.** The backend renders `2 hours and 30 minutes`; the frontend
+  renders `2 hours 30 minutes`. Both appear on screen together (panel duration row beside the denial
+  message). Cosmetic, but they should agree.
+- **`app/frontend/README.md` is still the Vite starter template** and is now redundant against the
+  root `README.md`.
+- **Python version is not pinned anywhere.** CI uses 3.12; the local venvs run 3.14.4. Both pass, and
+  nothing (`.python-version`, `requires-python`) enforces a floor.
 
 ### Still open
 
