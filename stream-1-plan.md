@@ -129,7 +129,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   Past slots within the current week render disabled, not hidden, so the week doesn't reflow as the
   day progresses.
 
-- [ ] **1.7 — Booking flow + states.** Wire selection to a confirm action calling `POST /bookings`.
+- [x] **1.7 — Booking flow + states.** _(DONE — PR #12)_ Wire selection to a confirm action calling `POST /bookings`.
   Render a success state and optimistic calendar update; render the denial message verbatim for 422
   and the conflict message for 409, visually distinct from an unexpected error. Loading and disabled
   states while in flight.
