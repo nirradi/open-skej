@@ -1,4 +1,6 @@
 export { BookingPanel } from './BookingPanel'
 export type { BookingPanelProps, PanelResult } from './BookingPanel'
+export { CancelPanel } from './CancelPanel'
+export type { CancelPanelProps, CancelResult } from './CancelPanel'
 export { formatDuration, summariseInterval } from './summary'
 export type { IntervalSummary } from './summary'
