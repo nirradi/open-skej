@@ -69,7 +69,7 @@ never a rule class name. `passed=True` implies `fail_reason is None`; enforced i
 
 Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed before merge.
 
-- [ ] **3.1 — Core interfaces.** Create `rules/rules/interfaces.py` with the dataclasses above plus a
+- [x] **3.1 — Core interfaces.** _(DONE — PR #19)_ Create `rules/rules/interfaces.py` with the dataclasses above plus a
   `Weekday` enum and a `Context` aggregate. All frozen, all validated in `__post_init__`: naive
   datetimes rejected, `start_at < end_at`, `passed`/`fail_reason` consistency, `HistoryContext`
   window invariant. No `Role`/`Tier` enums — see the contract note above. No rule logic in this file.
@@ -81,6 +81,11 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   generic friendly message (never leak the traceback to the user) while logging the real error —
   a buggy rule must not 500 the booking endpoint. Tests: ordering, short-circuit (assert later rules
   are never called), empty canon passes, raising rule is contained.
+  **Also cross-check request against context** (surfaced reviewing 3.1): `Context` cannot validate
+  that `history.bookings` belong to the requesting user and resource, because the request is not
+  visible at construction time. The controller is the first place both are in scope, so it must
+  reject a mismatch loudly. Without this, a mis-built context silently counts a *different* user's
+  bookings toward this user's weekly cap.
 
 - [ ] **3.3 — AST safety validator.** `rules/rules/safety.py` exposing
   `validate_source(src) -> None | raises UnsafeRuleError`. Rejects: `import`/`from` outside an
@@ -131,7 +136,10 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   `app/backend/app/rules_stub.py` with an adapter that builds a `Context` from the request + booking
   history and delegates to `evaluate_request` with the 3.5/3.6 canon. **Keep the module's existing
   public names and `RuleResult(allowed, message)` shape** so `routers/bookings.py` is untouched.
-  Acceptance: the full Stream 1 E2E Playwright suite passes unchanged.
+  The adapter must **`.astimezone(timezone.utc)` every datetime** before constructing engine types:
+  3.1 rejects non-zero UTC offsets outright, while Stream 1's stub accepts any aware datetime — so a
+  value the stub tolerated will now raise. Acceptance: the full Stream 1 E2E Playwright suite passes
+  unchanged.
 
 ## Resolved Product Questions
 
