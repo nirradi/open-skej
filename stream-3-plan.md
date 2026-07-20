@@ -75,7 +75,7 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   window invariant. No `Role`/`Tier` enums — see the contract note above. No rule logic in this file.
   Unit tests must cover every rejection path, not just the happy construction.
 
-- [x] **3.2 — Controller (`evaluate_request`).** _(DONE)_ `rules/rules/controller.py` exposing
+- [x] **3.2 — Controller (`evaluate_request`).** _(DONE — PR #21)_ `rules/rules/controller.py` exposing
   `evaluate_request(request, context, canon) -> RuleResult`. Runs rules in order, **fail-fast** on
   the first `passed=False`. A rule that raises must be caught and converted to a denial with a
   generic friendly message (never leak the traceback to the user) while logging the real error —
