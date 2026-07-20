@@ -1,6 +1,13 @@
 .env
 .vscode
 
+# Orchestration state (plans, archive, harness scripts) lives in the sibling
+# private repo `skej-ops`, reached through this per-checkout symlink. It is
+# deliberately untracked: every worktree points at ONE working copy so agents
+# see each other's plan edits live, with no commit/merge/pull round-trip.
+# Create it in a new worktree with: ln -sfn ../skej-ops ops
+ops
+
 # Python
 venv/
 __pycache__/

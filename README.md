@@ -324,5 +324,5 @@ These are known and intentional for the current phase — not bugs to file.
 - **Viewing past bookings is out of scope** this phase, for users and admins alike. Calendar
   navigation is bounded to the current week through 60 days ahead.
 
-See [`DEFERRED.md`](DEFERRED.md) for features explicitly out of scope, and the `stream-*-plan.md`
-files for per-stream task breakdowns.
+The deferred-feature list and the per-stream task breakdowns are maintained outside this repo, in
+the private orchestration repo (`ops/DEFERRED.md` and `ops/plans/` for contributors who have it).
