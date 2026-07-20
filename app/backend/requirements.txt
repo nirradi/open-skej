@@ -46,3 +46,12 @@ MarkupSafe==3.0.3
 psycopg[binary]==3.3.4
 psycopg-binary==3.3.4
 pydantic-settings==2.14.2
+
+# Stream 2 (task 2.3) — Auth0 JWT verification.
+# Appended as a block, matching the 2.1 block above, so Stream 1 never sees a
+# conflict on a line it owns. `cryptography` is the extra that PyJWT needs for
+# RS256; without it PyJWT silently supports HMAC only.
+PyJWT==2.13.0
+cryptography==49.0.0
+cffi==2.1.0
+pycparser==3.0
