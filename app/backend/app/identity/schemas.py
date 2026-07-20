@@ -23,7 +23,14 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.identity.models import MembershipRole, Space, SpaceMembership, User
+from app.identity.models import (
+    AccessRequestStatus,
+    MembershipRole,
+    Space,
+    SpaceAccessRequest,
+    SpaceMembership,
+    User,
+)
 
 # The four states a link-holder can be in with respect to a Space, as reported by
 # ``GET /spaces/{public_id}/preview``.
@@ -31,6 +38,7 @@ PreviewStatus = Literal["none", "pending", "denied", "member"]
 
 _NAME_MAX = 200
 _DESCRIPTION_MAX = 4000
+_MESSAGE_MAX = 1000
 
 
 class SpaceCreate(BaseModel):
@@ -133,3 +141,49 @@ class MembershipUpdate(BaseModel):
     """The body of ``PATCH /spaces/{public_id}/members/{user_id}``."""
 
     role: MembershipRole
+
+
+class AccessRequestCreate(BaseModel):
+    """The body of ``POST /spaces/{public_id}/access-requests``.
+
+    A message is optional and free text — "I'm on the Tuesday team" — because the
+    admin deciding has otherwise only an email address to go on, and an email
+    address is not much on which to let someone into a private Space.
+    """
+
+    message: Optional[str] = Field(default=None, max_length=_MESSAGE_MAX)
+
+
+class AccessRequestRead(BaseModel):
+    """One access request, as shown to the admins reviewing the queue.
+
+    The requester's ``email`` and ``name`` are joined in rather than left as a
+    bare ``user_id``: this is the one screen where an admin decides whether a
+    stranger gets into their Space, and a numeric id gives them nothing to decide
+    on. Only admin+ ever sees this model — the requester's own view of their
+    standing is the single ``status`` word in ``SpacePreview``.
+    """
+
+    id: int
+    user_id: int
+    email: str
+    name: Optional[str]
+    status: AccessRequestStatus
+    message: Optional[str]
+    created_at: datetime
+    decided_at: Optional[datetime]
+    decided_by_user_id: Optional[int]
+
+    @classmethod
+    def build(cls, request: SpaceAccessRequest, user: User) -> "AccessRequestRead":
+        return cls(
+            id=request.id,
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            status=request.status,
+            message=request.message,
+            created_at=request.created_at,
+            decided_at=request.decided_at,
+            decided_by_user_id=request.decided_by_user_id,
+        )

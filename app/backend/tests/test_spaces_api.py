@@ -30,7 +30,14 @@ from app.db.models import Base
 from app.db.session import get_session
 from app.identity import service
 from app.identity.authz import SPACE_NOT_FOUND_DETAIL, role_at_least
-from app.identity.models import MembershipRole, Space, SpaceMembership, User
+from app.identity.models import (
+    AccessRequestStatus,
+    MembershipRole,
+    Space,
+    SpaceAccessRequest,
+    SpaceMembership,
+    User,
+)
 from app.main import app
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -52,8 +59,20 @@ NONEXISTENT_PUBLIC_ID = "aaaaaaaaaaaaaaaaaaaaaa"
 _HTTP_METHODS = {"GET", "POST", "PATCH", "PUT", "DELETE"}
 
 
+# The routes a link-holder is *supposed* to reach without a membership, and so
+# the only ones exempt from the isolation sweep below. Written as an explicit
+# allowlist of (method, path) pairs rather than a path prefix so that adding a
+# route cannot exempt itself by accident: ``GET`` on the access-request queue is
+# admin-only and stays in the sweep even though ``POST`` on the same path does
+# not. Each entry has its own test asserting the access it is exempted for.
+LINK_HOLDER_ROUTES = {
+    ("GET", "/spaces/{public_id}/preview"),
+    ("POST", "/spaces/{public_id}/access-requests"),
+}
+
+
 def _space_scoped_routes() -> list[tuple[str, str]]:
-    """Every route under ``/spaces/{public_id}`` except ``/preview``.
+    """Every route under ``/spaces/{public_id}`` except the link-holder ones.
 
     Derived from the application's own OpenAPI schema so this cannot drift out of
     date: a Space route added by a later task is swept up the moment it is
@@ -62,16 +81,13 @@ def _space_scoped_routes() -> list[tuple[str, str]]:
     the flattened paths — walking it silently yields nothing, which is precisely
     the failure :func:`test_the_route_table_actually_yielded_routes_to_test`
     exists to catch.
-
-    Preview is excluded because it is *designed* to be reachable by any
-    link-holder; it gets its own test below asserting exactly that.
     """
     found: set[tuple[str, str]] = set()
     for path, operations in app.openapi()["paths"].items():
-        if not path.startswith("/spaces/{public_id}") or path.endswith("/preview"):
+        if not path.startswith("/spaces/{public_id}"):
             continue
         for method in operations:
-            if method.upper() in _HTTP_METHODS:
+            if method.upper() in _HTTP_METHODS and (method.upper(), path) not in LINK_HOLDER_ROUTES:
                 found.add((method.upper(), path))
     return sorted(found)
 
@@ -185,6 +201,21 @@ def _add_member(
     return membership
 
 
+def _fill(path: str, public_id: str, member: User) -> str:
+    """Turn a templated route into a request URL for the isolation sweep.
+
+    ``{user_id}`` resolves to a genuine member of the Space under test, so a 404
+    cannot be explained away as "that user does not exist". ``{request_id}`` is
+    an arbitrary integer — the authorization dependency rejects the caller before
+    any request with that id is looked up, which is the property being asserted.
+    """
+    return (
+        path.replace("{public_id}", public_id)
+        .replace("{user_id}", str(member.id))
+        .replace("{request_id}", "1")
+    )
+
+
 def _role_of(session: Session, space: Space, user: User) -> MembershipRole | None:
     membership = session.execute(
         select(SpaceMembership)
@@ -218,7 +249,7 @@ def test_a_member_of_one_space_gets_404_on_every_route_of_another(
     ``{user_id}`` resolves to Bob, a genuine member of Space B, so a 404 here
     cannot be explained away as "that user does not exist".
     """
-    url = path.replace("{public_id}", space_b.public_id).replace("{user_id}", str(bob.id))
+    url = _fill(path, space_b.public_id, bob)
 
     response = api.as_user(alice).request(method, url, json=GENERIC_BODY)
 
@@ -242,8 +273,8 @@ def test_an_existing_foreign_space_is_indistinguishable_from_a_missing_one(
     If the bodies differed — a different message, a different error key — the
     oracle the status code closes would reopen one level down.
     """
-    real = path.replace("{public_id}", space_b.public_id).replace("{user_id}", str(bob.id))
-    fake = path.replace("{public_id}", NONEXISTENT_PUBLIC_ID).replace("{user_id}", str(bob.id))
+    real = _fill(path, space_b.public_id, bob)
+    fake = _fill(path, NONEXISTENT_PUBLIC_ID, bob)
 
     client = api.as_user(alice)
     foreign = client.request(method, real, json=GENERIC_BODY)
@@ -727,3 +758,284 @@ def test_an_owner_may_grant_ownership(
 
     assert response.status_code == 200, response.text
     assert _role_of(session, space_a, bob) is MembershipRole.OWNER
+
+
+# --- Access requests (task 2.6). --------------------------------------------
+
+
+def _request_row(session: Session, request_id: int) -> SpaceAccessRequest:
+    """Re-read a request from the database, ignoring anything cached in the session."""
+    return session.execute(
+        select(SpaceAccessRequest)
+        .where(SpaceAccessRequest.id == request_id)
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+
+
+def test_the_link_holder_routes_named_in_the_allowlist_still_exist() -> None:
+    """Guards the exemption, not the routes.
+
+    ``LINK_HOLDER_ROUTES`` subtracts from the isolation sweep. If a path there
+    were renamed, the exemption would stop matching, the route would rejoin the
+    sweep, and its test would fail loudly — but a *stale* entry could also mask a
+    genuinely unprotected route added under the old name. Asserting both entries
+    resolve to real operations keeps the allowlist honest.
+    """
+    paths = app.openapi()["paths"]
+    for method, path in LINK_HOLDER_ROUTES:
+        assert path in paths, f"{path} is exempted from the isolation sweep but does not exist"
+        assert method.lower() in paths[path], f"{method} {path} is exempted but is not a route"
+
+
+def test_a_link_holder_can_request_access_and_an_admin_can_approve(
+    api: Api, session: Session, bob: User, carol: User, space_b: Space
+) -> None:
+    """The full lifecycle: a stranger asks, an owner approves, a membership exists.
+
+    Carol has no relationship with Space B — she holds the link and nothing else,
+    which is exactly the state this flow exists to resolve.
+    """
+    assert _role_of(session, space_b, carol) is None
+
+    created = api.as_user(carol).post(
+        f"/spaces/{space_b.public_id}/access-requests",
+        json={"message": "I'm on the Tuesday team"},
+    )
+    assert created.status_code == 201, created.text
+    request_id = created.json()["id"]
+    assert created.json()["status"] == "pending"
+    assert created.json()["message"] == "I'm on the Tuesday team"
+
+    queue = api.as_user(bob).get(f"/spaces/{space_b.public_id}/access-requests")
+    assert queue.status_code == 200, queue.text
+    assert [entry["id"] for entry in queue.json()] == [request_id]
+    # The admin needs something human to decide on, not just a numeric id.
+    assert queue.json()[0]["email"] == "carol@example.com"
+
+    approved = api.as_user(bob).post(
+        f"/spaces/{space_b.public_id}/access-requests/{request_id}/approve"
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    assert approved.json()["decided_by_user_id"] == bob.id
+
+    assert _role_of(session, space_b, carol) is MembershipRole.MEMBER
+
+    # And the access it granted is real, not merely recorded.
+    detail = api.as_user(carol).get(f"/spaces/{space_b.public_id}")
+    assert detail.status_code == 200, detail.text
+
+
+def test_an_approved_request_is_never_left_without_its_membership(
+    api: Api, session: Session, bob: User, carol: User, space_b: Space
+) -> None:
+    """The invariant, asserted directly against the tables.
+
+    An approved request whose membership row is missing is the one outcome that
+    is worse than a plain failure: the requester is told they are in, the queue
+    is cleared, and every permission check still says no — with no pending row
+    left for anyone to notice. This walks every approved request in the database
+    and insists each one has its membership, so the pairing is checked as a
+    property rather than only along the path the test above happened to take.
+    """
+    created = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    request_id = created.json()["id"]
+
+    api.as_user(bob).post(f"/spaces/{space_b.public_id}/access-requests/{request_id}/approve")
+
+    approved = (
+        session.execute(
+            select(SpaceAccessRequest)
+            .where(SpaceAccessRequest.status == AccessRequestStatus.APPROVED)
+            .execution_options(populate_existing=True)
+        )
+        .scalars()
+        .all()
+    )
+    assert approved, "no approved request was produced, so this proves nothing"
+
+    for request in approved:
+        membership = session.execute(
+            select(SpaceMembership).where(
+                SpaceMembership.space_id == request.space_id,
+                SpaceMembership.user_id == request.user_id,
+            )
+        ).scalar_one_or_none()
+        assert membership is not None, (
+            f"request {request.id} is approved but user {request.user_id}"
+            f" has no membership in space {request.space_id}"
+        )
+        # The decision stamp is written in the same transaction, so a row missing
+        # it would mean the two halves came apart in the other direction.
+        assert request.decided_at is not None
+        assert request.decided_by_user_id is not None
+
+
+def test_a_denial_can_be_followed_by_a_fresh_request(
+    api: Api, session: Session, bob: User, carol: User, space_b: Space
+) -> None:
+    """Denied in March, asking again in June.
+
+    This is why the unique index is partial — over pending rows only. A plain
+    ``UNIQUE (space_id, user_id)`` would let a user ask exactly once, ever, and
+    turn a single denial into a permanent bar.
+    """
+    first = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    first_id = first.json()["id"]
+
+    denied = api.as_user(bob).post(f"/spaces/{space_b.public_id}/access-requests/{first_id}/deny")
+    assert denied.status_code == 200, denied.text
+    assert denied.json()["status"] == "denied"
+    assert _role_of(session, space_b, carol) is None
+
+    second = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] != first_id
+
+    # The denial survives as history rather than being overwritten.
+    assert _request_row(session, first_id).status is AccessRequestStatus.DENIED
+
+
+def test_a_second_pending_request_is_refused(api: Api, carol: User, space_b: Space) -> None:
+    """A double-clicked button must not fill the admin's queue twice."""
+    first = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    assert first.status_code == 201, first.text
+
+    second = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    assert second.status_code == 409, second.text
+
+
+def test_an_existing_member_cannot_request_access(api: Api, bob: User, space_b: Space) -> None:
+    """Bob owns Space B. There is nothing for him to ask for."""
+    response = api.as_user(bob).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+
+    assert response.status_code == 409, response.text
+
+
+def test_an_archived_space_accepts_no_requests(
+    api: Api, session: Session, bob: User, carol: User, space_b: Space
+) -> None:
+    """Nobody is left to review the queue, so asking would be a request into a void."""
+    service.archive_space(session, space_b)
+
+    response = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+
+    assert response.status_code == 409, response.text
+
+
+def test_a_plain_member_gets_403_on_the_decision_routes(
+    api: Api, session: Session, bob: User, carol: User, space_b: Space
+) -> None:
+    """403 rather than 404 — the deliberate exception to this module's rule.
+
+    Carol is inside Space B once approved, so the existence of the Space is not a
+    secret from her and 404 would only be confusing. What she lacks is the
+    authority to decide who else gets in, which is what 403 says. Deciding one's
+    own request would otherwise be self-approval.
+    """
+    dave = _make_user(session, "auth0|dave", "dave@example.com")
+    _add_member(session, space_b, carol, MembershipRole.MEMBER)
+
+    pending = api.as_user(dave).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    request_id = pending.json()["id"]
+
+    for action in ("approve", "deny"):
+        response = api.as_user(carol).post(
+            f"/spaces/{space_b.public_id}/access-requests/{request_id}/{action}"
+        )
+        assert response.status_code == 403, f"{action}: {response.text}"
+
+    assert _request_row(session, request_id).status is AccessRequestStatus.PENDING
+    assert _role_of(session, space_b, dave) is None
+
+    # And the queue itself is admin-only too, not just the decisions.
+    assert api.as_user(carol).get(f"/spaces/{space_b.public_id}/access-requests").status_code == 403
+
+
+def test_a_decided_request_cannot_be_decided_again(
+    api: Api, bob: User, carol: User, space_b: Space
+) -> None:
+    """A stale review queue must not let a second admin overwrite the first's decision."""
+    created = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    request_id = created.json()["id"]
+
+    approve_url = f"/spaces/{space_b.public_id}/access-requests/{request_id}/approve"
+    assert api.as_user(bob).post(approve_url).status_code == 200
+
+    assert api.as_user(bob).post(approve_url).status_code == 409
+    deny_url = f"/spaces/{space_b.public_id}/access-requests/{request_id}/deny"
+    assert api.as_user(bob).post(deny_url).status_code == 409
+
+
+def test_the_queue_can_be_filtered_by_status(
+    api: Api, session: Session, bob: User, carol: User, space_b: Space
+) -> None:
+    dave = _make_user(session, "auth0|dave", "dave@example.com")
+
+    denied_id = (
+        api.as_user(carol)
+        .post(f"/spaces/{space_b.public_id}/access-requests", json={})
+        .json()["id"]
+    )
+    api.as_user(bob).post(f"/spaces/{space_b.public_id}/access-requests/{denied_id}/deny")
+
+    pending_id = (
+        api.as_user(dave).post(f"/spaces/{space_b.public_id}/access-requests", json={}).json()["id"]
+    )
+
+    client = api.as_user(bob)
+    base = f"/spaces/{space_b.public_id}/access-requests"
+
+    assert [entry["id"] for entry in client.get(base, params={"status": "pending"}).json()] == [
+        pending_id
+    ]
+    assert [entry["id"] for entry in client.get(base, params={"status": "denied"}).json()] == [
+        denied_id
+    ]
+    # Unfiltered returns both: the decided rows are kept precisely so an admin
+    # can see that someone was turned down before.
+    assert len(client.get(base).json()) == 2
+
+
+def test_a_request_from_another_space_cannot_be_decided_here(
+    api: Api, session: Session, alice: User, bob: User, carol: User, space_a: Space, space_b: Space
+) -> None:
+    """The request id is scoped to the Space in the URL, not looked up globally.
+
+    Without the ``space_id`` filter, Alice — an owner in her own Space and a
+    stranger to Bob's — could approve Bob's pending requests by id alone, and the
+    per-Space authorization above would never see it.
+    """
+    foreign_id = (
+        api.as_user(carol)
+        .post(f"/spaces/{space_b.public_id}/access-requests", json={})
+        .json()["id"]
+    )
+
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/access-requests/{foreign_id}/approve"
+    )
+
+    assert response.status_code == 404, response.text
+    assert _request_row(session, foreign_id).status is AccessRequestStatus.PENDING
+    assert _role_of(session, space_b, carol) is None
+
+
+def test_preview_reports_pending_then_member_across_the_lifecycle(
+    api: Api, bob: User, carol: User, space_b: Space
+) -> None:
+    """The requester's own view of where they stand, which is all they ever get.
+
+    There is no route for a requester to read their own request back — the single
+    ``status`` word here is the whole of it, deliberately, since anything richer
+    would leak the admin's queue to the person being judged.
+    """
+    preview_url = f"/spaces/{space_b.public_id}/preview"
+    assert api.as_user(carol).get(preview_url).json()["status"] == "none"
+
+    created = api.as_user(carol).post(f"/spaces/{space_b.public_id}/access-requests", json={})
+    assert api.as_user(carol).get(preview_url).json()["status"] == "pending"
+
+    request_id = created.json()["id"]
+    api.as_user(bob).post(f"/spaces/{space_b.public_id}/access-requests/{request_id}/approve")
+    assert api.as_user(carol).get(preview_url).json()["status"] == "member"

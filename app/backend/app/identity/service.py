@@ -22,6 +22,7 @@ router — the same split ``app.db.driver`` uses with ``OverlapError``.
 from typing import Optional, Sequence
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import utcnow
@@ -46,6 +47,28 @@ class MemberNotFoundError(Exception):
 
 class LastOwnerError(Exception):
     """The change would leave the Space with no owner at all."""
+
+
+class AlreadyMemberError(Exception):
+    """The requester is already inside the Space they are asking to join."""
+
+
+class DuplicatePendingRequestError(Exception):
+    """This user already has a request awaiting a decision on this Space."""
+
+
+class AccessRequestNotFoundError(Exception):
+    """No request with that id belongs to this Space."""
+
+
+class AccessRequestAlreadyDecidedError(Exception):
+    """The request has already been approved or denied.
+
+    Refused rather than treated as idempotent. A second approval would overwrite
+    ``decided_by_user_id`` and ``decided_at``, rewriting who let this person in —
+    and an admin re-approving a request another admin denied a minute earlier is
+    far more likely to be a stale review queue than a considered reversal.
+    """
 
 
 class OwnerAuthorityRequiredError(Exception):
@@ -271,6 +294,146 @@ def remove_member(
 
     session.delete(membership)
     session.commit()
+
+
+def _pending_request_id(session: Session, space_id: int, user_id: int) -> Optional[int]:
+    return session.execute(
+        select(SpaceAccessRequest.id).where(
+            SpaceAccessRequest.space_id == space_id,
+            SpaceAccessRequest.user_id == user_id,
+            SpaceAccessRequest.status == AccessRequestStatus.PENDING,
+        )
+    ).scalar_one_or_none()
+
+
+def request_access(
+    session: Session, space: Space, user: User, *, message: Optional[str]
+) -> SpaceAccessRequest:
+    """Ask to be let into a Space, on the strength of holding its link.
+
+    Three things are refused, each for a different reason: an archived Space has
+    nobody left to review the queue, an existing member has nothing to ask for,
+    and a second *pending* request would only duplicate the first in the admin's
+    queue. A previously **denied** request is deliberately not among them — the
+    partial unique index constrains pending rows only, precisely so that someone
+    turned down in March can ask again in June.
+
+    The pre-check and the ``IntegrityError`` handler are not redundant. The check
+    produces the useful error for the ordinary case — a user double-clicking the
+    button — while the index is what actually holds under two concurrent requests,
+    where both transactions can pass the check before either commits. Catching
+    the violation converts that race into the same 409 the slower path returns,
+    rather than a 500.
+    """
+    _require_active(space)
+
+    if _load_membership(session, space.id, user.id) is not None:
+        raise AlreadyMemberError(user.id)
+
+    if _pending_request_id(session, space.id, user.id) is not None:
+        raise DuplicatePendingRequestError(user.id)
+
+    request = SpaceAccessRequest(space_id=space.id, user_id=user.id, message=message)
+    session.add(request)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise DuplicatePendingRequestError(user.id)
+
+    return request
+
+
+def list_access_requests(
+    session: Session, space: Space, *, status: Optional[AccessRequestStatus]
+) -> Sequence[tuple[SpaceAccessRequest, User]]:
+    """This Space's requests, oldest first, optionally filtered by status.
+
+    Unfiltered by default rather than pending-only: the decided rows are kept as
+    history exactly so an admin can see that someone was denied before, and
+    hiding them by default would waste the retention the schema pays for.
+    """
+    query = (
+        select(SpaceAccessRequest, User)
+        .join(User, User.id == SpaceAccessRequest.user_id)
+        .where(SpaceAccessRequest.space_id == space.id)
+        .order_by(SpaceAccessRequest.created_at, SpaceAccessRequest.id)
+    )
+    if status is not None:
+        query = query.where(SpaceAccessRequest.status == status)
+
+    return session.execute(query).all()
+
+
+def decide_access_request(
+    session: Session,
+    space: Space,
+    *,
+    request_id: int,
+    approve: bool,
+    decider: User,
+) -> tuple[SpaceAccessRequest, User]:
+    """Approve or deny a request. On approval, the membership is part of the same commit.
+
+    **This is the invariant the function exists for.** An approved request whose
+    membership row never landed is the worst outcome available here: the
+    requester is told they are in, the admin sees the queue cleared, and every
+    permission check still says no — with no pending row left for anyone to
+    notice, since the request is now decided. So the status stamp and the
+    ``INSERT`` into ``space_memberships`` share one transaction and one
+    ``commit``. If the insert violates the unique index, the whole transaction
+    rolls back and the request stays ``pending``, which is a state the system can
+    recover from by simply approving again.
+
+    ``with_for_update`` closes the same race the last-owner lock does. Under READ
+    COMMITTED two admins could both read the request as pending and both proceed;
+    the second would then either duplicate the membership or overwrite the first
+    admin's decision stamp. Locking the row makes the second wait, re-read a
+    decided request, and be refused.
+
+    The membership is only inserted if one does not already exist, which is not
+    defensive padding — an invitation accepted at login (see
+    ``app.auth.dependencies``) can create the membership while this request sits
+    pending. Approving then is still meaningful: it resolves the queue entry and
+    records who decided it.
+    """
+    _require_active(space)
+
+    request = session.execute(
+        select(SpaceAccessRequest)
+        .where(
+            SpaceAccessRequest.id == request_id,
+            SpaceAccessRequest.space_id == space.id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+    # Scoped to this Space, so an id belonging to another Space's queue reads as
+    # "no such request" rather than acting on a neighbouring tenant's row.
+    if request is None:
+        raise AccessRequestNotFoundError(request_id)
+
+    if request.status is not AccessRequestStatus.PENDING:
+        raise AccessRequestAlreadyDecidedError(request_id)
+
+    request.status = AccessRequestStatus.APPROVED if approve else AccessRequestStatus.DENIED
+    request.decided_at = utcnow()
+    request.decided_by_user_id = decider.id
+
+    if approve and _load_membership(session, space.id, request.user_id) is None:
+        session.add(
+            SpaceMembership(
+                space_id=space.id,
+                user_id=request.user_id,
+                role=MembershipRole.MEMBER,
+            )
+        )
+
+    session.commit()
+
+    requester = session.execute(select(User).where(User.id == request.user_id)).scalar_one()
+    return request, requester
 
 
 def preview_status(session: Session, space: Space, user: User) -> PreviewStatus:
