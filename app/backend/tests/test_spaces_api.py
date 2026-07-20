@@ -23,6 +23,7 @@ from typing import Any, Iterator
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
@@ -869,6 +870,68 @@ def test_an_approved_request_is_never_left_without_its_membership(
         # it would mean the two halves came apart in the other direction.
         assert request.decided_at is not None
         assert request.decided_by_user_id is not None
+
+
+def test_a_failed_membership_insert_rolls_the_whole_approval_back(
+    session: Session, monkeypatch: pytest.MonkeyPatch, bob: User, carol: User, space_b: Space
+) -> None:
+    """The invariant under failure — the half the happy path cannot prove.
+
+    The test above asserts the pairing after a *successful* approval, which two
+    separate commits would satisfy just as well: stamp the status, commit, insert
+    the membership, commit. Both land, and nothing is proven. The property only
+    becomes visible when the second write fails, so this forces it to.
+
+    The failure is induced by making :func:`service._load_membership` report no
+    membership when one exists, so the ``INSERT`` reaches the unique index and is
+    rejected. That is not an invented error: it is the exact shape of the race
+    the ``with_for_update`` lock exists for — an invitation accepted at login
+    creating the membership between the read and the insert — reproduced
+    deterministically instead of by timing.
+
+    The assertions are made against a rolled-back session and re-read rows, so
+    they describe what Postgres committed rather than what the identity map still
+    holds. With a single commit the request is untouched and still recoverable by
+    approving again. With two commits it is stamped ``approved`` and permanently
+    membership-less, which is the outcome the whole function exists to prevent.
+    """
+    request = service.request_access(session, space_b, carol, message=None)
+    request_id = request.id
+
+    # The membership lands after the request is filed — the invitation-at-login
+    # path — so the approval has something to collide with.
+    existing = _add_member(session, space_b, carol, MembershipRole.MEMBER)
+    existing_id = existing.id
+
+    monkeypatch.setattr(service, "_load_membership", lambda *args, **kwargs: None)
+
+    with pytest.raises(IntegrityError):
+        service.decide_access_request(
+            session, space_b, request_id=request_id, approve=True, decider=bob
+        )
+
+    session.rollback()
+
+    decided = _request_row(session, request_id)
+    assert decided.status is AccessRequestStatus.PENDING, (
+        "the failed membership insert left the request decided;"
+        " the status stamp and the insert are not sharing a transaction"
+    )
+    assert decided.decided_at is None
+    assert decided.decided_by_user_id is None
+
+    # Nothing was added alongside the row that was already there.
+    memberships = (
+        session.execute(
+            select(SpaceMembership).where(
+                SpaceMembership.space_id == space_b.id,
+                SpaceMembership.user_id == carol.id,
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [membership.id for membership in memberships] == [existing_id]
 
 
 def test_a_denial_can_be_followed_by_a_fresh_request(
