@@ -13,6 +13,25 @@ Build the isolated Python execution environment for booking rules. Implement the
 * Time bounds: Rules will not evaluate history beyond the current calendar month or a week rolling window.
 * Safe Execution: Generated Python code must not use dangerous imports (`os`, `sys`).
 
+### Fail closed — non-negotiable
+Any failure to *positively establish* that a booking is permitted must result in **no booking**.
+Refusing wrongly is visible and recoverable; allowing wrongly double-books a shared resource and is
+discovered by two people standing in the same place. "Couldn't decide" resolves to **no**.
+
+Three paths, all fail closed:
+1. **A rule raises** → contained by the controller, converted to a denial with generic user-facing
+   copy; the real exception goes to the log, never to `fail_reason`.
+2. **A rule returns a non-conforming response** (anything that is not a `RuleResult`) → same
+   containment. This is a live risk for AI-generated rules, not a theoretical one.
+3. **Malformed input** (a context that does not describe its request) → raises
+   `ContextMismatchError`. Still fail-closed — no booking is created — but it *raises* rather than
+   denying, because a denial is user-facing copy and would present a caller bug as a normal refusal.
+   Fail closed on the outcome, loud on the cause.
+
+**When writing or generating a rule:** never catch your own exception and return a pass, and never
+return anything but a `RuleResult`. The controller contains both, but a rule that swallows errors
+into a pass defeats containment silently — it looks like a working rule that simply never denies.
+
 ## Phase 1: Core Interfaces — SHIPPED (task 3.1, PR #19)
 
 **`rules/rules/interfaces.py` is the authoritative contract. Read it before writing any rule.**

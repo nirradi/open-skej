@@ -31,6 +31,8 @@ Current state of the repo:
 | Safe execution | AST allowlist **and** subprocess isolation — both, not either | AST validation alone is bypassable (`getattr(__builtins__, ...)`, decorators, comprehension scoping). Subprocess alone doesn't stop a rule from burning CPU inside a request. AST rejects the obvious at authoring time; the subprocess bounds the damage at test time. |
 | When generated code runs in-process | **Never, until a human has reviewed and committed it** | Per `DEFERRED.md` §3, admin-authored runtime rules are out of scope. The AI loop is a *developer* tool that emits a `.py` file for review. Nothing generated is imported by the app without passing through a PR. This removes the entire class of "prompt injection becomes RCE" risk from the MVP. |
 | Generator model | `claude-opus-4-8` default, model configurable, `claude-haiku-4-5` as the cheap comparator in `benchmark.py` | **`.claude/rules/stream-3-rules.md` recommends "Claude 3 Haiku" — that model (`claude-3-haiku-20240307`) retired 2026-04-19 and now 404s.** Its live successor is `claude-haiku-4-5` ($1/$5 per MTok). Defaulting to Opus rather than Haiku is a deliberate deviation: a subtly wrong rule silently mis-enforces real bookings, and each Tester retry costs a full generate+test cycle, so the cheaper model is not obviously cheaper end-to-end. `benchmark.py` (task 3.9) measures this rather than assuming it — if Haiku 4.5 hits the same success rate, flip the default and record it here. |
+| **Failure policy — fail closed** | Any failure to *positively establish* that a booking is permitted results in no booking. Applies to three paths: a rule that raises, a rule that returns a non-conforming response, and malformed input | Confirmed 2026-07-20. The asymmetry justifies it: refusing a booking that should have been allowed is visible, complained about, and recoverable; allowing one that should have been refused double-books a shared resource and is discovered by two people standing in the same place. A rule engine exists to say no, so "couldn't decide" must resolve to no. **This binds AI-generated rules especially** — 3.7/3.8 must not emit rules that swallow their own errors into a pass. |
+| Fail-closed on input — raise, not deny | A malformed request/context (`ContextMismatchError`) raises; it does not return a denial | Both outcomes are fail-closed — neither creates a booking — but they differ in who finds out. A denial is user-facing copy and would present a caller bug as a normal refusal, burying it. Raising reaches the error tracker. Fail closed on the outcome, loud on the cause. |
 | Time bounds | `HistoryContext` capped at current calendar month **or** ±1 rolling week, whichever is wider | Per the stream brief. The cap is enforced when the context is *built* (backend side), and re-asserted as an invariant in `HistoryContext` so a rule cannot silently rely on data it will not get in production. |
 | What history contains | **Everything in `HistoryContext` counts.** The caller filters before building it | Decided 2026-07-20. The engine does not inspect booking status, and `BookingRecord` carries no `status` field. If a booking should not count toward a limit, it is not in the context. This keeps the rule engine ignorant of a schema that will keep changing — a future `deleted` flag, a `no_show` flag, or a tentative-hold state would each silently invalidate rules that filtered internally, and the engine would have no way to know. Filtering stays with the layer that owns the schema. |
 | Timezone | **UTC everywhere.** All datetimes UTC-aware; naive datetimes rejected at construction | Decided 2026-07-20. Timezone is a presentation concern owned by the UI; every backend entity, artifact, and rule input is UTC. `CalendarContext` therefore carries no timezone field, and week boundaries are UTC boundaries. This removes DST from the rule engine entirely — the single most likely source of subtle generated-rule bugs. |
@@ -98,7 +100,8 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   a fresh `subprocess` with a wall-clock timeout, a memory cap, no inherited env, and cwd set to a
   temp dir. Returns structured pass/fail/timeout/crash. This is what the Tester agent's pytest runs
   execute inside. Tests: timeout fires on an infinite loop, crash is reported not raised, clean run
-  returns results.
+  returns results. **Fail closed:** timeout and crash are *not* successes — an unverifiable candidate
+  never advances to the canon.
 
 - [ ] **3.5 — First hardcoded canon rules (hand-written).** Port the four stub rules into real
   `BaseRule` subclasses with constructor parameters: `MaxDurationRule(max_duration)`,
@@ -118,10 +121,15 @@ Each task is one PR, delegated to a headless Sonnet sub-agent and reviewed befor
   prompt per the stream brief: parameterised, `datetime`-only, `HistoryContext`-driven. Output runs
   through `validate_source` (3.3) before it is written anywhere. Model ID and effort configurable;
   API key from env, never committed. Unit tests mock the API client — **no test may make a live call.**
+  The system prompt must state the **fail-closed policy** explicitly: a generated rule must never
+  catch its own exception and return a pass, and must never return anything but a `RuleResult`. The
+  controller contains both, but a rule that swallows errors into a pass defeats containment silently —
+  it looks like a working rule that simply never denies.
 
 - [ ] **3.8 — Agent B (Tester) + the retry loop.** `rules/generation/tester.py` and `loop.py`.
   Tester generates `pytest` functions (positive cases + adversarial edge cases: timezone overlap,
-  the n+1th booking, week boundaries). `loop.py` executes them against the candidate via the 3.4
+  the n+1th booking, week boundaries, **and a fail-closed probe**: a rule fed input it cannot
+  evaluate must not return a pass). `loop.py` executes them against the candidate via the 3.4
   sandbox and feeds failures back to Agent A, **max 3 retries**, then gives up and reports. Emits the
   final artifact to `rules/generated/` for human review — never imports it. Tests mock both agents
   and assert the retry accounting and the give-up path.
