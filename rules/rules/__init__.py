@@ -1,5 +1,6 @@
 """Open-Skej rule engine."""
 
+from .controller import RULE_ERROR_MESSAGE, ContextMismatchError, evaluate_request
 from .interfaces import (
     HISTORY_ROLLING_WINDOW,
     BaseRule,
@@ -16,6 +17,9 @@ from .interfaces import (
 
 __all__ = [
     "BaseRule",
+    "ContextMismatchError",
+    "evaluate_request",
+    "RULE_ERROR_MESSAGE",
     "BookingRecord",
     "BookingRequest",
     "CalendarContext",
