@@ -164,13 +164,26 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
   Tests include a parametrised **cross-tenant isolation** case: a member of Space A gets 404 on every
   Space B route except `/preview`, and archived Spaces reject mutations.
 
-- [ ] **2.6 — Access requests.** `POST /spaces/{public_id}/access-requests` — any authenticated user
+- [x] **2.6 — Access requests.** _(DONE — merged as `dc30e77`)_ `POST /spaces/{public_id}/access-requests` — any authenticated user
   holding the link; rejects a duplicate pending request, an existing member, and an archived Space.
   `GET /spaces/{public_id}/access-requests?status=` (admin+) and
   `POST /spaces/{public_id}/access-requests/{id}/approve|deny` (admin+). Approval creates the
   membership and stamps `decided_by_user_id` in **one transaction** — a test must confirm no request
   is ever left approved without its membership row. Tests cover the full lifecycle, re-requesting
   after a denial, and a plain member getting 403 on the decision routes.
+
+  **Atomicity is proven by a negative control, not by the happy path.** The first implementation
+  asserted the request/membership pairing only after a *successful* approval — which two separate
+  commits satisfy just as well, since both writes land either way. `POST /access-requests` is
+  deliberately reachable without membership (like `/preview`): requiring membership to ask for
+  membership would make the door unopenable. The cross-tenant isolation sweep in `test_spaces_api.py`
+  therefore moved from a path-suffix exclusion to an explicit `(method, path)` allowlist — `GET` on
+  the access-request queue is admin-only while `POST` on the *same path* is not, and a suffix rule
+  would have silently dropped that admin route out of the sweep.
+
+  **Open product question:** approval grants `member` only; an admin cannot choose a higher role at
+  approval time (promotion uses the existing membership route). Revisit if approval should take an
+  optional role.
 
 - [ ] **2.7 — Invitations.** `POST /spaces/{public_id}/invitations` (admin+, email + role),
   `GET .../invitations`, `DELETE .../invitations/{id}` to revoke. Emails stored lowercased, matched
