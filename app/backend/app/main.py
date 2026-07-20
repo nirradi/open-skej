@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthError
 from app.identity.models import User
+from app.identity.router import router as spaces_router
 from app.routers import bookings
 
 # The Vite dev server. Stream 2 owns the real deployed origins; until then this
@@ -23,6 +24,7 @@ app.add_middleware(
 )
 
 app.include_router(bookings.router)
+app.include_router(spaces_router)
 
 
 @app.exception_handler(AuthError)
