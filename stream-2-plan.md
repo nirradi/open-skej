@@ -20,9 +20,10 @@ Space relationships and the production schema, and must **not** touch calendar o
 `sqlite.py`) and booking endpoints from Stream 1's tasks 1.3/1.4. There is no Alembic, no Postgres,
 no settings module, and `requirements.txt` has no auth or database-driver packages.
 
-**Stream 1 is live and moving.** Tasks 1.1–1.5 are merged to `main`; 1.5b and 1.6–1.10 (frontend unit
-tests, calendar grid, booking flow, cancel UI, Playwright, runbook) are still in flight. Everything
-below is sequenced so Stream 2 never edits a file Stream 1 currently holds.
+**Stream 1 is COMPLETE** as of `13339a5` — all of 1.1–1.10 are merged, including the calendar grid,
+booking flow, cancel UI, Playwright suite and runbook. Its Tailwind config, `src/config.ts` and typed
+`src/api/` client are all on `main` and Phase B builds directly on them. The gate on Phase B is
+therefore lifted; the boundary rules below still apply so Stream 4's integration stays clean.
 
 **Stream 2 runs in a separate git worktree** at `/Users/nir.radian/nirdev/skej-stream2` on branch
 `stream-2/base`, so neither stream's working tree can disturb the other. All Stream 2 work happens
@@ -113,7 +114,7 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
   Alembic migration. Tests cover every uniqueness constraint and both partial indexes — specifically
   that a second pending row is rejected but a new pending row *after* a denial is allowed.
 
-- [ ] **2.3 — JWT verification + current-user dependency.** Append `pyjwt[crypto]`. New
+- [x] **2.3 — JWT verification _(DONE — merged as `c547ba6`)_ + current-user dependency.** Append `pyjwt[crypto]`. New
   `app/backend/app/auth/jwt.py`: cached JWKS fetch, RS256 only, `aud` checked against
   `AUTH0_API_AUDIENCE` and `iss` against the tenant, `exp`/`nbf` with small leeway. New
   `app/backend/app/auth/dependencies.py` with `get_current_user` — verifies the bearer token, upserts
