@@ -28,6 +28,7 @@ checkout through a gitignored `ops` symlink:
 | Live obligations from closed streams | `ops/plans/integration-carry-forward.md` |
 | Completed streams | `ops/archive/stream-N/` |
 | Harness scripts | `ops/scripts/` |
+| Git & GitHub access setup | `ops/git-access.md` |
 
 This exists so parallel agents share plan state **live** — an edit is visible to every other agent
 immediately, with no commit/PR/merge/pull round-trip. Never copy a plan into this repo, and never
@@ -35,6 +36,27 @@ commit one here.
 
 If `ops/` is missing from your working directory, stop and report it rather than recreating a plan
 from scratch — the symlink is per-worktree and simply needs `ln -sfn ../skej-ops ops`.
+
+### What goes where when you add a stream
+
+Two files, two homes — this split is deliberate:
+
+* **`ops/plans/stream-N-plan.md`** — the task breakdown. Changes on *every task*, so it lives
+  outside git to avoid a commit/merge round-trip per checkbox.
+* **`.claude/rules/stream-N-<topic>.md`** — the stream's objective, boundaries, and policy. Stays
+  **in this repo** because files under `.claude/` are auto-loaded into every agent session. Moving
+  one to `ops/` would silently stop it loading, and a stream spec that fails to load fails
+  *quietly* — the agent just never learns the policy. Rules change per policy revision, not per
+  task, so the git ceremony is cheap.
+
+### Git & GitHub access
+
+This machine has more than one GitHub account and **only one can push to this repo.** Two separate
+things must both point at the repo owner: the **git remote** (via an SSH host alias) and the **`gh`
+active account** (global, machine-wide, and easily left wrong). If a `git push` or a `gh` write
+operation (`pr create`, `pr merge`, `api -X POST`) fails with a permissions or collaborator error,
+read `ops/git-access.md` before retrying — do not "fix" it by rewriting the remote to a plain
+`github.com` URL, which silently breaks pushing.
 
 ## Worktrees — one per stream
 
@@ -57,7 +79,7 @@ When acting as the Lead Architect (Opus), you must strictly follow this loop wit
 
 1. **State Check:** Read the relevant plan file (`ops/plans/stream-N-plan.md`) to identify the next pending task.
 2. **Task Delegation (Headless Sub-agent):** Use your Bash tool to spawn a Sonnet sub-agent in non-interactive mode using the `-p` flag. You must pass `--allowedTools` so the sub-agent doesn't get blocked asking for permissions. Tasks are merged via PRs which you will review.
-   * **Never unset or override `CLAUDE_CONFIG_DIR`.** The harness exports it so the whole agent tree runs under the personal Claude config; sub-agents inherit it automatically, so just spawn `claude -p` normally. If you find it unset, stop and report rather than proceeding — running under the corporate config bills and logs against the wrong account.
+   * **Never unset or override `CLAUDE_CONFIG_DIR`.** The harness exports it so the whole agent tree runs under one intended Claude config; sub-agents inherit it automatically, so just spawn `claude -p` normally. If you find it unset, stop and report rather than proceeding — the fallback config bills and logs against a different account.
    * *Example Command:* `claude -p "Complete Task 3.3 from ops/plans/stream-3-plan.md. Write the code and commit the changes and create a PR." --allowedTools "Read,Edit,Bash"`
 3. **Wait & Review:** The bash command will block until Sonnet finishes. Once the bash command returns successfully, use gh commands to review the code Sonnet just wrote.
 4. **Iterate or Update State:** * If the work is flawed, comment on the PR, use the Bash tool to run the headless Sonnet agent again, to read the feedback and fix the specific issues.
