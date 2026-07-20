@@ -8,7 +8,9 @@ does not have, and the identity schema uses partial indexes that SQLite ignores.
 ``get_current_user`` is overridden rather than exercised — token verification is
 already covered independently in ``tests/test_auth_jwt.py``, and minting real
 RS256 tokens here would test that suite a second time while making it harder to
-see which caller a test is about.
+see which caller a test is about. The one flow that genuinely needs a real login
+— an invited address being admitted at first sight — therefore lives in
+``tests/test_invitation_login.py``, which overrides only the JWKS resolver.
 
 **The headline test is** :func:`test_a_member_of_one_space_gets_404_on_every_route_of_another`.
 It walks the application's own route table rather than a hand-written list, so a
@@ -27,15 +29,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
-from app.db.models import Base
+from app.db.models import Base, utcnow
 from app.db.session import get_session
 from app.identity import service
 from app.identity.authz import SPACE_NOT_FOUND_DETAIL, role_at_least
 from app.identity.models import (
     AccessRequestStatus,
+    InvitationStatus,
     MembershipRole,
     Space,
     SpaceAccessRequest,
+    SpaceInvitation,
     SpaceMembership,
     User,
 )
@@ -206,14 +210,22 @@ def _fill(path: str, public_id: str, member: User) -> str:
     """Turn a templated route into a request URL for the isolation sweep.
 
     ``{user_id}`` resolves to a genuine member of the Space under test, so a 404
-    cannot be explained away as "that user does not exist". ``{request_id}`` is
-    an arbitrary integer — the authorization dependency rejects the caller before
-    any request with that id is looked up, which is the property being asserted.
+    cannot be explained away as "that user does not exist". ``{request_id}`` and
+    ``{invitation_id}`` are arbitrary integers — the authorization dependency
+    rejects the caller before any row with that id is looked up, which is the
+    property being asserted.
+
+    Every path parameter a swept route declares must be substituted here. An
+    unsubstituted ``{...}`` would fail FastAPI's ``int`` parsing and return 422,
+    and the sweep would then be asserting nothing about authorization at all —
+    which is why :func:`test_the_isolation_sweep_leaves_no_placeholder_unfilled`
+    checks this function against the route table rather than trusting it.
     """
     return (
         path.replace("{public_id}", public_id)
         .replace("{user_id}", str(member.id))
         .replace("{request_id}", "1")
+        .replace("{invitation_id}", "1")
     )
 
 
@@ -293,6 +305,21 @@ def test_the_route_table_actually_yielded_routes_to_test() -> None:
     from the run and the suite would still be green.
     """
     assert len(SPACE_SCOPED_ROUTES) >= 6, SPACE_SCOPED_ROUTES
+
+
+def test_the_isolation_sweep_leaves_no_placeholder_unfilled() -> None:
+    """Guards :func:`_fill`, which the sweep's meaning depends on.
+
+    A route declaring a path parameter ``_fill`` does not know about would be
+    requested with a literal ``{invitation_id}`` in the URL, fail ``int`` parsing
+    with 422, and the isolation assertion would compare 422 to 404 — visible as a
+    failure, but reported as "this route leaked", which is the wrong diagnosis.
+    Worse, a future route whose parameter parses as a string would 404 for
+    parsing reasons and pass the sweep while proving nothing.
+    """
+    for _, path in SPACE_SCOPED_ROUTES:
+        filled = _fill(path, NONEXISTENT_PUBLIC_ID, User(id=1, auth0_sub="x", email="x@y.example"))
+        assert "{" not in filled, f"_fill does not substitute every parameter of {path}"
 
 
 def test_preview_is_reachable_by_any_link_holder(
@@ -1102,3 +1129,425 @@ def test_preview_reports_pending_then_member_across_the_lifecycle(
     request_id = created.json()["id"]
     api.as_user(bob).post(f"/spaces/{space_b.public_id}/access-requests/{request_id}/approve")
     assert api.as_user(carol).get(preview_url).json()["status"] == "member"
+
+
+# --- Invitations (task 2.7). ------------------------------------------------
+#
+# The admin-facing half. The other half — an invited address logging in and
+# landing inside the Space with no access request — lives in
+# ``tests/test_invitation_login.py``, which drives the real ``get_current_user``
+# against a signed token rather than the override this module uses.
+
+
+def _invitation_row(session: Session, invitation_id: int) -> SpaceInvitation:
+    """Re-read an invitation from the database, ignoring the session's cache."""
+    return session.execute(
+        select(SpaceInvitation)
+        .where(SpaceInvitation.id == invitation_id)
+        .execution_options(populate_existing=True)
+    ).scalar_one()
+
+
+def test_an_admin_can_invite_an_address(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations",
+        json={"email": "newcomer@example.com", "role": "admin"},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["email"] == "newcomer@example.com"
+    assert body["role"] == "admin"
+    assert body["status"] == "pending"
+    assert body["invited_by_user_id"] == alice.id
+    assert body["accepted_at"] is None
+
+    assert _invitation_row(session, body["id"]).space_id == space_a.id
+
+
+def test_an_invited_address_is_stored_lowercased(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    """The property the whole login-side match depends on.
+
+    ``space_invitations.email`` carries a ``CHECK (email = lower(email))``, so an
+    un-normalised address would be a 500 rather than a silently unmatched
+    invitation — but only because that constraint exists. Normalising in
+    ``InvitationCreate`` is what makes it never reach the constraint, and this
+    asserts the stored value rather than the echoed one.
+    """
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations",
+        json={"email": "  MixedCase@Example.COM  "},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["email"] == "mixedcase@example.com"
+    assert _invitation_row(session, response.json()["id"]).email == "mixedcase@example.com"
+
+
+def test_the_role_defaults_to_member(api: Api, alice: User, space_a: Space) -> None:
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "plain@example.com"}
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["role"] == "member"
+
+
+@pytest.mark.parametrize(
+    "email",
+    ["not-an-address", "@example.com", "user@", "two@at@example.com", "spaced user@example.com"],
+    ids=["no-at", "no-local", "no-domain", "two-ats", "internal-space"],
+)
+def test_a_malformed_address_is_rejected_with_422(
+    api: Api, alice: User, space_a: Space, email: str
+) -> None:
+    """Junk is caught at the edge rather than stored as an unclaimable row.
+
+    Deliberately a shape check and not RFC 5322: an invitation grants nothing
+    until Auth0 asserts ``email_verified`` for the address, so this exists to
+    catch a transposed field, not to adjudicate deliverability.
+    """
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": email}
+    )
+
+    assert response.status_code == 422, response.text
+
+
+def test_inviting_an_existing_member_is_refused(
+    api: Api, session: Session, alice: User, carol: User, space_a: Space
+) -> None:
+    """409, and no row — a dead invitation nobody can claim is worse than an error.
+
+    Carol is already inside, so the invitation could never be accepted: the
+    login-time claim skips a Space she is already a member of. Left in the list
+    it would read as "invited, awaiting acceptance" forever.
+    """
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": carol.email}
+    )
+
+    assert response.status_code == 409, response.text
+    assert session.execute(select(SpaceInvitation)).scalars().all() == []
+
+
+def test_the_existing_member_check_is_case_insensitive(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    """``users.email`` has no lowercase constraint — it is whatever Auth0 sent.
+
+    So the membership check has to lower *both* sides. Comparing raw values would
+    let ``Carol@Example.com`` be invited into a Space ``carol@example.com``
+    already belongs to.
+    """
+    shouty = _make_user(session, "auth0|shouty", "Shouty@Example.com")
+    _add_member(session, space_a, shouty, MembershipRole.MEMBER)
+
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "shouty@example.com"}
+    )
+
+    assert response.status_code == 409, response.text
+
+
+def test_a_second_pending_invitation_is_refused(api: Api, alice: User, space_a: Space) -> None:
+    """A double-clicked button must not duplicate the row the first click made."""
+    first = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "twice@example.com"}
+    )
+    assert first.status_code == 201, first.text
+
+    second = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "twice@example.com"}
+    )
+    assert second.status_code == 409, second.text
+
+
+def test_a_duplicate_is_detected_across_casing(api: Api, alice: User, space_a: Space) -> None:
+    first = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "twice@example.com"}
+    )
+    assert first.status_code == 201, first.text
+
+    second = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "TWICE@EXAMPLE.COM"}
+    )
+    assert second.status_code == 409, second.text
+
+
+def test_the_same_address_may_be_invited_again_after_a_revocation(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    """The mirror of "denied in March, asking again in June".
+
+    This is why the unique index is partial. A plain ``UNIQUE (space_id, email)``
+    would make one revocation a permanent bar on ever inviting that address
+    again — and unlike a denial, a revocation is very often a mistake being
+    corrected.
+    """
+    first_id = (
+        api.as_user(alice)
+        .post(f"/spaces/{space_a.public_id}/invitations", json={"email": "again@example.com"})
+        .json()["id"]
+    )
+
+    revoked = api.as_user(alice).delete(f"/spaces/{space_a.public_id}/invitations/{first_id}")
+    assert revoked.status_code == 200, revoked.text
+
+    second = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations", json={"email": "again@example.com"}
+    )
+    assert second.status_code == 201, second.text
+    assert second.json()["id"] != first_id
+
+    # The revocation survives as history rather than being overwritten.
+    assert _invitation_row(session, first_id).status is InvitationStatus.REVOKED
+
+
+# --- Revocation is a transition, not a delete. ------------------------------
+
+
+def test_revoking_marks_the_row_rather_than_deleting_it(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    """The row is the record of who invited whom; a DELETE would erase it.
+
+    Asserted against the table, not the response: a handler that deleted the row
+    and echoed the payload back would produce an identical 200.
+    """
+    invitation_id = (
+        api.as_user(alice)
+        .post(f"/spaces/{space_a.public_id}/invitations", json={"email": "gone@example.com"})
+        .json()["id"]
+    )
+
+    response = api.as_user(alice).delete(f"/spaces/{space_a.public_id}/invitations/{invitation_id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "revoked"
+
+    row = _invitation_row(session, invitation_id)
+    assert row.status is InvitationStatus.REVOKED
+    assert row.invited_by_user_id == alice.id, "the audit trail must survive the revocation"
+
+
+def test_revoking_an_already_revoked_invitation_is_409(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """Not idempotent, deliberately.
+
+    The caller believes they are withdrawing something live. Succeeding twice
+    would hide that another admin got there first — the same reasoning that makes
+    re-archiving a Space a 409.
+    """
+    invitation_id = (
+        api.as_user(alice)
+        .post(f"/spaces/{space_a.public_id}/invitations", json={"email": "twice@example.com"})
+        .json()["id"]
+    )
+    url = f"/spaces/{space_a.public_id}/invitations/{invitation_id}"
+
+    assert api.as_user(alice).delete(url).status_code == 200
+    assert api.as_user(alice).delete(url).status_code == 409
+
+
+def test_revoking_an_accepted_invitation_is_409_and_leaves_the_membership(
+    api: Api, session: Session, alice: User, carol: User, space_a: Space
+) -> None:
+    """The case that makes a silent success dangerous.
+
+    Once accepted, the invitation has already produced a membership. Revoking it
+    does not — and must not pretend to — take that membership away: the admin
+    would be told access was withdrawn while Carol was still in the Space. The
+    409 sends them to ``DELETE .../members/{id}``, which is the action that
+    actually does what they meant.
+    """
+    invitation = SpaceInvitation(
+        space_id=space_a.id,
+        email=carol.email,
+        role=MembershipRole.MEMBER,
+        status=InvitationStatus.ACCEPTED,
+        invited_by_user_id=alice.id,
+        accepted_at=utcnow(),
+    )
+    session.add(invitation)
+    session.commit()
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+
+    response = api.as_user(alice).delete(f"/spaces/{space_a.public_id}/invitations/{invitation.id}")
+
+    assert response.status_code == 409, response.text
+    assert _invitation_row(session, invitation.id).status is InvitationStatus.ACCEPTED
+    assert (
+        _role_of(session, space_a, carol) is MembershipRole.MEMBER
+    ), "revoking must not be reported as removing an access it cannot remove"
+
+
+def test_an_invitation_from_another_space_cannot_be_revoked_here(
+    api: Api, session: Session, alice: User, bob: User, space_a: Space, space_b: Space
+) -> None:
+    """The id is scoped to the Space in the URL, not looked up globally.
+
+    Without the ``space_id`` filter, Alice — an owner in her own Space and a
+    stranger to Bob's — could revoke Bob's invitations by id alone, and the
+    per-Space authorization would never see it.
+    """
+    foreign_id = (
+        api.as_user(bob)
+        .post(f"/spaces/{space_b.public_id}/invitations", json={"email": "theirs@example.com"})
+        .json()["id"]
+    )
+
+    response = api.as_user(alice).delete(f"/spaces/{space_a.public_id}/invitations/{foreign_id}")
+
+    assert response.status_code == 404, response.text
+    assert _invitation_row(session, foreign_id).status is InvitationStatus.PENDING
+
+
+# --- An invitation may not out-rank its inviter. ----------------------------
+
+
+def test_an_admin_cannot_invite_at_owner(
+    api: Api, session: Session, alice: User, bob: User, space_a: Space
+) -> None:
+    """The escalation this rule exists to stop.
+
+    The members routes already forbid an admin granting ``owner`` directly. If an
+    admin could *invite* at ``owner``, they would simply invite a second address
+    of their own, log in with it, and hold the Space — the direct prohibition
+    would be decorative.
+    """
+    _add_member(session, space_a, bob, MembershipRole.ADMIN)
+
+    response = api.as_user(bob).post(
+        f"/spaces/{space_a.public_id}/invitations",
+        json={"email": "bobs-other-address@example.com", "role": "owner"},
+    )
+
+    assert response.status_code == 403, response.text
+    assert session.execute(select(SpaceInvitation)).scalars().all() == []
+
+
+def test_an_admin_may_invite_at_admin_and_member(
+    api: Api, session: Session, alice: User, bob: User, space_a: Space
+) -> None:
+    """The positive control.
+
+    Without it, the test above would pass just as happily against a rule that
+    forbade admins from inviting at all — which would break the delegation the
+    admin role exists to provide.
+    """
+    _add_member(session, space_a, bob, MembershipRole.ADMIN)
+    client = api.as_user(bob)
+
+    for role in ("admin", "member"):
+        response = client.post(
+            f"/spaces/{space_a.public_id}/invitations",
+            json={"email": f"{role}@example.com", "role": role},
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["role"] == role
+
+
+def test_an_owner_may_invite_at_owner(api: Api, alice: User, space_a: Space) -> None:
+    """The rule gates on authority, not on the role name."""
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/invitations",
+        json={"email": "co-owner@example.com", "role": "owner"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["role"] == "owner"
+
+
+# --- Who may see and manage the list. ---------------------------------------
+
+
+def test_a_plain_member_gets_403_on_every_invitation_route(
+    api: Api, session: Session, alice: User, carol: User, space_a: Space
+) -> None:
+    """403 rather than 404 — Carol is inside the Space and knows it exists.
+
+    What she lacks is the authority to decide who else is let in. The list is
+    admin-only too, not just the mutations: it names people who are *not*
+    members, which is not every member's business.
+    """
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+
+    invitation_id = (
+        api.as_user(alice)
+        .post(f"/spaces/{space_a.public_id}/invitations", json={"email": "who@example.com"})
+        .json()["id"]
+    )
+
+    client = api.as_user(carol)
+    base = f"/spaces/{space_a.public_id}/invitations"
+
+    assert client.post(base, json={"email": "carols-friend@example.com"}).status_code == 403
+    assert client.get(base).status_code == 403
+    assert client.delete(f"{base}/{invitation_id}").status_code == 403
+
+    assert _invitation_row(session, invitation_id).status is InvitationStatus.PENDING
+
+
+def test_the_invitation_list_is_filterable_by_status(api: Api, alice: User, space_a: Space) -> None:
+    client = api.as_user(alice)
+    base = f"/spaces/{space_a.public_id}/invitations"
+
+    revoked_id = client.post(base, json={"email": "revoked@example.com"}).json()["id"]
+    client.delete(f"{base}/{revoked_id}")
+    pending_id = client.post(base, json={"email": "pending@example.com"}).json()["id"]
+
+    assert [row["id"] for row in client.get(base, params={"status": "pending"}).json()] == [
+        pending_id
+    ]
+    assert [row["id"] for row in client.get(base, params={"status": "revoked"}).json()] == [
+        revoked_id
+    ]
+    # Unfiltered returns both: the resolved rows are retained precisely so an
+    # admin can see that an address was invited before.
+    assert len(client.get(base).json()) == 2
+
+
+@pytest.mark.parametrize(
+    "method,body",
+    [("POST", {"email": "late@example.com"}), ("DELETE", None)],
+    ids=["invite", "revoke"],
+)
+def test_an_archived_space_rejects_invitation_mutations(
+    api: Api,
+    session: Session,
+    alice: User,
+    space_a: Space,
+    method: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """Consistent with every other mutation on an archived Space (2.5, 2.6)."""
+    client = api.as_user(alice)
+    base = f"/spaces/{space_a.public_id}/invitations"
+    invitation_id = client.post(base, json={"email": "before@example.com"}).json()["id"]
+
+    assert client.post(f"/spaces/{space_a.public_id}/archive").status_code == 200
+
+    url = base if method == "POST" else f"{base}/{invitation_id}"
+    assert client.request(method, url, json=body).status_code == 409
+
+
+def test_an_archived_spaces_invitations_can_still_be_read(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """Archiving is not deletion — the history stays readable."""
+    client = api.as_user(alice)
+    base = f"/spaces/{space_a.public_id}/invitations"
+    client.post(base, json={"email": "before@example.com"})
+    client.post(f"/spaces/{space_a.public_id}/archive")
+
+    response = client.get(base)
+    assert response.status_code == 200, response.text
+    assert len(response.json()) == 1

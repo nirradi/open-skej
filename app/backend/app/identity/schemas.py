@@ -21,13 +21,15 @@ and the membership routes are addressed by it, so it has to cross the wire.
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.identity.models import (
     AccessRequestStatus,
+    InvitationStatus,
     MembershipRole,
     Space,
     SpaceAccessRequest,
+    SpaceInvitation,
     SpaceMembership,
     User,
 )
@@ -39,6 +41,9 @@ PreviewStatus = Literal["none", "pending", "denied", "member"]
 _NAME_MAX = 200
 _DESCRIPTION_MAX = 4000
 _MESSAGE_MAX = 1000
+# Matches ``users.email`` and ``space_invitations.email``, both String(320) — the
+# maximum length RFC 5321 permits for a full address.
+_EMAIL_MAX = 320
 
 
 class SpaceCreate(BaseModel):
@@ -186,4 +191,83 @@ class AccessRequestRead(BaseModel):
             created_at=request.created_at,
             decided_at=request.decided_at,
             decided_by_user_id=request.decided_by_user_id,
+        )
+
+
+class InvitationCreate(BaseModel):
+    """The body of ``POST /spaces/{public_id}/invitations``.
+
+    **The email is lowercased here, at the edge**, rather than in the service or
+    the router. ``space_invitations.email`` carries a
+    ``CHECK (email = lower(email))``, and the login-time claim in
+    ``app.auth.dependencies`` matches on the lowercased address, so an
+    un-normalised value would either be rejected by the database as a 500 or —
+    worse, had the constraint not existed — stored as ``Alice@Example.com`` and
+    silently never matched when Alice logged in. Normalising once, where the
+    value enters the system, is what makes "stored lowercased" a property of the
+    data rather than a habit of whichever caller wrote it.
+
+    Surrounding whitespace is stripped for the same reason: an address pasted out
+    of an email client routinely arrives with a trailing space, and a stored
+    ``"alice@example.com "`` would never match a token's ``alice@example.com``.
+
+    The shape check is deliberately minimal — one ``@`` with something either
+    side, no internal whitespace. It is here to catch a transposed field or an
+    obviously empty value, not to adjudicate RFC 5322; ``pydantic[email]`` would
+    need a new dependency, and the real proof that an address is deliverable and
+    belongs to its holder is Auth0's ``email_verified`` claim at login, which is
+    what actually gates the invitation being claimed.
+    """
+
+    email: str = Field(min_length=3, max_length=_EMAIL_MAX)
+    role: MembershipRole = MembershipRole.MEMBER
+
+    @field_validator("email")
+    @classmethod
+    def _normalise_email(cls, value: str) -> str:
+        email = value.strip().lower()
+
+        local, separator, domain = email.partition("@")
+        if not separator or not local or not domain or "@" in domain:
+            raise ValueError("email must be a single address of the form name@domain")
+        if any(character.isspace() for character in email):
+            raise ValueError("email may not contain whitespace")
+
+        return email
+
+
+class InvitationRead(BaseModel):
+    """One invitation, as shown to the admins managing the Space.
+
+    Only admin+ ever sees this model. That matters because it lists the email
+    addresses of people who are *not* members — an invitation to
+    ``someone@rival.example`` is visible here before they have accepted anything,
+    and exposing it to ordinary members would disclose who is being recruited
+    into the Space.
+
+    There is no ``invitation link`` field because there is no per-invitation
+    token: the invitee is admitted by the address on their verified token, so the
+    thing the inviter shares is the Space's ordinary ``public_id`` link. A
+    per-invitation secret would be a second capability to leak, and it would
+    admit whoever held it rather than whoever owns the address.
+    """
+
+    id: int
+    email: str
+    role: MembershipRole
+    status: InvitationStatus
+    invited_by_user_id: int
+    created_at: datetime
+    accepted_at: Optional[datetime]
+
+    @classmethod
+    def build(cls, invitation: SpaceInvitation) -> "InvitationRead":
+        return cls(
+            id=invitation.id,
+            email=invitation.email,
+            role=invitation.role,
+            status=invitation.status,
+            invited_by_user_id=invitation.invited_by_user_id,
+            created_at=invitation.created_at,
+            accepted_at=invitation.accepted_at,
         )
