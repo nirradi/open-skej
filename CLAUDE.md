@@ -57,6 +57,7 @@ When acting as the Lead Architect (Opus), you must strictly follow this loop wit
 
 1. **State Check:** Read the relevant plan file (`ops/plans/stream-N-plan.md`) to identify the next pending task.
 2. **Task Delegation (Headless Sub-agent):** Use your Bash tool to spawn a Sonnet sub-agent in non-interactive mode using the `-p` flag. You must pass `--allowedTools` so the sub-agent doesn't get blocked asking for permissions. Tasks are merged via PRs which you will review.
+   * **Never unset or override `CLAUDE_CONFIG_DIR`.** The harness exports it so the whole agent tree runs under the personal Claude config; sub-agents inherit it automatically, so just spawn `claude -p` normally. If you find it unset, stop and report rather than proceeding — running under the corporate config bills and logs against the wrong account.
    * *Example Command:* `claude -p "Complete Task 3.3 from ops/plans/stream-3-plan.md. Write the code and commit the changes and create a PR." --allowedTools "Read,Edit,Bash"`
 3. **Wait & Review:** The bash command will block until Sonnet finishes. Once the bash command returns successfully, use gh commands to review the code Sonnet just wrote.
 4. **Iterate or Update State:** * If the work is flawed, comment on the PR, use the Bash tool to run the headless Sonnet agent again, to read the feedback and fix the specific issues.
