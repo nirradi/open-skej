@@ -49,6 +49,7 @@ LAST_OWNER_DETAIL = (
     "This Space must always have at least one owner."
     " Promote another member to owner before changing this one."
 )
+OWNER_AUTHORITY_DETAIL = "Only an owner can grant the owner role or change an owner's membership."
 
 
 def _archived() -> HTTPException:
@@ -61,6 +62,10 @@ def _last_owner() -> HTTPException:
 
 def _member_not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MEMBER_NOT_FOUND_DETAIL)
+
+
+def _owner_authority_required() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWNER_AUTHORITY_DETAIL)
 
 
 @router.post("", response_model=SpaceRead, status_code=status.HTTP_201_CREATED)
@@ -163,15 +168,26 @@ def list_members(context: MemberContext, session: SessionDep) -> list[MemberRead
 def update_member(
     user_id: int, payload: MembershipUpdate, context: AdminContext, session: SessionDep
 ) -> MemberRead:
-    """Change a member's role. Refuses to demote the last owner (409)."""
+    """Change a member's role.
+
+    Admin+ to manage members and admins, but **owner** to grant the owner role or
+    to change an existing owner (403) — otherwise an admin could promote
+    themselves and take the Space. Refuses to demote the last owner (409).
+    """
     try:
         membership, user = service.change_member_role(
-            session, context.space, target_user_id=user_id, role=payload.role
+            session,
+            context.space,
+            target_user_id=user_id,
+            role=payload.role,
+            actor_role=context.role,
         )
     except service.SpaceArchivedError:
         raise _archived()
     except service.MemberNotFoundError:
         raise _member_not_found()
+    except service.OwnerAuthorityRequiredError:
+        raise _owner_authority_required()
     except service.LastOwnerError:
         raise _last_owner()
 
@@ -180,13 +196,21 @@ def update_member(
 
 @router.delete("/{public_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_member(user_id: int, context: AdminContext, session: SessionDep) -> Response:
-    """Remove a member. Refuses to remove the last owner (409)."""
+    """Remove a member.
+
+    Admin+ in general, but **owner** to remove an owner (403). Refuses to remove
+    the last owner (409).
+    """
     try:
-        service.remove_member(session, context.space, target_user_id=user_id)
+        service.remove_member(
+            session, context.space, target_user_id=user_id, actor_role=context.role
+        )
     except service.SpaceArchivedError:
         raise _archived()
     except service.MemberNotFoundError:
         raise _member_not_found()
+    except service.OwnerAuthorityRequiredError:
+        raise _owner_authority_required()
     except service.LastOwnerError:
         raise _last_owner()
 

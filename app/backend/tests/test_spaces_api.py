@@ -635,3 +635,95 @@ def test_no_response_body_exposes_the_integer_space_id(
     for response in responses:
         assert response.status_code < 400, response.text
         _assert_no_space_id(response.json(), f"{response.request.method} {response.request.url}")
+
+
+# --- Owner authority: admin+ manages members, but not owners. ----------------
+#
+# Managing members is delegable to admins; crossing into ownership is not. An
+# admin who could grant the owner role could grant it to themselves, and from
+# there archive the Space and demote the person who created it. The last-owner
+# check does not contain that on its own — it only refuses to remove the *final*
+# owner, so an admin could still evict or demote an owner whenever a second one
+# existed.
+
+
+def test_an_admin_cannot_promote_themselves_to_owner(
+    api: Api, session: Session, alice: User, bob: User, space_a: Space
+) -> None:
+    """The escalation this rule exists to stop.
+
+    Alice owns the Space; Bob is an admin. If Bob can PATCH his own membership to
+    ``owner``, "admin" is not a delegation of authority but a path to seizing it.
+    """
+    _add_member(session, space_a, bob, MembershipRole.ADMIN)
+
+    response = api.as_user(bob).patch(
+        f"/spaces/{space_a.public_id}/members/{bob.id}", json={"role": "owner"}
+    )
+
+    assert response.status_code == 403, response.text
+    assert _role_of(session, space_a, bob) is MembershipRole.ADMIN, "Bob must still be an admin"
+
+
+def test_an_admin_cannot_demote_an_owner(
+    api: Api, session: Session, alice: User, bob: User, carol: User, space_a: Space
+) -> None:
+    """Two owners exist, so the last-owner check would permit this. Authority does not."""
+    _add_member(session, space_a, bob, MembershipRole.ADMIN)
+    _add_member(session, space_a, carol, MembershipRole.OWNER)
+
+    response = api.as_user(bob).patch(
+        f"/spaces/{space_a.public_id}/members/{alice.id}", json={"role": "member"}
+    )
+
+    assert response.status_code == 403, response.text
+    assert _role_of(session, space_a, alice) is MembershipRole.OWNER
+
+
+def test_an_admin_cannot_remove_an_owner(
+    api: Api, session: Session, alice: User, bob: User, carol: User, space_a: Space
+) -> None:
+    _add_member(session, space_a, bob, MembershipRole.ADMIN)
+    _add_member(session, space_a, carol, MembershipRole.OWNER)
+
+    response = api.as_user(bob).delete(f"/spaces/{space_a.public_id}/members/{alice.id}")
+
+    assert response.status_code == 403, response.text
+    assert _role_of(session, space_a, alice) is MembershipRole.OWNER
+
+
+def test_an_admin_may_still_manage_ordinary_members(
+    api: Api, session: Session, alice: User, bob: User, carol: User, space_a: Space
+) -> None:
+    """The positive control.
+
+    Without this, the three tests above would all pass against a rule that simply
+    forbade admins from touching memberships at all — which would break the
+    delegation the admin role exists to provide.
+    """
+    _add_member(session, space_a, bob, MembershipRole.ADMIN)
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+
+    promote = api.as_user(bob).patch(
+        f"/spaces/{space_a.public_id}/members/{carol.id}", json={"role": "admin"}
+    )
+    assert promote.status_code == 200, promote.text
+    assert _role_of(session, space_a, carol) is MembershipRole.ADMIN
+
+    remove = api.as_user(bob).delete(f"/spaces/{space_a.public_id}/members/{carol.id}")
+    assert remove.status_code == 204, remove.text
+    assert _role_of(session, space_a, carol) is None
+
+
+def test_an_owner_may_grant_ownership(
+    api: Api, session: Session, alice: User, bob: User, space_a: Space
+) -> None:
+    """The other positive control: the rule gates on authority, not on the role name."""
+    _add_member(session, space_a, bob, MembershipRole.MEMBER)
+
+    response = api.as_user(alice).patch(
+        f"/spaces/{space_a.public_id}/members/{bob.id}", json={"role": "owner"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert _role_of(session, space_a, bob) is MembershipRole.OWNER

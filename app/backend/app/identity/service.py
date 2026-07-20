@@ -48,6 +48,21 @@ class LastOwnerError(Exception):
     """The change would leave the Space with no owner at all."""
 
 
+class OwnerAuthorityRequiredError(Exception):
+    """Only an owner may grant the owner role or act on an existing owner.
+
+    Without this, making "manage members" an admin capability is a privilege
+    escalation rather than a delegation: an admin could ``PATCH`` their own
+    membership to ``owner``, and from there archive the Space and demote the
+    person who created it. An admin could equally demote or remove an existing
+    owner outright, so long as a second owner existed to satisfy the last-owner
+    check — so that check alone does not contain this.
+
+    Managing *members and admins* is genuinely delegable and remains admin+. The
+    owner role is the one boundary an admin must not be able to cross unaided.
+    """
+
+
 def _require_active(space: Space) -> None:
     if space.archived_at is not None:
         raise SpaceArchivedError(space.public_id)
@@ -182,13 +197,21 @@ def list_members(session: Session, space: Space) -> Sequence[tuple[SpaceMembersh
 
 
 def change_member_role(
-    session: Session, space: Space, *, target_user_id: int, role: MembershipRole
+    session: Session,
+    space: Space,
+    *,
+    target_user_id: int,
+    role: MembershipRole,
+    actor_role: MembershipRole,
 ) -> tuple[SpaceMembership, User]:
     """Set a member's role, refusing to demote the last owner.
 
     The owner lock is taken *before* the membership is read, so the check and the
     write sit inside one serialised critical section. Reading first and locking
     afterwards would leave exactly the race the lock exists to close.
+
+    ``actor_role`` is required because the route's admin+ gate is not sufficient
+    on its own — see :class:`OwnerAuthorityRequiredError`.
     """
     _require_active(space)
 
@@ -197,6 +220,14 @@ def change_member_role(
     membership = _load_membership(session, space.id, target_user_id)
     if membership is None:
         raise MemberNotFoundError(target_user_id)
+
+    # Granting owner, or touching someone who already is one, takes owner
+    # authority. Checked after the membership load so a non-member still gets
+    # "no such member" rather than a permission error that would reveal who is
+    # and is not in the Space.
+    touches_ownership = role is MembershipRole.OWNER or membership.role is MembershipRole.OWNER
+    if touches_ownership and actor_role is not MembershipRole.OWNER:
+        raise OwnerAuthorityRequiredError(target_user_id)
 
     demoting_the_last_owner = role is not MembershipRole.OWNER and owners == [target_user_id]
     if demoting_the_last_owner:
@@ -209,7 +240,9 @@ def change_member_role(
     return membership, user
 
 
-def remove_member(session: Session, space: Space, *, target_user_id: int) -> None:
+def remove_member(
+    session: Session, space: Space, *, target_user_id: int, actor_role: MembershipRole
+) -> None:
     """Remove a member, refusing to remove the last owner.
 
     A membership row *is* deleted here, which is the one exception to this
@@ -217,6 +250,10 @@ def remove_member(session: Session, space: Space, *, target_user_id: int) -> Non
     their decided rows because those are a decision history worth auditing; a
     membership is current state, and a revoked one that lingered would have to be
     excluded from every permission query forever after.
+
+    ``actor_role`` gates removal of an owner — see
+    :class:`OwnerAuthorityRequiredError`. The last-owner check alone would not
+    stop an admin evicting an owner whenever a second owner happened to exist.
     """
     _require_active(space)
 
@@ -225,6 +262,9 @@ def remove_member(session: Session, space: Space, *, target_user_id: int) -> Non
     membership = _load_membership(session, space.id, target_user_id)
     if membership is None:
         raise MemberNotFoundError(target_user_id)
+
+    if membership.role is MembershipRole.OWNER and actor_role is not MembershipRole.OWNER:
+        raise OwnerAuthorityRequiredError(target_user_id)
 
     if owners == [target_user_id]:
         raise LastOwnerError(target_user_id)
