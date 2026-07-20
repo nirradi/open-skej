@@ -138,7 +138,7 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
   rejected. A single blanket "401 on bad token" test would pass against a verifier that rejects
   everything, so each rejection reason is asserted independently.
 
-- [ ] **2.4 — Auth0 tenant provisioning script.** `app/backend/scripts/auth0_provision.py`, driven by
+- [x] **2.4 — Auth0 tenant provisioning script.** _(DONE — merged as `e65f3b7`)_ `app/backend/scripts/auth0_provision.py`, driven by
   the M2M credentials in `.env`. Idempotent — read, then create *or* update; never blind-create:
   - Resource server / API `https://api.open-skej.dev`, RS256, RBAC enabled.
   - SPA application `open-skej-web` with `http://localhost:5173` callback, logout and web-origin URLs.
@@ -149,7 +149,7 @@ Everything else Stream 2 writes lives in new directories Stream 1 never opens: `
   mocked Management API and must prove idempotency: a second run issues `PATCH`, never a duplicate
   `POST`. The client secret is never logged or echoed.
 
-- [ ] **2.5 — Space endpoints + authorization dependency.** New `app/backend/app/identity/router.py`:
+- [x] **2.5 — Space endpoints + authorization dependency.** _(DONE — merged as `cfac771`)_ New `app/backend/app/identity/router.py`:
   - `POST /spaces` — creator becomes `owner`; returns the shareable `public_id` link.
   - `GET /spaces` — only Spaces I belong to. Archived excluded unless `?include_archived=true`.
   - `GET /spaces/{public_id}` — full detail, **members only**; `404` otherwise.
