@@ -150,12 +150,18 @@ def generate_rule(
     *,
     client: LLMClient,
     model: str = DEFAULT_MODEL,
+    previous_source: str | None = None,
+    failure: str | None = None,
 ) -> str:
     """Generate validated rule source for ``description``.
 
     Raises ``LLMCallError`` if the backend could not produce a completion, and
     ``RuleRejectedError`` if what it produced is not source the safety validator accepts. Both are
     ``GenerationError``; the retry loop cares which, because only the second is worth another try.
+
+    ``previous_source`` and ``failure`` are how the retry loop asks for a *correction* rather than
+    another independent attempt: the candidate that did not work and the account of how it did not.
+    Both are optional and neither is interpreted here — see ``build_prompt``.
 
     ``client`` is required and has no default: a module-level default client would make it possible
     to call a model by accident, including from a test that meant to mock one.
@@ -166,7 +172,11 @@ def generate_rule(
     if not description or not description.strip():
         raise ValueError("description must be a non-empty rule description")
 
-    response = client.complete(system=SYSTEM_PROMPT, prompt=build_prompt(description), model=model)
+    response = client.complete(
+        system=SYSTEM_PROMPT,
+        prompt=build_prompt(description, previous_source=previous_source, failure=failure),
+        model=model,
+    )
     source = strip_code_fence(response.text)
 
     if not source.strip():
@@ -185,19 +195,47 @@ def generate_rule(
     return source
 
 
-def build_prompt(description: str) -> str:
-    """The user turn: the constraint to enforce, and nothing else.
+def build_prompt(
+    description: str,
+    *,
+    previous_source: str | None = None,
+    failure: str | None = None,
+) -> str:
+    """The user turn: the constraint to enforce, plus the last attempt if there was one.
 
     Everything durable — the contract, the constraints, the worked example — is in the system
     prompt, so the part that changes per call stays this short. The description is delimited
     because it is untrusted text a Space admin typed; the delimiter does not make it safe, and
     nothing generated here runs without a human reading it first.
+
+    On a retry the failing source and the failure are handed back verbatim. Verbatim is the point:
+    a validator message names the construct and its line, and a pytest report names the assertion
+    and the values that broke it. Summarising either would leave the model to guess at the one
+    detail that tells it what to change.
+
+    The failing *tests* are deliberately not included. The pytest output already quotes the
+    assertion that failed, and handing the model the suite it must satisfy invites it to write a
+    rule shaped around those particular tests rather than around the constraint.
     """
-    return (
+    parts = [
         "Write the rule class for this booking constraint:\n\n"
-        f"<constraint>\n{description.strip()}\n</constraint>\n\n"
-        "Return only the Python source."
-    )
+        f"<constraint>\n{description.strip()}\n</constraint>"
+    ]
+    if previous_source and previous_source.strip():
+        parts.append(
+            "Your previous attempt did not work. This is what you wrote:\n\n"
+            f"<previous-attempt>\n{previous_source.strip()}\n</previous-attempt>"
+        )
+    if failure and failure.strip():
+        parts.append("This is how it failed:\n\n" f"<failure>\n{failure.strip()}\n</failure>")
+    if (previous_source and previous_source.strip()) or (failure and failure.strip()):
+        parts.append(
+            "Fix the problem and return the complete corrected class, not a patch or a diff. "
+            "Return only the Python source."
+        )
+    else:
+        parts.append("Return only the Python source.")
+    return "\n\n".join(parts)
 
 
 def strip_code_fence(text: str) -> str:
