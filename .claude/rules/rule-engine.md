@@ -73,7 +73,7 @@ contain a buggy rule.
 ## Safe execution
 
 Two halves, neither sufficient alone: `safety.py` validates candidate source statically before
-anything writes or runs it, and a subprocess sandbox bounds what execution can cost. The static pass
+anything writes or runs it, and `sandbox.py` bounds what execution can cost. The static pass
 cannot cap CPU or memory; the sandbox cannot tell a rule that reads the filesystem from one that
 reads a booking.
 
@@ -94,6 +94,26 @@ the authoritative list of what it rejects; the load-bearing choices are:
 **A generated rule cannot import `BaseRule`.** `rules` is not on the import allowlist, and widening
 it would readmit the whole package as a capability. `BaseRule`, `RuleResult` and the context types
 are free names in generated source, bound by the namespace that loads it.
+
+`sandbox.py` runs a candidate — and the tests written against it — in a subprocess under four
+bounds: a wall-clock timeout, an `RLIMIT_AS` memory cap, a curated environment inheriting nothing
+from the parent, and a fresh temp directory as cwd that is deleted with the run. The child gets its
+own process session and the timeout kills the whole session, so something the candidate spawned
+cannot outlive the run meant to bound it.
+
+It returns a `SandboxResult` and never raises for candidate misbehaviour; a caller mistake — an
+unusable filename, a non-positive timeout — does raise, the same split the controller draws between
+a denial and `ContextMismatchError`. **`SandboxResult.passed` is true for exactly one outcome of
+four**, so "we never found out" cannot be read as "it works". A timeout and a crash are not
+successes, and a pytest run that collected nothing is a crash rather than a failure: reporting it as
+a failure would invite a caller to read "the rule is wrong" where the truth is "the tests are
+missing". An unverifiable candidate does not advance to the canon.
+
+**Linux is the reference platform for the memory cap.** Linux honours `RLIMIT_AS` for the child's
+whole address space; macOS accepts the same call and does not reliably enforce it. The Linux
+behaviour is what is implemented — no weaker mechanism is substituted to make the platforms agree —
+and where the cap cannot be imposed, the timeout remains as the bound that always holds.
+`MEMORY_CAP_ENFORCED` reports which.
 
 ## AI generation loop
 
