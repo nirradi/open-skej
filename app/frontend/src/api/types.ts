@@ -162,6 +162,37 @@ export interface ApiInvalidRequest {
 }
 
 /**
+ * 409 with no `error` key — the request was understood and refused on a rule.
+ *
+ * Every domain refusal in `app/backend/app/identity/router.py` is one of these:
+ * demoting the last owner, mutating an archived Space, inviting an address that
+ * is already a member, revoking an invitation that was already accepted. They
+ * are raised as a bare `HTTPException`, so unlike the booking endpoints' two
+ * 409s they carry **no discriminator** — the status plus the prose is the whole
+ * message.
+ *
+ * ## Why `message` forwards the server's `detail`, when 401/403/404 do not
+ *
+ * `classifyByStatus` deliberately drops the server's `detail` for the three
+ * access statuses, because there it is diagnostic text about a token aimed at
+ * whoever holds it. The 409s are the opposite: `LAST_OWNER_DETAIL` reads "This
+ * Space must always have at least one owner. Promote another member to owner
+ * before changing this one." That is product copy, written for the admin who
+ * just clicked the button, and it names the remedy. Replacing it with
+ * "Something went wrong on our end" would turn a precise, actionable refusal
+ * into a bug report — the user would retry the same click forever.
+ *
+ * So the rule is per-status rather than global: the server owns the copy where
+ * the server is the only thing that knows the rule, and this client owns it
+ * where the server's text is about plumbing.
+ */
+export interface ApiConflict {
+  outcome: 'conflict'
+  /** The server's own copy, written for the user and shown verbatim. */
+  message: string
+}
+
+/**
  * The request never produced a recognised answer: the network failed, the
  * response was not JSON, or the server returned a status this client does not
  * model (a 500, say).
@@ -202,6 +233,117 @@ export type CancelBookingResult =
  */
 export type AuthenticatedResult<T> =
   ApiOk<T> | ApiUnauthenticated | ApiForbidden | ApiNotFound | ApiInvalidRequest | ApiFailure
+
+/**
+ * `AuthenticatedResult` plus the domain refusal, for routes that **write**.
+ *
+ * A separate alias rather than folding `conflict` into `AuthenticatedResult`
+ * itself, because that alias documents itself as "the floor, not a ceiling" and
+ * says an endpoint with a genuine extra outcome should declare its own union.
+ * A 409 is exactly that: no `GET` in the Space API can produce one, so widening
+ * the floor would put a permanently dead branch into `getCurrentUser`,
+ * `listMembers` and every other read — and a dead branch in an exhaustive
+ * `switch` is a branch a reader has to prove is dead before they can ignore it.
+ */
+export type MutatingResult<T> = AuthenticatedResult<T> | ApiConflict
+
+/** Mirrors `MembershipRole` in `app/backend/app/identity/models.py`. */
+export type MembershipRole = 'owner' | 'admin' | 'member'
+
+/** Mirrors `AccessRequestStatus` in `app/backend/app/identity/models.py`. */
+export type AccessRequestStatus = 'pending' | 'approved' | 'denied'
+
+/** Mirrors `InvitationStatus` in `app/backend/app/identity/models.py`. */
+export type InvitationStatus = 'pending' | 'accepted' | 'revoked'
+
+/** Mirrors `PreviewStatus` in `app/backend/app/identity/schemas.py`. */
+export type PreviewStatus = 'none' | 'pending' | 'denied' | 'member'
+
+/**
+ * Mirrors `SpaceRead` — a Space as seen from inside, by a member.
+ *
+ * **There is no `id` field, and adding one would be a security bug.** The
+ * backend's integer primary key is sequential and therefore enumerable;
+ * `public_id` is a 128-bit random token that *is* the capability granting access
+ * to the Space. `schemas.py` structurally refuses to serialise the integer, and
+ * this type mirrors that refusal so nothing downstream can start depending on
+ * one appearing.
+ *
+ * `my_role` travels with the Space so the UI can decide which controls to render
+ * without a second round trip. It is a convenience and never a security
+ * boundary — every privileged route re-checks the role server-side, so hiding a
+ * button on it is a tidiness measure, not an access control.
+ *
+ * `archived_at` non-null means the Space is closed: the server rejects every
+ * mutation on it with a 409, so the UI should stop offering them.
+ */
+export interface Space {
+  public_id: string
+  name: string
+  description: string | null
+  created_at: string
+  archived_at: string | null
+  my_role: MembershipRole
+}
+
+/**
+ * Mirrors `SpacePreview` — the thin view for someone holding the link.
+ *
+ * Deliberately carries no member list and no counts. Task 2.10 owns the screen
+ * that renders it; it lives here because it is part of the same wire contract.
+ */
+export interface SpacePreview {
+  public_id: string
+  name: string
+  description: string | null
+  status: PreviewStatus
+}
+
+/** Mirrors `MemberRead` — one membership, visible to people inside the Space. */
+export interface Member {
+  user_id: number
+  email: string
+  name: string | null
+  role: MembershipRole
+  created_at: string
+}
+
+/**
+ * Mirrors `AccessRequestRead` — one request in the admin review queue.
+ *
+ * `email` and `name` are joined in by the server precisely because this is the
+ * screen where an admin decides whether a stranger gets in, and a bare
+ * `user_id` gives them nothing to decide on.
+ */
+export interface AccessRequest {
+  id: number
+  user_id: number
+  email: string
+  name: string | null
+  status: AccessRequestStatus
+  message: string | null
+  created_at: string
+  decided_at: string | null
+  decided_by_user_id: number | null
+}
+
+/**
+ * Mirrors `InvitationRead` — one invitation, visible to admins only.
+ *
+ * There is no invitation token or per-invitation link here, and that is not an
+ * omission: the invitee is admitted by the verified address on their token, so
+ * the thing an inviter shares is the Space's ordinary `public_id` link. A
+ * per-invitation secret would be a second capability to leak.
+ */
+export interface Invitation {
+  id: number
+  email: string
+  role: MembershipRole
+  status: InvitationStatus
+  invited_by_user_id: number
+  created_at: string
+  accepted_at: string | null
+}
 
 /**
  * Mirrors the `GET /me` body in `app/backend/app/main.py`.
