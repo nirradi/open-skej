@@ -18,6 +18,8 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useAuth0 } from '@auth0/auth0-react'
 
+import { AuthConfigContext } from './authConfigContext'
+import type { Auth0ConfigResult } from './config'
 import { LoginControls, LogoutButton } from './LoginControls'
 import { ProtectedRoute } from './ProtectedRoute'
 
@@ -46,12 +48,24 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function renderGuarded() {
-  return render(
-    <ProtectedRoute>
-      <p data-testid="secret">Members only</p>
-    </ProtectedRoute>,
+/** A tenant that is configured, which is the precondition for the gate to run. */
+const CONFIGURED: Auth0ConfigResult = {
+  status: 'ok',
+  config: { domain: 'd.auth0.com', clientId: 'c', audience: 'https://api.open-skej.dev' },
+}
+
+function guarded(config: Auth0ConfigResult = CONFIGURED) {
+  return (
+    <AuthConfigContext value={config}>
+      <ProtectedRoute>
+        <p data-testid="secret">Members only</p>
+      </ProtectedRoute>
+    </AuthConfigContext>
   )
+}
+
+function renderGuarded(config: Auth0ConfigResult = CONFIGURED) {
+  return render(guarded(config))
 }
 
 describe('ProtectedRoute', () => {
@@ -107,14 +121,26 @@ describe('ProtectedRoute', () => {
     expect(screen.getByTestId('auth-loading')).toBeTruthy()
 
     auth0State({ isLoading: false, isAuthenticated: true })
-    rerender(
-      <ProtectedRoute>
-        <p data-testid="secret">Members only</p>
-      </ProtectedRoute>,
-    )
+    rerender(guarded())
 
     expect(screen.getByTestId('secret')).toBeTruthy()
     expect(screen.queryByTestId('auth-required')).toBeNull()
+  })
+
+  it('explains an unconfigured tenant instead of asking for a login that cannot work', () => {
+    // With no `VITE_AUTH0_*` there is no `Auth0Provider` in the tree, so this
+    // branch also has to render without ever calling `useAuth0` — which is why
+    // the check lives in a component above the one holding the hook.
+    auth0State({ isAuthenticated: false })
+
+    renderGuarded({ status: 'missing', missing: ['VITE_AUTH0_DOMAIN'] })
+
+    expect(screen.getByTestId('auth-config-missing')).toBeTruthy()
+    expect(screen.getByText('VITE_AUTH0_DOMAIN')).toBeTruthy()
+    // A login button here would be a dead end: there is no tenant to send
+    // anyone to.
+    expect(screen.queryByTestId('login-controls')).toBeNull()
+    expect(screen.queryByTestId('secret')).toBeNull()
   })
 })
 

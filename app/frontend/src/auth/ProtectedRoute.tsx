@@ -2,6 +2,8 @@ import type { ReactNode } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
 
 import { LoginControls } from './LoginControls'
+import { MissingConfigNotice } from './MissingConfigNotice'
+import { useAuthConfig } from './authConfigContext'
 
 /**
  * Gates its children on being signed in.
@@ -31,8 +33,28 @@ import { LoginControls } from './LoginControls'
  * to show *why* they were bounced. Rendering the controls in place keeps the URL
  * intact — which is what lets `LoginControls` return the user to this exact
  * route afterwards.
+ *
+ * ## Why the config check is a separate component
+ *
+ * With Auth0 unconfigured there is no `Auth0Provider` in the tree at all — see
+ * `AuthProvider`, which deliberately keeps rendering the app rather than taking
+ * the unauthenticated calendar down with it. `useAuth0()` therefore must not be
+ * called in that state, and a hook cannot be called conditionally. Splitting
+ * the check into this outer component and the hook into `SignedInGate` below
+ * keeps both rules satisfied without a conditional hook.
  */
 export function ProtectedRoute({ children }: { children: ReactNode }) {
+  const config = useAuthConfig()
+
+  if (config.status === 'missing') {
+    return <MissingConfigNotice missing={config.missing} />
+  }
+
+  return <SignedInGate>{children}</SignedInGate>
+}
+
+/** The actual gate. Only ever rendered inside a configured `Auth0Provider`. */
+function SignedInGate({ children }: { children: ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth0()
 
   if (isLoading) {

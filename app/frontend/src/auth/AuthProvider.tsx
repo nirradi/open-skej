@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Auth0Provider, type AppState } from '@auth0/auth0-react'
 
 import { AccessTokenBridge } from './AccessTokenBridge'
-import { MissingConfigNotice } from './MissingConfigNotice'
+import { AuthConfigContext } from './authConfigContext'
 import { readAuth0Config } from './config'
 
 /**
@@ -23,16 +23,34 @@ function onRedirectCallback(appState?: AppState) {
 }
 
 /**
- * Wraps the app in Auth0, or in an explanation of why it could not be.
+ * Wraps the app in Auth0 — or, when it cannot, gets out of the way.
  *
  * Lives above the router so route components can read auth state, and above
  * `AccessTokenBridge` so the api client has a token before anything fetches.
+ *
+ * ## An unconfigured tenant must not take the whole app down
+ *
+ * The tempting version of this returns `<MissingConfigNotice />` here and
+ * renders nothing else. It is wrong, and the E2E suite caught it: the calendar
+ * at `/` is unauthenticated and works perfectly well with no Auth0 tenant at
+ * all, so replacing the entire app left twelve passing Stream 1 browser tests
+ * staring at a configuration warning.
+ *
+ * So the failure is *reported*, not *enforced*, at this level. Children render
+ * either way; the status goes down as context, and `ProtectedRoute` — the only
+ * place that actually needs a tenant — shows the notice. The blast radius ends
+ * up matching the dependency.
+ *
+ * A consequence worth naming: with config missing there is no `Auth0Provider`
+ * below this, so `useAuth0()` must not be called anywhere that can render in
+ * that state. `ProtectedRoute` handles this by checking the context *before*
+ * delegating to the component that calls the hook.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   const result = readAuth0Config()
 
   if (result.status === 'missing') {
-    return <MissingConfigNotice missing={result.missing} />
+    return <AuthConfigContext value={result}>{children}</AuthConfigContext>
   }
 
   const { domain, clientId, audience } = result.config
@@ -61,7 +79,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Worth revisiting alongside the first real deployment — see DEFERRED.md.
       cacheLocation="localstorage"
     >
-      <AccessTokenBridge>{children}</AccessTokenBridge>
+      <AuthConfigContext value={result}>
+        <AccessTokenBridge>{children}</AccessTokenBridge>
+      </AuthConfigContext>
     </Auth0Provider>
   )
 }
