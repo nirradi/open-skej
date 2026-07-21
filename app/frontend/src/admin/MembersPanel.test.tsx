@@ -95,7 +95,10 @@ describe('MembersPanel', () => {
   })
 
   it('removes a member', async () => {
-    vi.mocked(removeMember).mockResolvedValue(ok(undefined))
+    // `null`, not `undefined`: `removeMember` is declared `MutatingResult<null>`,
+    // and a 204 carries no body to distinguish them at runtime — so only the
+    // typecheck catches the mismatch, which `vitest run` alone does not perform.
+    vi.mocked(removeMember).mockResolvedValue(ok(null))
     const { onMembershipChanged } = renderPanel()
 
     fireEvent.click(await screen.findByTestId('member-remove-2'))
