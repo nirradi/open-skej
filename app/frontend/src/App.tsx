@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react'
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
+import { AdminPage } from './admin'
 import type { Booking } from './api'
 import { AccountPage, ProtectedRoute } from './auth'
 import { BookingPanel, CancelPanel } from './booking'
@@ -93,6 +94,26 @@ function App() {
           element={
             <ProtectedRoute>
               <AccountPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          `/admin` sits behind the same guard as `/account`, and for the same
+          reason: `AdminPage` opens by calling `GET /spaces`, which is
+          authenticated, so an unguarded render would just fill the screen with
+          401s. The guard is convenience, not access control — `require_space_role`
+          re-checks every call behind this page.
+
+          `ProtectedRoute` also absorbs the missing-config case, rendering the
+          notice without ever calling `useAuth0()`. That matters here because
+          with `VITE_AUTH0_*` unset there is no `Auth0Provider` in the tree at
+          all, and `AdminPage` is reachable only through this element.
+        */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute>
+              <AdminPage />
             </ProtectedRoute>
           }
         />

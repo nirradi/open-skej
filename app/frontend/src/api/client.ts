@@ -9,6 +9,8 @@
  */
 
 import type {
+  AccessRequest,
+  AccessRequestStatus,
   ApiInvalidRequest,
   AuthenticatedResult,
   Booking,
@@ -16,7 +18,13 @@ import type {
   CreateBookingResult,
   CurrentUser,
   GetCurrentUserResult,
+  Invitation,
+  InvitationStatus,
   ListBookingsResult,
+  Member,
+  MembershipRole,
+  MutatingResult,
+  Space,
 } from './types'
 
 /**
@@ -73,6 +81,7 @@ type Envelope =
   | { kind: 'unauthenticated'; message: string }
   | { kind: 'forbidden'; message: string }
   | { kind: 'not_found'; message: string }
+  | { kind: 'conflict'; message: string }
   | { kind: 'failed'; message: string; cause?: unknown }
 
 /**
@@ -218,6 +227,15 @@ async function request(path: string, init?: RequestInit): Promise<Envelope> {
     return { kind: 'failed', message: NETWORK_FAILURE_MESSAGE, cause }
   }
 
+  // 204 has no body by definition, so parsing one would throw and land the
+  // caller in `failed` on a request that entirely succeeded. `DELETE
+  // /spaces/{id}/members/{id}` is the live case: removing a member answers 204,
+  // and without this the UI would report a removal that actually happened as an
+  // error and leave the admin clicking it again.
+  if (response.status === 204) {
+    return { kind: 'ok', body: null }
+  }
+
   let body: unknown
   try {
     body = await response.json()
@@ -251,6 +269,21 @@ async function request(path: string, init?: RequestInit): Promise<Envelope> {
   if (response.status === 400 || response.status === 422) {
     const detail = isRecord(body) ? body.detail : body
     return { kind: 'invalid_request', detail: formatDetail(detail), raw: body }
+  }
+
+  // An undiscriminated 409 is a domain refusal from the Space API, and its
+  // `detail` is the only statement of *which* rule said no — see `ApiConflict`
+  // for why this status forwards the server's copy where 401/403/404 discard
+  // it. Reached only after the discriminator check above, so the booking
+  // endpoints' `overlap` and `already_cancelled` are already claimed and cannot
+  // be captured here.
+  //
+  // A 409 whose `detail` is not a string falls through to `failed` rather than
+  // becoming a `conflict` with invented copy: the whole value of this variant is
+  // that it carries a real explanation, and one that says "something went wrong"
+  // is a failure wearing a conflict's clothes.
+  if (response.status === 409 && isRecord(body) && typeof body.detail === 'string') {
+    return { kind: 'conflict', message: body.detail }
   }
 
   const byStatus = classifyByStatus(response.status)
@@ -287,7 +320,7 @@ function classifyByStatus(status: number): Envelope | null {
 }
 
 /**
- * Folds an access outcome into `failed` for an endpoint that does not model it.
+ * Folds an outcome into `failed` for an endpoint that does not model it.
  *
  * The booking endpoints are the only callers: they predate auth and none of
  * them is behind `get_current_user` yet, so a 401 or 403 from one of them is
@@ -295,9 +328,21 @@ function classifyByStatus(status: number): Envelope | null {
  * Stream 4's space-scoping landed without these unions being widened to match.
  * Reporting that as `failed` with the specifics in `cause` says exactly that,
  * and — importantly — keeps their behaviour bit-for-bit what it was before this
- * task, since all three previously fell through to `failed` anyway.
+ * task, since all of these previously fell through to `failed` anyway.
+ *
+ * `conflict` joins the list for the same reason and with the same guarantee. An
+ * undiscriminated 409 on a booking route was already `failed` before this task,
+ * because the two booking conflicts both carry an `error` key and are claimed by
+ * the discriminator branch. Routing it here rather than widening
+ * `CreateBookingResult` is what keeps that promise: `BookingPanel` and
+ * `CancelPanel` switch exhaustively with no `default`, so a new variant in their
+ * unions would force edits to Stream 1 components — the boundary violation that
+ * task 2.8 declined for the access outcomes and that this task declines again.
+ * Widening those unions belongs to Stream 4.
  */
-function unmodelledAccessOutcome(kind: 'unauthenticated' | 'forbidden' | 'not_found'): {
+function unmodelledAccessOutcome(
+  kind: 'unauthenticated' | 'forbidden' | 'not_found' | 'conflict',
+): {
   outcome: 'failed'
   message: string
   cause: unknown
@@ -305,7 +350,7 @@ function unmodelledAccessOutcome(kind: 'unauthenticated' | 'forbidden' | 'not_fo
   return {
     outcome: 'failed',
     message: UNEXPECTED_FAILURE_MESSAGE,
-    cause: `unmodelled access outcome from an unauthenticated endpoint: "${kind}"`,
+    cause: `unmodelled outcome from an unauthenticated endpoint: "${kind}"`,
   }
 }
 
@@ -394,6 +439,7 @@ export async function listBookings(
     case 'unauthenticated':
     case 'forbidden':
     case 'not_found':
+    case 'conflict':
       return unmodelledAccessOutcome(envelope.kind)
     case 'failed':
       return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
@@ -434,6 +480,7 @@ export async function createBooking(startAt: Date, endAt: Date): Promise<CreateB
     case 'unauthenticated':
     case 'forbidden':
     case 'not_found':
+    case 'conflict':
       return unmodelledAccessOutcome(envelope.kind)
     case 'failed':
       return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
@@ -471,6 +518,7 @@ export async function cancelBooking(bookingId: number): Promise<CancelBookingRes
     case 'unauthenticated':
     case 'forbidden':
     case 'not_found':
+    case 'conflict':
       return unmodelledAccessOutcome(envelope.kind)
     case 'failed':
       return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
@@ -492,10 +540,10 @@ export async function cancelBooking(bookingId: number): Promise<CancelBookingRes
  * files, not by a runtime schema check the backend's own response model already
  * performs.
  */
-export async function authenticatedRequest<T>(
+export async function mutatingRequest<T>(
   path: string,
   init?: RequestInit,
-): Promise<AuthenticatedResult<T>> {
+): Promise<MutatingResult<T>> {
   const envelope = await request(path, init)
   switch (envelope.kind) {
     case 'ok':
@@ -508,6 +556,8 @@ export async function authenticatedRequest<T>(
       return { outcome: 'forbidden', message: envelope.message }
     case 'not_found':
       return { outcome: 'not_found', message: envelope.message }
+    case 'conflict':
+      return { outcome: 'conflict', message: envelope.message }
     case 'discriminated':
       // A route reached through here has declared it has no domain outcomes, so
       // an `error` key means the contract drifted rather than that something
@@ -515,6 +565,38 @@ export async function authenticatedRequest<T>(
       return unexpectedDiscriminator(envelope.error)
     case 'failed':
       return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
+  }
+}
+
+/**
+ * The read-only counterpart: the same narrowing, minus the domain refusal.
+ *
+ * A `GET` in the Space API has no 409 to give — there is no rule to break by
+ * looking at something — so this exists to keep that fact in the type rather
+ * than leaving every read with a branch it can never take. A 409 arriving here
+ * anyway is contract drift, and is reported as such instead of being handed to
+ * a caller who has nowhere to put it.
+ */
+export async function authenticatedRequest<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<AuthenticatedResult<T>> {
+  const result = await mutatingRequest<T>(path, init)
+  if (result.outcome === 'conflict') {
+    return {
+      outcome: 'failed',
+      message: UNEXPECTED_FAILURE_MESSAGE,
+      cause: `unexpected conflict from a read-only route: "${result.message}"`,
+    }
+  }
+  return result
+}
+
+/** JSON body plus the header that makes the server parse it. */
+function jsonBody(payload: unknown): RequestInit {
+  return {
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
   }
 }
 
@@ -530,4 +612,240 @@ export async function authenticatedRequest<T>(
  */
 export async function getCurrentUser(): Promise<GetCurrentUserResult> {
   return authenticatedRequest<CurrentUser>('/me')
+}
+
+/**
+ * `POST /spaces` — create a Space; the caller becomes its owner.
+ *
+ * **The `public_id` in the response is the only handle to this Space that will
+ * ever exist.** There is no lookup-by-name and no directory to recover it from,
+ * so a UI that discards this response has lost the Space. `listSpaces` will
+ * still return it — membership is the other way back in — but the *link*, the
+ * thing that lets anyone else reach it, exists nowhere but here and in that
+ * list.
+ */
+export async function createSpace(
+  name: string,
+  description?: string | null,
+): Promise<AuthenticatedResult<Space>> {
+  return authenticatedRequest<Space>('/spaces', {
+    method: 'POST',
+    ...jsonBody({ name, description: description ?? null }),
+  })
+}
+
+/**
+ * `GET /spaces` — the Spaces this caller is a member of.
+ *
+ * **Not a directory.** It is worth being explicit, because the name reads like
+ * one: this returns memberships, and a Space the caller has no relationship
+ * with is not merely filtered out of the response, it is unreachable by any
+ * route that does not already carry its unguessable `public_id`. There is no
+ * endpoint that enumerates Spaces and none should be built — the link is the
+ * capability, so a directory would hand away every capability at once.
+ *
+ * Archived Spaces are excluded unless asked for, since the common case is a
+ * working list and an archived Space accepts no mutations.
+ */
+export async function listSpaces(
+  options: { includeArchived?: boolean } = {},
+): Promise<AuthenticatedResult<Space[]>> {
+  const query = options.includeArchived ? '?include_archived=true' : ''
+  return authenticatedRequest<Space[]>(`/spaces${query}`)
+}
+
+/**
+ * `GET /spaces/{public_id}` — full detail, for members.
+ *
+ * A `not_found` here means "no such Space, **or** not yours", and the two are
+ * indistinguishable on purpose — see `ApiNotFound`. Copy must not resolve the
+ * ambiguity in either direction.
+ */
+export async function getSpace(publicId: string): Promise<AuthenticatedResult<Space>> {
+  return authenticatedRequest<Space>(`/spaces/${encodeURIComponent(publicId)}`)
+}
+
+/** `GET /spaces/{public_id}/members` — who is in the Space. Members and up. */
+export async function listMembers(publicId: string): Promise<AuthenticatedResult<Member[]>> {
+  return authenticatedRequest<Member[]>(`/spaces/${encodeURIComponent(publicId)}/members`)
+}
+
+/**
+ * `PATCH /spaces/{public_id}/members/{user_id}` — change a member's role.
+ *
+ * Three distinct refusals, and they mean different things to the person
+ * clicking:
+ *
+ * - `forbidden` — an admin tried to grant `owner`, or to change an existing
+ *   owner. Only an owner may do either, which is what stops an admin promoting
+ *   themselves and taking the Space.
+ * - `conflict` — the last owner cannot be demoted. The server's copy names the
+ *   remedy (promote someone else first) and should be shown verbatim.
+ * - `not_found` — either the Space is not yours or that user is not in it.
+ */
+export async function updateMemberRole(
+  publicId: string,
+  userId: number,
+  role: MembershipRole,
+): Promise<MutatingResult<Member>> {
+  return mutatingRequest<Member>(
+    `/spaces/${encodeURIComponent(publicId)}/members/${userId}`,
+    { method: 'PATCH', ...jsonBody({ role }) },
+  )
+}
+
+/**
+ * `DELETE /spaces/{public_id}/members/{user_id}` — remove a member.
+ *
+ * Resolves to `ok` with `null` data: the server answers 204 with no body, and
+ * there is nothing left to describe. Same authority rules as `updateMemberRole`
+ * — owner to remove an owner, and the last owner cannot be removed at all.
+ */
+export async function removeMember(
+  publicId: string,
+  userId: number,
+): Promise<MutatingResult<null>> {
+  return mutatingRequest<null>(`/spaces/${encodeURIComponent(publicId)}/members/${userId}`, {
+    method: 'DELETE',
+  })
+}
+
+/**
+ * `GET /spaces/{public_id}/access-requests` — the review queue. Admin and up.
+ *
+ * A plain member gets `forbidden` rather than `not_found`: they are already
+ * inside the Space and know it exists, so there is nothing left for a 404 to
+ * conceal.
+ */
+export async function listAccessRequests(
+  publicId: string,
+  options: { status?: AccessRequestStatus } = {},
+): Promise<AuthenticatedResult<AccessRequest[]>> {
+  const query = options.status ? `?status=${encodeURIComponent(options.status)}` : ''
+  return authenticatedRequest<AccessRequest[]>(
+    `/spaces/${encodeURIComponent(publicId)}/access-requests${query}`,
+  )
+}
+
+/**
+ * `POST /spaces/{public_id}/access-requests/{id}/approve` — let them in.
+ *
+ * **Grants `member`, and takes no role argument, by design.** The approval and
+ * the membership are written in one transaction, so a request is never left
+ * approved without the membership that makes it mean something. An admin who
+ * wants the new arrival at a higher role promotes them afterwards through
+ * `updateMemberRole`, which is the one place the owner-authority and last-owner
+ * invariants live — adding a role to this call would duplicate that
+ * authorization logic into a second path for no product gain.
+ *
+ * `conflict` means the request was already decided, usually because another
+ * admin got there first.
+ */
+export async function approveAccessRequest(
+  publicId: string,
+  requestId: number,
+): Promise<MutatingResult<AccessRequest>> {
+  return mutatingRequest<AccessRequest>(
+    `/spaces/${encodeURIComponent(publicId)}/access-requests/${requestId}/approve`,
+    { method: 'POST' },
+  )
+}
+
+/**
+ * `POST /spaces/{public_id}/access-requests/{id}/deny` — turn them down.
+ *
+ * Not a permanent bar: the row is kept as history rather than deleted, and only
+ * *pending* requests are unique per user, so the same person may ask again.
+ */
+export async function denyAccessRequest(
+  publicId: string,
+  requestId: number,
+): Promise<MutatingResult<AccessRequest>> {
+  return mutatingRequest<AccessRequest>(
+    `/spaces/${encodeURIComponent(publicId)}/access-requests/${requestId}/deny`,
+    { method: 'POST' },
+  )
+}
+
+/**
+ * `GET /spaces/{public_id}/invitations` — who has been invited. Admin and up.
+ *
+ * Admin-only rather than member-visible because it lists the addresses of
+ * people who are *not* in the Space: who is being recruited is not every
+ * member's business.
+ */
+export async function listInvitations(
+  publicId: string,
+  options: { status?: InvitationStatus } = {},
+): Promise<AuthenticatedResult<Invitation[]>> {
+  const query = options.status ? `?status=${encodeURIComponent(options.status)}` : ''
+  return authenticatedRequest<Invitation[]>(
+    `/spaces/${encodeURIComponent(publicId)}/invitations${query}`,
+  )
+}
+
+/**
+ * `POST /spaces/{public_id}/invitations` — pre-approve an address at a role.
+ *
+ * **Nothing is emailed.** The row records that the address is pre-approved and
+ * the inviter shares the Space's link themselves. The invitee is admitted on
+ * their first login, and only when their token carries `email_verified: true` —
+ * an invitation trusts the *proof* of an address, never the address as typed.
+ *
+ * `forbidden` means the requested role is above the caller's own; `conflict`
+ * means the address is already a member or already has a pending invitation.
+ * The UI should not offer a role above the caller's, but must still handle the
+ * 403 — the select is a convenience and the server is the boundary.
+ */
+export async function createInvitation(
+  publicId: string,
+  email: string,
+  role: MembershipRole,
+): Promise<MutatingResult<Invitation>> {
+  return mutatingRequest<Invitation>(`/spaces/${encodeURIComponent(publicId)}/invitations`, {
+    method: 'POST',
+    ...jsonBody({ email, role }),
+  })
+}
+
+/**
+ * `DELETE /spaces/{public_id}/invitations/{id}` — withdraw a pending invitation.
+ *
+ * A `DELETE` by URL shape but a status transition underneath, which is why it
+ * returns the invitation rather than 204: the row survives as `revoked` so the
+ * record of who invited whom is not erased along with the access, and its
+ * `status` is the evidence the revocation took effect.
+ *
+ * `conflict` means it was already accepted or already revoked. The accepted
+ * case matters: that person is a member by now, and revoking would not remove
+ * the membership — succeeding here would tell the admin they had withdrawn
+ * access the invitee still holds.
+ */
+export async function revokeInvitation(
+  publicId: string,
+  invitationId: number,
+): Promise<MutatingResult<Invitation>> {
+  return mutatingRequest<Invitation>(
+    `/spaces/${encodeURIComponent(publicId)}/invitations/${invitationId}`,
+    { method: 'DELETE' },
+  )
+}
+
+/**
+ * `POST /spaces/{public_id}/archive` — end a Space. **Owner only.**
+ *
+ * Restricted more tightly than the other mutations because it is the one action
+ * with no inverse: there is no un-archive endpoint. An archived Space rejects
+ * every subsequent mutation with a `conflict`, so the UI should stop offering
+ * them once `archived_at` is set rather than letting an admin discover it one
+ * refusal at a time.
+ *
+ * What archiving means for the bookings already made against the Space is
+ * deliberately unanswered here — that is Stream 4's question. This only stamps
+ * `archived_at`.
+ */
+export async function archiveSpace(publicId: string): Promise<MutatingResult<Space>> {
+  return mutatingRequest<Space>(`/spaces/${encodeURIComponent(publicId)}/archive`, {
+    method: 'POST',
+  })
 }
