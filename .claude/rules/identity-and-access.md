@@ -13,8 +13,7 @@ component's business.
 database schema.
 
 `app/backend/app/identity/models.py` and `authz.py` are the authoritative statements of the schema
-and the authorization rule. Both carry the reasoning inline. Read them before changing either; where
-they and this document disagree, the code wins.
+and the authorization rule, and both carry their reasoning inline.
 
 ## Auth0 proves identity; we decide permissions
 

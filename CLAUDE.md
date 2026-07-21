@@ -41,8 +41,7 @@ rules/rules/
 
 ## Cross-cutting invariants
 
-These hold everywhere and are not any one component's private business. Breaking one is a change to
-the architecture, not a local implementation choice.
+These hold everywhere and are not any one component's private business.
 
 **UTC everywhere.** Every datetime crossing a module boundary is timezone-aware with a **zero** UTC
 offset. Naive datetimes and non-zero offsets are rejected at construction (`UtcDateTime` in the
@@ -61,19 +60,12 @@ exists and turn every capability URL into an oracle. The integer primary key is 
 decided rows as history. Consequently no foreign key carries `ON DELETE CASCADE` — there is no delete
 to cascade, and one added later would quietly destroy the audit trail.
 
-**Code outranks prose.** Where these documents and the code disagree, the code is correct and the
-document is stale. Fix the document.
-
 ## Domain documents
 
 Each domain's contracts, decisions and rationale live beside this file and are auto-loaded with it:
 
 * `.claude/rules/identity-and-access.md` — users, Spaces, memberships, authorization.
 * `.claude/rules/rule-engine.md` — the rule contract, the execution model, AI rule generation.
-
-Each is named for the domain it describes, never for whatever effort happened to build it: the
-identity model outlives the work that produced it, and a document named after that work looks
-obsolete the moment the work finishes.
 
 ## Keeping these documents live
 
@@ -101,3 +93,14 @@ from now who has no idea what task 2.5 was and cannot look it up.
 current rationale. Do not append "previously we did X" — an architecture doc is a description of the
 present, and a changelog embedded in it is read as a live description of a system that no longer
 exists. Git holds the history.
+
+**Name a domain document for the domain it describes**, never for whatever effort produced it. The
+identity model outlives the work that built it, and a document named after that work looks obsolete
+the moment the work finishes.
+
+**Where these documents and the code disagree, the code is correct** and the document is stale. Fix
+the document.
+
+Everything outside this section describes only what is true now. Guidance on writing these documents
+belongs here and nowhere else — a rule stated inside a description is one an editor of that
+description will not think to look for.

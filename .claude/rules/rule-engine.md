@@ -11,8 +11,7 @@ The isolated Python environment that decides whether a booking is permitted.
 and the generation loop. Strictly backend execution logic; it holds no HTTP, no ORM, and no UI.
 
 `rules/rules/interfaces.py` is the authoritative contract and `controller.py` the authoritative
-execution model. **Read `interfaces.py` before writing any rule.** Where this document and the code
-disagree, the code wins.
+execution model.
 
 ## Fail closed — non-negotiable
 
