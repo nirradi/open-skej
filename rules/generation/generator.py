@@ -77,6 +77,13 @@ and `rules` is not on its import allowlist — `from rules.interfaces import Bas
 validation on line one and the whole candidate is thrown away. The only modules you may import at \
 all are `datetime`, `zoneinfo` and `math`.
 
+   Those six names are the ONLY free names you get. Everything else you use, you must import: if \
+your rule mentions `timedelta`, `datetime`, `date` or `timezone`, begin your source with \
+`from datetime import timedelta` (and whichever others you use). This is the single most common \
+way a candidate fails — the validator is a syntax check and will happily pass a rule that names \
+`timedelta` without importing it, and the rule then dies with `NameError` the moment it loads, \
+including in a default argument like `window=timedelta(days=7)`.
+
 2. FAIL CLOSED. Never catch your own exception and return a pass, and never return anything that \
 is not a RuleResult. The engine already contains a rule that raises and a rule that returns \
 nonsense, and turns both into a refusal — but a rule that swallows its own errors into \

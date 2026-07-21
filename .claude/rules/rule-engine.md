@@ -170,6 +170,41 @@ and where the cap cannot be imposed, the timeout remains as the bound that alway
 * **Generator** — takes a natural-language prompt ("users can only book twice a rolling week") and
   emits a Python class inheriting `BaseRule`, relying only on `HistoryContext` and standard
   `datetime` math, with **parameterized** variables so the rule is reusable.
+
+`rules/generation/` is a **sibling package of `rules`**, not part of it. `rules` is what the booking
+API imports and runs in-process; this is what a developer runs at a terminal to produce a candidate.
+The separation is what makes "nothing generated is imported by the app" a property of the layout
+rather than a promise.
+
+**The model is called through an `LLMClient` seam** — one method, `complete(system, prompt, model)` —
+not an SDK directly. `ClaudeCliClient` shells out to `claude -p --output-format json` and so needs no
+API key, only an authenticated CLI: an acceptable dependency for a developer tool whose output is a
+file a human reviews, and one the booking API never carries.
+
+**The CLI cannot serve the benchmark, which is why the seam exists.** A call whose real prompt is 10
+input / 40 output tokens is billed for ~11.5k tokens of harness preamble at $0.015–0.023, and
+`--system-prompt` with `--exclude-dynamic-system-prompt-sections` does not strip it — the overhead
+stays and the cost *rises*, by losing the cache hit. Token, latency and cost figures measured through
+this client describe the harness, not the prompt. An SDK implementation plugs into the same protocol
+and is what `benchmark.py` must be given.
+
+**A failed CLI call is identified by `is_error` and the exit code, never by `subtype`.** A run that
+404s on an unknown model id exits 1 and reports `is_error: true` while still reporting
+`subtype: "success"`; reading the subtype would pass a human-readable error string on as if it were
+rule source, to be rejected later for a syntax error and blamed on the model.
+
+**Generated source is validated inside `generate_rule`**, after the markdown fence is stripped, so no
+caller can hold unvalidated candidate source. A rejection raises `RuleRejectedError` carrying the
+validator's message verbatim — it names the construct and its line, which is exactly what the retry
+loop hands back, and paraphrasing would cost the model the detail that lets it fix the candidate.
+
+**The system prompt states every constraint the validator enforces**, because enforcement without
+instruction means every candidate fails and the retry budget is spent rediscovering a rule that could
+have been stated once. Two of them are counter-intuitive and were observed failing against a live
+model: `super().__init__()` is rejected by the dunder-attribute ban, so a generated `__init__` must
+not call it; and **only the engine types are free names** — a rule naming `timedelta` must still
+import it, or it passes the validator (a syntax check) and dies with `NameError` on load, including
+from a default argument.
 * **Tester (adversary)** — takes the generated code and writes `pytest` functions: positive cases
   that should pass and negative edge cases that should fail (timezone overlaps, the third booking).
 * **The loop** — run the Tester's tests against the Generator's code in the sandbox. On failure feed

@@ -233,6 +233,20 @@ def test_system_prompt_names_the_whole_import_allowlist():
         assert module in SYSTEM_PROMPT
 
 
+def test_system_prompt_demands_datetime_be_imported_not_assumed_free():
+    """The engine types are free names; ``timedelta`` is not, and a model conflates the two.
+
+    Observed against a live model: told only that the engine types are free names, it emitted
+    ``window=timedelta(days=7)`` as a default argument with no import. ``validate_source`` is a
+    syntax check and passes that happily — the candidate then dies with ``NameError`` the instant it
+    loads, spending one of three retries on an import almost every rule needs. Naming the failure in
+    the prompt is what stops it, so this pins the instruction itself.
+    """
+    assert "from datetime import timedelta" in SYSTEM_PROMPT
+    assert "must import" in SYSTEM_PROMPT
+    assert "NameError" in SYSTEM_PROMPT
+
+
 def test_system_prompt_states_the_fail_closed_policy():
     assert "FAIL CLOSED" in SYSTEM_PROMPT
     assert "Never catch your own exception and return a pass" in SYSTEM_PROMPT
