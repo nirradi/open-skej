@@ -70,6 +70,36 @@ against the context (`Context` cannot do this itself — the request is not in s
 built), run the canon in order **fail-fast** (the first denial wins and nothing after it runs), and
 contain a buggy rule.
 
+## The canon
+
+`canon.py` holds the four hand-written rules every Space enforces: `NotInThePastRule()`,
+`BookingHorizonRule(days)`, `MaxDurationRule(max_duration)`, `AvailabilityHoursRule(opens_at,
+closes_at)`. They are written by hand rather than generated — they are the reference the generation
+loop is measured against, and the worked example of the rule shape.
+
+**Parameters live on the instance, never as module constants.** A Space allowing 45-minute bookings
+and one allowing two hours are the same rule with different arguments, so per-Space configuration
+becomes a change to how the canon is built rather than a change to any rule. `DEFAULT_CANON` supplies
+the values in force today.
+
+**The order is `(NotInThePast, BookingHorizon, MaxDuration, AvailabilityHours)`, and it arbitrates
+user-facing copy.** The controller is fail-fast, so the first rule to deny decides the single message
+shown when a request breaks several rules at once. The date rules run first because they reject a
+booking on *when* it is, which no shortening or shifting within the day can fix; telling someone to
+trim a three-hour booking that sits 90 days out sends them to fix the one thing that is not the
+problem. Duration and availability hours are remedies the user can apply to an otherwise bookable
+date, so they follow. Past and horizon are mutually exclusive and never arbitrate against each other.
+
+**Denial copy is contract, not wording.** `app/e2e/tests/03-sad-path.spec.ts` asserts the
+max-duration message as a full-string match and reproduces the singular/plural and `" and "` join of
+the engine's duration formatting. Rewording a canon message is a breaking change to a test in another
+package.
+
+**Availability hours are UTC hours.** `opens_at` and `closes_at` are UTC clock times and
+`start_at.time()` is a UTC wall clock, so a Space opening at 06:00 local does not open at
+`time(6, 0)` unless it sits on UTC. Rendering those bounds in a viewer's timezone is the UI's job;
+the engine has no timezone to convert from.
+
 ## Safe execution
 
 Two halves, neither sufficient alone: `safety.py` validates candidate source statically before
