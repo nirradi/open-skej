@@ -33,6 +33,9 @@ app/backend/app/
   routers/       Booking endpoints
   rules_stub.py  Placeholder engine; replaced by `rules/` at integration
 app/frontend/    React SPA
+  src/auth/      Auth0 wiring, the session guard, the api client's token bridge
+  src/space/     `/s/{public_id}` — the cold link-holder preview and access request
+  src/admin/     Space creation, members, invitations, the access-request queue
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/
   interfaces.py  The rule contract — authoritative, read before writing any rule

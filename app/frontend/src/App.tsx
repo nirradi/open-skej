@@ -7,6 +7,7 @@ import { AccountPage, ProtectedRoute } from './auth'
 import { BookingPanel, CancelPanel } from './booking'
 import { CalendarGrid, type SelectedInterval } from './calendar'
 import { assertConfigIsCoherent, calendarConfig, slotsPerDay } from './config'
+import { SpacePage } from './space'
 
 // Fail at boot rather than rendering a subtly wrong grid.
 assertConfigIsCoherent()
@@ -117,6 +118,20 @@ function App() {
             </ProtectedRoute>
           }
         />
+        {/*
+          `/s/{public_id}` is deliberately **not** wrapped in `ProtectedRoute`,
+          and it is the only authenticated-ish route that isn't.
+
+          It is the outside of the door: the link is the capability, handing it
+          out is the whole distribution model, and whoever opens it may have no
+          account at all. `ProtectedRoute` renders "You need an account to see
+          this page", which is true of a members-only screen and wrong here —
+          this screen's job is to explain what the link is and offer the way in.
+          `SpacePage` therefore runs the config check and the session check
+          itself, with its own copy, and returns the visitor to this exact URL
+          after login.
+        */}
+        <Route path="/s/:publicId" element={<SpacePage />} />
       </Routes>
     </BrowserRouter>
   )

@@ -32,12 +32,14 @@ import {
   listInvitations,
   listMembers,
   listSpaces,
+  previewSpace,
   removeMember,
+  requestAccess,
   revokeInvitation,
   updateMemberRole,
 } from './client'
 import { createBooking } from './client'
-import type { AccessRequest, Invitation, Member, Space } from './types'
+import type { AccessRequest, Invitation, Member, Space, SpacePreview } from './types'
 
 const space: Space = {
   public_id: 'aBcDeFgHiJkLmNoPqRsTuV',
@@ -46,6 +48,13 @@ const space: Space = {
   created_at: '2026-07-01T09:00:00Z',
   archived_at: null,
   my_role: 'owner',
+}
+
+const preview: SpacePreview = {
+  public_id: 'aBcDeFgHiJkLmNoPqRsTuV',
+  name: 'Tennis court',
+  description: 'The one by the car park',
+  status: 'none',
 }
 
 const member: Member = {
@@ -448,6 +457,77 @@ describe('archiveSpace', () => {
     const result = await archiveSpace(space.public_id)
 
     expect(result.outcome).toBe('forbidden')
+  })
+})
+
+describe('previewSpace', () => {
+  it('fetches the preview and returns it', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, preview))
+
+    const result = await previewSpace(space.public_id)
+
+    expect(lastRequest().url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/preview`)
+    expect(result).toEqual({ outcome: 'ok', data: preview })
+  })
+
+  it('percent-encodes the public id rather than pasting it into the path', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { detail: 'Not found' }))
+
+    // `public_id` is `token_urlsafe`, so it never legitimately needs escaping.
+    // The point is that a *hand-typed* URL cannot reach a different route: the
+    // id comes straight off the address bar, and `/spaces/../me/preview` must
+    // stay a lookup for a nonexistent Space.
+    await previewSpace('../me')
+
+    expect(lastRequest().url).toBe(`${API_BASE_URL}/spaces/..%2Fme/preview`)
+  })
+
+  it('resolves a 404 to not_found with copy that does not claim the Space exists', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { detail: 'Space not found.' }))
+
+    const result = await previewSpace(space.public_id)
+
+    expect(result.outcome).toBe('not_found')
+    if (result.outcome === 'not_found') {
+      expect(result.message).not.toMatch(/access|permission|member/i)
+    }
+  })
+})
+
+describe('requestAccess', () => {
+  it('posts the message and returns the pending request', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, accessRequest))
+
+    const result = await requestAccess(space.public_id, "I'm on the Tuesday team")
+
+    const { url, init } = lastRequest()
+    expect(url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/access-requests`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ message: "I'm on the Tuesday team" })
+    expect(result).toEqual({ outcome: 'ok', data: accessRequest })
+  })
+
+  it('sends an explicit null message when none is given', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(201, accessRequest))
+
+    await requestAccess(space.public_id)
+
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual({ message: null })
+  })
+
+  it("forwards the server's copy for a refusal it is the only thing that knows", async () => {
+    // Archived, already a member, already pending — three refusals distinguished
+    // only in prose, so the sentence *is* the answer and must survive verbatim.
+    fetchMock.mockResolvedValue(
+      jsonResponse(409, { detail: 'You already have a pending request for this Space.' }),
+    )
+
+    const result = await requestAccess(space.public_id)
+
+    expect(result).toEqual({
+      outcome: 'conflict',
+      message: 'You already have a pending request for this Space.',
+    })
   })
 })
 

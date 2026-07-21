@@ -25,6 +25,7 @@ import type {
   MembershipRole,
   MutatingResult,
   Space,
+  SpacePreview,
 } from './types'
 
 /**
@@ -663,6 +664,53 @@ export async function listSpaces(
  */
 export async function getSpace(publicId: string): Promise<AuthenticatedResult<Space>> {
   return authenticatedRequest<Space>(`/spaces/${encodeURIComponent(publicId)}`)
+}
+
+/**
+ * `GET /spaces/{public_id}/preview` — the cold link-holder view.
+ *
+ * The outside of the door: name, description, and the caller's own standing
+ * (`none | pending | denied | member`). No member list, no counts, no bookings —
+ * everything here is disclosed to whoever the link was forwarded to.
+ *
+ * **Authenticated, despite being the route for people who are not members.** It
+ * sits behind `get_current_user` because the status it reports is a fact about
+ * *you*, and there is no "you" to report on for an anonymous caller. A signed-out
+ * visitor holding a link must therefore sign in before they see even the Space's
+ * name — the screen rendering this has to say so rather than showing an empty
+ * card or a 401.
+ *
+ * `not_found` here means "no such Space" more literally than elsewhere in this
+ * client — the route performs no membership check, so there is nothing for the
+ * 404 to conceal. Copy must still not resolve it that way: the same UI renders
+ * this result and the ones from routes that *do* hide a membership check behind
+ * a 404, and a message that assumes otherwise would leak on those.
+ */
+export async function previewSpace(publicId: string): Promise<AuthenticatedResult<SpacePreview>> {
+  return authenticatedRequest<SpacePreview>(`/spaces/${encodeURIComponent(publicId)}/preview`)
+}
+
+/**
+ * `POST /spaces/{public_id}/access-requests` — ask to be let in.
+ *
+ * Reachable without a membership, necessarily: requiring membership to ask for
+ * membership would make the door unopenable. The row it writes grants nothing by
+ * itself; an admin approves it from the dashboard.
+ *
+ * `conflict` covers all three refusals the server distinguishes only in prose —
+ * the Space is archived, you are already a member, or you already have a request
+ * pending — and its `detail` is product copy meant to be shown verbatim. There is
+ * no discriminator to branch on, and inventing one here would mean parsing the
+ * server's sentence.
+ */
+export async function requestAccess(
+  publicId: string,
+  message?: string | null,
+): Promise<MutatingResult<AccessRequest>> {
+  return mutatingRequest<AccessRequest>(
+    `/spaces/${encodeURIComponent(publicId)}/access-requests`,
+    { method: 'POST', ...jsonBody({ message: message ?? null }) },
+  )
 }
 
 /** `GET /spaces/{public_id}/members` — who is in the Space. Members and up. */
