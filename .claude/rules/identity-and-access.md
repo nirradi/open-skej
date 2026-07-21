@@ -117,6 +117,26 @@ Postgres is the only target. `postgresql_where` predicates are not a portability
 ## Frontend
 
 Auth0 React SDK for login/logout. An admin dashboard for Space creation, share links, and member
-management. A `/s/{public_id}` route rendering the cold-link preview and the access request.
+management. Role menus offer only roles at or below the actor's own, which is a convenience — the
+server's 403 is the boundary.
+
+`/s/{public_id}` renders the cold-link preview and the access request. It is **the only public entry
+point**, and the one route outside the session guard, because everything it exists to serve is a
+person who is not yet a member. Four properties follow from that and are load-bearing:
+
+* **It checks its own Auth0 configuration before any hook runs.** With the tenant unset there is no
+  `Auth0Provider` in the tree at all — the app keeps rendering so the unauthenticated calendar
+  survives a missing tenant — and calling `useAuth0()` in that state throws. The check lives in an
+  outer component and the hook in an inner one, since a hook cannot be called conditionally.
+* **A signed-out visitor gets a sign-in card, not the Space.** `/preview` is authenticated, so there
+  is nothing to show until they hold a token. Login renders *in place* rather than redirecting, and
+  carries `returnTo`: a visitor who followed a share link and was deposited on the calendar afterwards
+  would have lost the only handle to that Space that exists.
+* **404 copy names the link, never the Space.** "That link doesn't work" — never "you don't have
+  access to this Space", which would confirm the id is live and turn the capability URL into the
+  oracle the 404 exists to prevent. This is the one piece of copy on the route that is a security
+  decision rather than a wording choice.
+* **A denied user may ask again.** The status is rendered as a state to act from, matching the
+  partial unique index that constrains pending rows only.
 
 Deployment is local only: compose plus localhost callbacks.
