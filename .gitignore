@@ -8,6 +8,11 @@
 # Create it in a new worktree with: ln -sfn ../skej-ops ops
 ops
 
+# Output of the AI generation loop: candidate rules awaiting human review. Untracked on purpose —
+# a generated draft committed by accident is a draft that looks like it was accepted, and nothing
+# in here is imported by the engine or the app. Adopting one means porting it into rules/rules/.
+rules/generated/
+
 # Python
 venv/
 __pycache__/
