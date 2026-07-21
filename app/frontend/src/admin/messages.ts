@@ -1,50 +1,14 @@
 /**
- * Turning a non-`ok` API outcome into something worth showing a person.
+ * Role vocabulary for the admin dashboard.
  *
- * Every panel in this dashboard needs the same translation, and doing it once
- * here is what stops six components from each inventing their own phrasing for
- * the same refusal.
+ * The result-to-copy translation every panel here uses moved to
+ * `src/ui/messages.ts` when the link-holder screen started needing it too, and
+ * is re-exported below so the panels' imports stay pointed at their own
+ * directory. One implementation, one statement of the `not_found` rule.
  */
 
-import type { ApiOk, MutatingResult } from '../api'
-
-/** Any outcome other than success. */
-export type FailedOutcome = Exclude<MutatingResult<unknown>, ApiOk<unknown>>
-
-/**
- * Copy for a client bug, shown in place of `invalid_request`'s `detail`.
- *
- * `detail` is a flattened Pydantic error — "body.email: value is not a valid
- * email address" — which is diagnostic text for whoever wrote the request, not
- * for the admin who clicked a button. It goes to the console instead.
- */
-const CLIENT_BUG_MESSAGE = 'Something went wrong on our end. Please try again.'
-
-/**
- * The user-facing sentence for a failed result.
- *
- * Every variant except `invalid_request` already carries copy written for a
- * person: `conflict` carries the server's own explanation of which rule refused
- * (and, for the last-owner case, what to do about it), and the access outcomes
- * carry deliberately generic text from the client.
- *
- * **`not_found` is the one to be careful with.** On a Space route it means "no
- * such Space, *or* not yours" — the backend spends a 404 rather than a 403
- * precisely so an outsider cannot confirm that an unguessable id exists. The
- * client's copy for it says only "We couldn't find that", and this function
- * passes it through unchanged. Nothing here may sharpen it into "you don't have
- * access to this Space", which would leak the fact the 404 is paid for.
- */
-export function messageFor(result: FailedOutcome): string {
-  if (result.outcome === 'invalid_request') {
-    // Kept out of the UI but not out of existence: a contract drift between this
-    // client and `schemas.py` is a real bug and should be findable.
-    console.error('Space API rejected a request as malformed:', result.detail, result.raw)
-    return CLIENT_BUG_MESSAGE
-  }
-
-  return result.message
-}
+export { messageFor } from '../ui/messages'
+export type { FailedOutcome } from '../ui/messages'
 
 /** Human-readable label for a role, for buttons and selects. */
 export const ROLE_LABELS = {
