@@ -1,6 +1,8 @@
 import { useCallback, useState } from 'react'
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
 import type { Booking } from './api'
+import { AccountPage, ProtectedRoute } from './auth'
 import { BookingPanel, CancelPanel } from './booking'
 import { CalendarGrid, type SelectedInterval } from './calendar'
 import { assertConfigIsCoherent, calendarConfig, slotsPerDay } from './config'
@@ -9,7 +11,7 @@ import { assertConfigIsCoherent, calendarConfig, slotsPerDay } from './config'
 assertConfigIsCoherent()
 
 /**
- * The application shell.
+ * The calendar screen.
  *
  * Owns the state the grid and the two panels share: the selected free range,
  * the selected existing booking, and a token telling the grid to refetch. The
@@ -21,7 +23,7 @@ assertConfigIsCoherent()
  * concerned — the week on screen no longer matches the server — and a second
  * mechanism for the second panel would be two ways to say one thing.
  */
-function App() {
+function CalendarPage() {
   const [selection, setSelection] = useState<SelectedInterval | null>(null)
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null)
   const [refreshToken, setRefreshToken] = useState(0)
@@ -64,6 +66,38 @@ function App() {
         </div>
       </div>
     </main>
+  )
+}
+
+/**
+ * The application shell: providers are above us, routes are here.
+ *
+ * The router lives inside `App` rather than in `main.tsx` alongside the Auth0
+ * provider so that rendering `<App />` in a test still produces a routable tree
+ * — Stream 1's `App.test.tsx` does exactly that, and it must keep working
+ * untouched.
+ *
+ * `/` stays the calendar, unauthenticated, exactly as Stream 1 left it. The
+ * booking endpoints behind it are still the single-user Stream 1 contract, so
+ * wrapping it in `ProtectedRoute` now would demand a login for an API that has
+ * no idea who anyone is. Stream 4 space-scopes bookings; that is the change
+ * that should move this route inside the guard.
+ */
+function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<CalendarPage />} />
+        <Route
+          path="/account"
+          element={
+            <ProtectedRoute>
+              <AccountPage />
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
   )
 }
 
