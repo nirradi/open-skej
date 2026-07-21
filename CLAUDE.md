@@ -1,92 +1,106 @@
-# Open-Skej: Global Project Context
+# Open-Skej: Architecture
 
-## Project Overview
-Open-Skej is a scheduling application for booking time on shared resources (e.g., a shared tennis court or expensive physical equipment). The core differentiator is its AI-driven rule configuration. The rule engine enforces constraints saved as parameterized Python snippets (e.g., "only 1 hour sessions", "no booking more than twice a week"). The rule scope is bounded to a maximum of one month to keep computational overhead light.
+This file and `.claude/rules/*.md` describe **what the system is and why**.
 
-## Architecture & Tech Stack
-* **Frontend:** React (Next.js or Vite), TailwindCSS, Calendar Library.
-* **Backend:** Python (FastAPI). Chosen to natively run the Python-based rule engine without cross-language overhead.
-* **Database:** PostgreSQL (Stream 2 manages production schema, Stream 1 uses SQLite locally).
-* **Authentication:** Auth0 (Free Tier).
+## What it is
 
-## Development Strategy
-Work is divided into vertical, feature-based slices (Streams) that operate independently before a final integration phase. 
+Open-Skej books time on shared resources — a tennis court, a piece of expensive equipment. The
+differentiator is **AI-driven rule configuration**: booking constraints are authored in natural
+language ("only 1 hour sessions", "no more than twice a week") and stored as parameterized Python
+snippets that the rule engine executes.
 
-* **Stream 1 (Core E2E Booking):** ✅ **COMPLETE / ARCHIVED.** Built the full-stack calendar UI and booking flow using a stubbed rule engine and a local SQLite abstraction. See `ops/archive/stream-1/SUMMARY.md` — do not reopen or replan it.
-* **Stream 2 (Auth, Access & Admin):** Owns the real database schema, multi-tenant Space management, and Auth0 integration.
-* **Stream 3 (Rule Engine Phase 1):** Develops the pure Python isolated execution environment and the initial hardcoded canon of rules.
+Rule evaluation is bounded to **at most one calendar month of history**. That bound is a design
+constraint, not a tuning knob: it caps the work any single booking attempt can cause, so a rule
+cannot degrade the whole system by asking a broader question than the engine promised to answer.
 
-## Where orchestration state lives — `ops/`
+## Tech stack
 
-**Plans are not in this repo.** They live in the private `skej-ops` repo, reached from every
-checkout through a gitignored `ops` symlink:
+| Layer | Choice | Why |
+|---|---|---|
+| Frontend | React + Vite, TailwindCSS, calendar library | — |
+| Backend | Python, FastAPI | Runs the Python rule engine in-process — no cross-language boundary between the API and rule evaluation |
+| Database | PostgreSQL | Partial indexes and `EXCLUDE USING gist` are load-bearing in the schema; both are Postgres-specific and deliberately so |
+| Identity | Auth0 (free tier) | Proves *identity* only. Authorization is ours — see below |
 
-| What | Path |
-|---|---|
-| Active plans | `ops/plans/stream-N-plan.md` |
-| Deferred / out-of-scope features | `ops/DEFERRED.md` |
-| Live obligations from closed streams | `ops/plans/integration-carry-forward.md` |
-| Completed streams | `ops/archive/stream-N/` |
-| Harness scripts | `ops/scripts/` |
-| Git & GitHub access setup | `ops/git-access.md` |
-
-This exists so parallel agents share plan state **live** — an edit is visible to every other agent
-immediately, with no commit/PR/merge/pull round-trip. Never copy a plan into this repo, and never
-commit one here.
-
-If `ops/` is missing from your working directory, stop and report it rather than recreating a plan
-from scratch — the symlink is per-worktree and simply needs `ln -sfn ../skej-ops ops`.
-
-### What goes where when you add a stream
-
-Two files, two homes — this split is deliberate:
-
-* **`ops/plans/stream-N-plan.md`** — the task breakdown. Changes on *every task*, so it lives
-  outside git to avoid a commit/merge round-trip per checkbox.
-* **`.claude/rules/stream-N-<topic>.md`** — the stream's objective, boundaries, and policy. Stays
-  **in this repo** because files under `.claude/` are auto-loaded into every agent session. Moving
-  one to `ops/` would silently stop it loading, and a stream spec that fails to load fails
-  *quietly* — the agent just never learns the policy. Rules change per policy revision, not per
-  task, so the git ceremony is cheap.
-
-### Git & GitHub access
-
-This machine has more than one GitHub account and **only one can push to this repo.** Two separate
-things must both point at the repo owner: the **git remote** (via an SSH host alias) and the **`gh`
-active account** (global, machine-wide, and easily left wrong). If a `git push` or a `gh` write
-operation (`pr create`, `pr merge`, `api -X POST`) fails with a permissions or collaborator error,
-read `ops/git-access.md` before retrying — do not "fix" it by rewriting the remote to a plain
-`github.com` URL, which silently breaks pushing.
-
-## Worktrees — one per stream
-
-Each stream works in its own worktree on its own long-lived branch, so streams never collide in the
-working tree:
+## System map
 
 ```
-~/nirdev/skej/           main checkout    (orchestration, review, merges)
-~/nirdev/skej-stream2/   stream-2/base
-~/nirdev/skej-stream3/   stream-3/base
-~/nirdev/skej-ops/       plans + scripts  (separate private repo)
+app/backend/app/
+  auth/          JWT verification (Auth0 JWKS, RS256) and the current-user dependency
+  identity/      Users, Spaces, memberships, access requests, invitations
+                   authz.py — require_space_role, the per-Space authorization dependency
+  db/            Declarative Base, session, UtcDateTime, driver abstraction
+  routers/       Booking endpoints
+  rules_stub.py  Placeholder engine; replaced by `rules/` at integration
+app/frontend/    React SPA
+app/e2e/         Playwright suite driving the real backend, not a mock
+rules/rules/
+  interfaces.py  The rule contract — authoritative, read before writing any rule
+  controller.py  evaluate_request(): fail-fast canon execution and error containment
 ```
 
-Task branches are cut **inside the stream's worktree**, and each task still merges upstream to
-`main` via its own reviewed PR. Create a new stream's worktree with `ops/scripts/new_worktree.sh N`
-— never `git worktree add` by hand, or the `ops` symlink will be missing.
+## Cross-cutting invariants
 
-## Autonomous Agent Protocol (Planner-Doer-Reviewer)
-When acting as the Lead Architect (Opus), you must strictly follow this loop without asking the user for manual intervention:
+These hold everywhere and are not any one component's private business.
 
-1. **State Check:** Read the relevant plan file (`ops/plans/stream-N-plan.md`) to identify the next pending task.
-2. **Task Delegation (Headless Sub-agent):** Use your Bash tool to spawn a Sonnet sub-agent in non-interactive mode using the `-p` flag. You must pass `--allowedTools` so the sub-agent doesn't get blocked asking for permissions. Tasks are merged via PRs which you will review.
-   * **Never unset or override `CLAUDE_CONFIG_DIR`.** The harness exports it so the whole agent tree runs under one intended Claude config; sub-agents inherit it automatically, so just spawn `claude -p` normally. If you find it unset, stop and report rather than proceeding — the fallback config bills and logs against a different account.
-   * *Example Command:* `claude -p "Complete Task 3.3 from ops/plans/stream-3-plan.md. Write the code and commit the changes and create a PR." --allowedTools "Read,Edit,Bash"`
-3. **Wait & Review:** The bash command will block until Sonnet finishes. Once the bash command returns successfully, use gh commands to review the code Sonnet just wrote.
-4. **Iterate or Update State:** * If the work is flawed, comment on the PR, use the Bash tool to run the headless Sonnet agent again, to read the feedback and fix the specific issues.
-   * If the work is approved, merge the PR (no need for PR approval flow), update the relevant `ops/plans/stream-X-plan.md` file to mark the task as `[x]` DONE.
-5. **Proceed:** Automatically move to the next pending task in the plan and repeat the loop.
-NOTES: 
-A. If there's no plan file, it could be that you are also the first to create the plan. Go ahead and do that, and wait for approval before starting implementation loop.  
-B. Continue with the plan until hitting hard permission blockers, or at least 2-3 product facing question. Continue on other tasks as much as possible and collect open questions instead of blocking the entire flow. 
+**UTC everywhere.** Every datetime crossing a module boundary is timezone-aware with a **zero** UTC
+offset. Naive datetimes and non-zero offsets are rejected at construction (`UtcDateTime` in the
+schema, the interface dataclasses in the engine). Timezone is a UI presentation concern and no
+backend entity carries one. This is not pedantry: rules read `.hour` to enforce opening windows, so
+a `+02:00` value would yield a *local* hour and silently mis-enforce them. Convert at the boundary.
 
-Out of Scope / Deferred: Always check `ops/DEFERRED.md` before planning a task or writing a feature. If a major feature is listed there or similarly will be covered by a deferred implementation, make a not of it and move on. If the user states that something is a good idea for later, add it to the deffered md.
+**Fail closed.** Any failure to positively establish that a booking is permitted results in **no
+booking**. See `.claude/rules/rule-engine.md` for the three containment paths.
+
+**The link is the capability.** A Space is reachable only by its unguessable `public_id`. There is no
+listing endpoint, and a caller outside a Space gets **404, never 403** — a 403 would confirm the id
+exists and turn every capability URL into an oracle. The integer primary key is never exposed.
+
+**Nothing is deleted.** Spaces archive (`archived_at`); access requests and invitations retain their
+decided rows as history. Consequently no foreign key carries `ON DELETE CASCADE` — there is no delete
+to cascade, and one added later would quietly destroy the audit trail.
+
+## Domain documents
+
+Each domain's contracts, decisions and rationale live beside this file and are auto-loaded with it:
+
+* `.claude/rules/identity-and-access.md` — users, Spaces, memberships, authorization.
+* `.claude/rules/rule-engine.md` — the rule contract, the execution model, AI rule generation.
+
+## Keeping these documents live
+
+**They are part of the deliverable, not commentary on it.** A change to the system is reflected here
+in the same change that makes it, never as a follow-up — a doc fixed later is a doc that describes a
+system nobody is running anymore.
+
+Write here when a change:
+
+* establishes or changes an **invariant**, a contract, or an interface shape;
+* makes a **decision with a rationale** worth not re-litigating (why 404 and not 403, why this
+  index is partial, why this model is the default);
+* **contradicts** something written here — including a decision reversed after the doc was written;
+* adds a component to the system map.
+
+Do **not** write task status, PR numbers, what is coming next, or anything true only until the next
+merge. None of it is architecture, and all of it is wrong within the week.
+
+**Write in the present indicative.** "Spaces are not discoverable", not "we will make Spaces
+non-discoverable" or "task 2.5 made Spaces non-discoverable". If a sentence needs a task number, a
+PR link, or a future tense to make sense, it does not belong here. The reader is an agent six months
+from now who has no idea what task 2.5 was and cannot look it up.
+
+**Record the reversal, not the history.** When a decision changes, rewrite the claim and state the
+current rationale. Do not append "previously we did X" — an architecture doc is a description of the
+present, and a changelog embedded in it is read as a live description of a system that no longer
+exists. Git holds the history.
+
+**Name a domain document for the domain it describes**, never for whatever effort produced it. The
+identity model outlives the work that built it, and a document named after that work looks obsolete
+the moment the work finishes.
+
+**Where these documents and the code disagree, the code is correct** and the document is stale. Fix
+the document.
+
+Everything outside this section describes only what is true now. Guidance on writing these documents
+belongs here and nowhere else — a rule stated inside a description is one an editor of that
+description will not think to look for.
