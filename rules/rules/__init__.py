@@ -1,5 +1,13 @@
 """Open-Skej rule engine."""
 
+from .canon import (
+    DEFAULT_CANON,
+    AvailabilityHoursRule,
+    BookingHorizonRule,
+    MaxDurationRule,
+    NotInThePastRule,
+    default_canon,
+)
 from .controller import RULE_ERROR_MESSAGE, ContextMismatchError, evaluate_request
 from .interfaces import (
     HISTORY_ROLLING_WINDOW,
@@ -33,4 +41,10 @@ __all__ = [
     "HISTORY_ROLLING_WINDOW",
     "validate_source",
     "UnsafeRuleError",
+    "NotInThePastRule",
+    "BookingHorizonRule",
+    "MaxDurationRule",
+    "AvailabilityHoursRule",
+    "default_canon",
+    "DEFAULT_CANON",
 ]
