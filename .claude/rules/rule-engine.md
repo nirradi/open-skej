@@ -72,9 +72,28 @@ contain a buggy rule.
 
 ## Safe execution
 
-Generated code is validated by AST before it runs — dangerous imports (`os`, `sys`) are rejected —
-and candidate rules execute in a subprocess sandbox. Validation is static and the sandbox is the
-backstop; neither alone is the answer.
+Two halves, neither sufficient alone: `safety.py` validates candidate source statically before
+anything writes or runs it, and a subprocess sandbox bounds what execution can cost. The static pass
+cannot cap CPU or memory; the sandbox cannot tell a rule that reads the filesystem from one that
+reads a booking.
+
+`validate_source(src) -> None` raises `UnsafeRuleError` and returns nothing else — there is no "safe
+enough" verdict to inspect and no boolean a caller can forget to check. `rules/rules/safety.py` is
+the authoritative list of what it rejects; the load-bearing choices are:
+
+* **Imports are an allowlist** — `datetime`, `zoneinfo`, `math` — not a denylist of `os` and `sys`.
+  A denylist is a standing guess about which module is dangerous, and it is wrong the first time
+  someone reaches for `subprocess`, `socket`, or `importlib`.
+* **Every `__`-prefixed attribute is refused**, not a curated set of dunders.
+  `().__class__.__base__.__subclasses__()` reaches the whole loaded object graph from a literal, and
+  no allowlist of module names constrains it.
+* **Unparseable source raises `UnsafeRuleError`, never `SyntaxError`.** One exception type means a
+  caller handling "this candidate is unacceptable" cannot let an unparseable one through by catching
+  only the type it expected. Fail closed.
+
+**A generated rule cannot import `BaseRule`.** `rules` is not on the import allowlist, and widening
+it would readmit the whole package as a capability. `BaseRule`, `RuleResult` and the context types
+are free names in generated source, bound by the namespace that loads it.
 
 ## AI generation loop
 
