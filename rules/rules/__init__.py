@@ -9,6 +9,7 @@ from .canon import (
     default_canon,
 )
 from .controller import RULE_ERROR_MESSAGE, ContextMismatchError, evaluate_request
+from .frequency import MaxBookingsPerMonthRule, MaxBookingsPerWeekRule
 from .interfaces import (
     HISTORY_ROLLING_WINDOW,
     BaseRule,
@@ -47,4 +48,7 @@ __all__ = [
     "AvailabilityHoursRule",
     "default_canon",
     "DEFAULT_CANON",
+    # Exported but deliberately not in DEFAULT_CANON — see frequency.py.
+    "MaxBookingsPerWeekRule",
+    "MaxBookingsPerMonthRule",
 ]
