@@ -100,6 +100,26 @@ package.
 `time(6, 0)` unless it sits on UTC. Rendering those bounds in a viewer's timezone is the UI's job;
 the engine has no timezone to convert from.
 
+`frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n)` and
+`MaxBookingsPerMonthRule(n)`, the only ones whose verdict depends on anything beyond the request.
+They are **exported but deliberately absent from `DEFAULT_CANON`** — the four rules in `canon.py` are
+what the end-to-end suite asserts against, and adding a booking limit to the default canon would
+change behaviour those tests depend on.
+
+**A booking is counted against the window it starts in, and the window is anchored on the request
+rather than on `now`.** A request three weeks out is judged against that week's bookings, not this
+week's; anchoring on `now` would refuse next month's first booking because of this month's traffic.
+Windows are half-open `[start, end)`, so a booking straddling a boundary counts once, against the
+side it begins on.
+
+**The bound counts the request itself.** With a limit of two and two bookings already in the window,
+the third is refused — checking the existing count alone would admit the booking that takes the user
+over the line.
+
+Because the window follows the request, a request beyond the history window is measured against a
+history the caller has no bookings for, and passes. That is the documented bound of the engine's
+promise — evaluation costs at most one calendar month of history — not a gap in these rules.
+
 ## Safe execution
 
 Two halves, neither sufficient alone: `safety.py` validates candidate source statically before
