@@ -205,10 +205,40 @@ model: `super().__init__()` is rejected by the dunder-attribute ban, so a genera
 not call it; and **only the engine types are free names** — a rule naming `timedelta` must still
 import it, or it passes the validator (a syntax check) and dies with `NameError` on load, including
 from a default argument.
-* **Tester (adversary)** — takes the generated code and writes `pytest` functions: positive cases
-  that should pass and negative edge cases that should fail (timezone overlaps, the third booking).
-* **The loop** — run the Tester's tests against the Generator's code in the sandbox. On failure feed
-  the stack trace back to the Generator, **maximum 3 retries**.
+* **Tester (adversary)** — takes a candidate and the original description and writes a `pytest`
+  module against it: positive cases, the bound asserted on both sides, window edges pinned to the
+  instant, and a **fail-closed probe** — a rule fed input it cannot evaluate must deny or raise,
+  never pass.
+* **The loop** — generate → test → run in the sandbox → feed the failure back to the Generator,
+  **at most 3 retries**. Only `SandboxOutcome.PASSED` advances a candidate; a timeout and a crash are
+  not successes. On success the candidate and its tests are written to `rules/generated/` for human
+  review, and nothing there is ever imported.
+
+**A generated rule cannot run in the sandbox unaided, and the loop is what closes that gap.**
+`BaseRule` is a free name, the sandbox binds nothing and grants no `PYTHONPATH`, so a candidate run
+as-is dies at class definition with a `NameError` — surfacing as a *crash* rather than a test
+failure. Unaddressed, every rule exhausts the retry budget and the loop reports an orderly give-up
+having never evaluated anything. `interfaces.py` depends only on the standard library, so
+`generation/harness.py` ships it into the sandbox directory as `engine.py` and prepends a prelude
+importing from it.
+
+**The prelude binds exactly the free names the Generator's prompt promises**, and no more. It is that
+promise in executable form; binding one extra would admit a candidate here that fails wherever it is
+really loaded.
+
+**`validate_source` runs on the generated source alone, and the prelude is prepended afterwards.**
+The assembled module imports `engine`, which is not on the import allowlist, so validating it instead
+rejects every candidate. The ordering reads like an untidiness and is load-bearing.
+
+**The Tester's output is not put through `validate_source`.** The validator states what a *rule* may
+do, because a rule is code the booking API runs in-process; a test suite legitimately needs
+`import pytest`, `pytest.raises` and `parametrize`, none of which a rule may ever have. The sandbox
+is the boundary for test code — the half of safe execution built for code whose shape cannot be
+predicted — and the only checks made are that the module parses and defines a test.
+
+**The suite is rewritten for every candidate.** It imports the rule class by name and constructs it
+with that class's parameters, so a suite carried over from a previous attempt fails against a renamed
+class and reports it as the rule being wrong.
 
 **Model: `claude-opus-4-8` by default, model ID configurable.**
 
