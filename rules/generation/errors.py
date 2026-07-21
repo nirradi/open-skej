@@ -1,0 +1,60 @@
+"""The failures the generation loop is expected to handle.
+
+One hierarchy, in one module, because the retry loop's whole job is to tell these apart: a rejected
+candidate is fed back to the model as the reason to try again, while a backend that could not be
+reached is not something a better prompt fixes. A caller that wants neither distinction catches
+``GenerationError``.
+
+Nothing here is user-facing. ``RuleResult.fail_reason`` is copy shown to a person booking a court;
+these messages are for a developer running the loop, and say as much as they can.
+"""
+
+from __future__ import annotations
+
+__all__ = [
+    "GenerationError",
+    "LLMCallError",
+    "RuleRejectedError",
+]
+
+
+class GenerationError(Exception):
+    """Base for every failure in the generation package."""
+
+
+class LLMCallError(GenerationError):
+    """The model could not be reached, or answered with something that is not an answer.
+
+    Carries the backend's own diagnostics — exit code, whatever it wrote on stderr — because the
+    likely causes (the CLI is not installed, the session is not authenticated, the model id does not
+    exist) are all invisible from the text of a completion that never arrived.
+    """
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        exit_code: int | None = None,
+        stderr: str = "",
+    ) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.exit_code = exit_code
+        self.stderr = stderr
+
+
+class RuleRejectedError(GenerationError):
+    """The model answered, and what it produced is not acceptable rule source.
+
+    ``reason`` is the safety validator's own message, kept verbatim: it names the construct and the
+    line, which is exactly what the retry loop hands back to the model. Paraphrasing it here would
+    cost the model the one detail that lets it fix the candidate.
+
+    ``source`` is the fence-stripped candidate that was rejected — the thing the reason is *about*,
+    so a caller does not have to reconstruct what the model actually said.
+    """
+
+    def __init__(self, reason: str, *, source: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.source = source
