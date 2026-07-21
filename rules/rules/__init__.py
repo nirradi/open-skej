@@ -14,6 +14,7 @@ from .interfaces import (
     Weekday,
     history_window,
 )
+from .safety import UnsafeRuleError, validate_source
 
 __all__ = [
     "BaseRule",
@@ -30,4 +31,6 @@ __all__ = [
     "Weekday",
     "history_window",
     "HISTORY_ROLLING_WINDOW",
+    "validate_source",
+    "UnsafeRuleError",
 ]
