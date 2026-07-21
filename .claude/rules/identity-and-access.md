@@ -8,8 +8,9 @@ glob: "app/**/*"
 Who a user is, what Spaces exist, and who is allowed into them. Booking mechanics are not this
 component's business.
 
-**Owns:** `app/backend/app/{auth,identity,db}/`, `app/backend/alembic/`, `app/backend/scripts/`,
-the root `docker-compose.yml`, and the production database schema.
+**Lives in:** `app/backend/app/{auth,identity,db}/`, `app/backend/alembic/`,
+`app/backend/scripts/`, and the root `docker-compose.yml`. This domain defines the production
+database schema.
 
 `app/backend/app/identity/models.py` and `authz.py` are the authoritative statements of the schema
 and the authorization rule. Both carry the reasoning inline. Read them before changing either; where

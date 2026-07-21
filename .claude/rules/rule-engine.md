@@ -7,8 +7,8 @@ glob: "rules/**/*"
 
 The isolated Python environment that decides whether a booking is permitted.
 
-**Owns:** `rules/` entirely — the contract, the controller, the safety validator, the sandbox, and
-the generation loop. Strictly backend execution logic; it holds no HTTP, no ORM, and no UI.
+**Lives in:** `rules/`, entirely — the contract, the controller, the safety validator, the sandbox,
+and the generation loop. Strictly backend execution logic; it holds no HTTP, no ORM, and no UI.
 
 `rules/rules/interfaces.py` is the authoritative contract and `controller.py` the authoritative
 execution model. **Read `interfaces.py` before writing any rule.** Where this document and the code
