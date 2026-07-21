@@ -21,16 +21,19 @@ router — the same split ``app.db.driver`` uses with ``OverlapError``.
 
 from typing import Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import utcnow
+from app.identity.authz import role_at_least
 from app.identity.models import (
     AccessRequestStatus,
+    InvitationStatus,
     MembershipRole,
     Space,
     SpaceAccessRequest,
+    SpaceInvitation,
     SpaceMembership,
     User,
 )
@@ -68,6 +71,48 @@ class AccessRequestAlreadyDecidedError(Exception):
     ``decided_by_user_id`` and ``decided_at``, rewriting who let this person in —
     and an admin re-approving a request another admin denied a minute earlier is
     far more likely to be a stale review queue than a considered reversal.
+    """
+
+
+class InvitedUserAlreadyMemberError(Exception):
+    """The invited address already belongs to a member of this Space.
+
+    Distinct from :class:`AlreadyMemberError`, which is about the *caller*. Here
+    the caller is an admin and the subject is somebody else, so the two produce
+    different copy even though both are 409s.
+    """
+
+
+class DuplicatePendingInvitationError(Exception):
+    """This address already has an invitation awaiting acceptance on this Space."""
+
+
+class InvitationNotFoundError(Exception):
+    """No invitation with that id belongs to this Space."""
+
+
+class InvitationAlreadyResolvedError(Exception):
+    """The invitation has already been accepted or revoked.
+
+    Refused rather than treated as idempotent, matching
+    :class:`AccessRequestAlreadyDecidedError`. Revoking an *accepted* invitation
+    is the case that makes silence dangerous: the invitee is already a member, so
+    a 204 would tell the admin they had removed access when the membership is
+    untouched — and the fix they actually want is ``DELETE .../members/{id}``.
+    A no-op 204 would hide that distinction behind a success.
+    """
+
+
+class InvitationRoleTooHighError(Exception):
+    """The inviter tried to invite at a role above their own.
+
+    Without this, "invite a user" is a privilege-escalation primitive: an admin
+    could invite an address at ``owner``, and — since an invitation is claimed by
+    whoever proves control of the address — invite *themselves* at their own
+    second address to obtain ownership. The membership routes already forbid an
+    admin granting ``owner`` directly (see :class:`OwnerAuthorityRequiredError`);
+    an invitation reaching the same end by a longer route would make that rule
+    decorative.
     """
 
 
@@ -434,6 +479,178 @@ def decide_access_request(
 
     requester = session.execute(select(User).where(User.id == request.user_id)).scalar_one()
     return request, requester
+
+
+def _email_belongs_to_a_member(session: Session, space_id: int, email: str) -> bool:
+    """Is any user holding this address already inside this Space?
+
+    The join goes through ``users`` because an invitation is addressed to an
+    email while a membership is held by a ``user_id``, and the two only meet
+    there. ``func.lower`` on the stored side is not redundant with the invitation
+    table's lowercase CHECK: this reads ``users.email``, which carries no such
+    constraint — it is written from whatever casing the Auth0 token supplied.
+
+    Returns true if *any* matching user is a member. An address can map to
+    several ``users`` rows by design (a database signup and a Google login of the
+    same address are separate ``sub`` values), and if any one of them is already
+    in the Space then inviting the address again would be inviting somebody who
+    is demonstrably already here.
+    """
+    return (
+        session.execute(
+            select(SpaceMembership.id)
+            .join(User, User.id == SpaceMembership.user_id)
+            .where(
+                SpaceMembership.space_id == space_id,
+                func.lower(User.email) == email,
+            )
+        ).first()
+        is not None
+    )
+
+
+def _pending_invitation_id(session: Session, space_id: int, email: str) -> Optional[int]:
+    return session.execute(
+        select(SpaceInvitation.id).where(
+            SpaceInvitation.space_id == space_id,
+            func.lower(SpaceInvitation.email) == email,
+            SpaceInvitation.status == InvitationStatus.PENDING,
+        )
+    ).scalar_one_or_none()
+
+
+def create_invitation(
+    session: Session,
+    space: Space,
+    inviter: User,
+    *,
+    email: str,
+    role: MembershipRole,
+    inviter_role: MembershipRole,
+) -> SpaceInvitation:
+    """Pre-approve an address for this Space at a given role.
+
+    ``email`` is expected already lowercased and stripped — ``InvitationCreate``
+    does that at the edge, and the table's CHECK constraint is the backstop.
+
+    Four things are refused. An **archived** Space takes no new members at all.
+    An address that already belongs to a member has nothing to be invited to, and
+    creating the row anyway would leave a permanently unclaimable invitation in
+    the admin's list. A second **pending** invitation would duplicate the first
+    with no effect, since the first already admits them. And a role above the
+    inviter's own is escalation rather than delegation — see
+    :class:`InvitationRoleTooHighError`.
+
+    A **revoked or accepted** invitation for the same address is deliberately not
+    among the refusals: the partial unique index constrains pending rows only,
+    exactly as with access requests, so an address invited and revoked in March
+    can be invited again in June, and a member who was removed can be invited
+    back.
+
+    No email is sent. The invitation is a row saying "this address is welcome";
+    the inviter shares the Space's ordinary link out of band, and the row is
+    claimed at login by ``app.auth.dependencies._claim_pending_invitations`` on
+    proof of a *verified* address. That gate is what makes an address-keyed
+    pre-approval safe, and nothing here should be read as trusting the address
+    itself.
+    """
+    _require_active(space)
+
+    if not role_at_least(inviter_role, role):
+        raise InvitationRoleTooHighError(role)
+
+    if _email_belongs_to_a_member(session, space.id, email):
+        raise InvitedUserAlreadyMemberError(email)
+
+    if _pending_invitation_id(session, space.id, email) is not None:
+        raise DuplicatePendingInvitationError(email)
+
+    invitation = SpaceInvitation(
+        space_id=space.id,
+        email=email,
+        role=role,
+        invited_by_user_id=inviter.id,
+    )
+    session.add(invitation)
+    try:
+        session.commit()
+    except IntegrityError:
+        # Two admins inviting the same address at once: both pass the check
+        # above before either commits, and the partial unique index is what
+        # actually decides it. Converting the violation into the same 409 the
+        # slower path returns keeps a race from surfacing as a 500.
+        session.rollback()
+        raise DuplicatePendingInvitationError(email)
+
+    return invitation
+
+
+def list_invitations(
+    session: Session, space: Space, *, status: Optional[InvitationStatus]
+) -> Sequence[SpaceInvitation]:
+    """This Space's invitations, oldest first, optionally filtered by status.
+
+    Unfiltered by default, matching :func:`list_access_requests`: accepted and
+    revoked rows are retained as history precisely so an admin can see that an
+    address was invited before, and hiding them by default would waste the
+    retention the schema pays for.
+    """
+    query = (
+        select(SpaceInvitation)
+        .where(SpaceInvitation.space_id == space.id)
+        .order_by(SpaceInvitation.created_at, SpaceInvitation.id)
+    )
+    if status is not None:
+        query = query.where(SpaceInvitation.status == status)
+
+    return session.execute(query).scalars().all()
+
+
+def revoke_invitation(session: Session, space: Space, *, invitation_id: int) -> SpaceInvitation:
+    """Withdraw a pending invitation.
+
+    A **status transition, not a delete.** The row is the record that this
+    address was invited and by whom, and an admin asking "who invited
+    someone@rival.example?" after the fact is exactly the question the retention
+    exists to answer — a ``DELETE`` would erase the evidence along with the
+    access.
+
+    Only a *pending* invitation can be revoked. An accepted one is refused rather
+    than silently succeeding, because revoking it would not remove the membership
+    it already produced: the admin would be told the access was withdrawn while
+    the person remained in the Space. An already-revoked one is refused for the
+    same reason it is refused for a re-archive — the caller believes they are
+    ending something live, and a success would hide that somebody else got there
+    first.
+
+    ``with_for_update`` closes the race between a revoke and a login claiming the
+    same row. Without it, two transactions could both read the invitation as
+    pending and one would overwrite the other's transition, leaving an invitation
+    marked ``revoked`` whose membership had already been created.
+    """
+    _require_active(space)
+
+    invitation = session.execute(
+        select(SpaceInvitation)
+        .where(
+            SpaceInvitation.id == invitation_id,
+            SpaceInvitation.space_id == space.id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+
+    # Scoped to this Space, so an id from another Space's list reads as "no such
+    # invitation" rather than acting on a neighbouring tenant's row.
+    if invitation is None:
+        raise InvitationNotFoundError(invitation_id)
+
+    if invitation.status is not InvitationStatus.PENDING:
+        raise InvitationAlreadyResolvedError(invitation_id)
+
+    invitation.status = InvitationStatus.REVOKED
+    session.commit()
+    return invitation
 
 
 def preview_status(session: Session, space: Space, user: User) -> PreviewStatus:

@@ -27,10 +27,12 @@ from app.auth.dependencies import get_current_user
 from app.db.session import get_session
 from app.identity import service
 from app.identity.authz import SpaceContext, lookup_space, require_space_role, space_not_found
-from app.identity.models import AccessRequestStatus, MembershipRole, User
+from app.identity.models import AccessRequestStatus, InvitationStatus, MembershipRole, User
 from app.identity.schemas import (
     AccessRequestCreate,
     AccessRequestRead,
+    InvitationCreate,
+    InvitationRead,
     MemberRead,
     MembershipUpdate,
     SpaceCreate,
@@ -59,6 +61,14 @@ ALREADY_MEMBER_DETAIL = "You are already a member of this Space."
 DUPLICATE_REQUEST_DETAIL = "You already have a request awaiting a decision on this Space."
 REQUEST_NOT_FOUND_DETAIL = "No such access request in this Space."
 ALREADY_DECIDED_DETAIL = "This access request has already been decided."
+INVITED_ALREADY_MEMBER_DETAIL = "That address already belongs to a member of this Space."
+DUPLICATE_INVITATION_DETAIL = "That address already has a pending invitation to this Space."
+INVITATION_NOT_FOUND_DETAIL = "No such invitation in this Space."
+INVITATION_RESOLVED_DETAIL = (
+    "This invitation has already been accepted or revoked."
+    " To remove someone who has already joined, remove their membership instead."
+)
+INVITATION_ROLE_TOO_HIGH_DETAIL = "You cannot invite someone at a role above your own."
 
 
 def _archived() -> HTTPException:
@@ -91,6 +101,28 @@ def _request_not_found() -> HTTPException:
 
 def _already_decided() -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ALREADY_DECIDED_DETAIL)
+
+
+def _invited_already_member() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=INVITED_ALREADY_MEMBER_DETAIL)
+
+
+def _duplicate_invitation() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=DUPLICATE_INVITATION_DETAIL)
+
+
+def _invitation_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=INVITATION_NOT_FOUND_DETAIL)
+
+
+def _invitation_resolved() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=INVITATION_RESOLVED_DETAIL)
+
+
+def _invitation_role_too_high() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN, detail=INVITATION_ROLE_TOO_HIGH_DETAIL
+    )
 
 
 @router.post("", response_model=SpaceRead, status_code=status.HTTP_201_CREATED)
@@ -348,3 +380,97 @@ def deny_access_request(
     per user, so a denial is not a permanent bar — they may ask again.
     """
     return _decide(context, session, request_id, approve=False)
+
+
+@router.post(
+    "/{public_id}/invitations",
+    response_model=InvitationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_invitation(
+    payload: InvitationCreate, context: AdminContext, session: SessionDep
+) -> InvitationRead:
+    """Invite an address into this Space at a role. Admin+.
+
+    **Nothing is emailed.** The row records that the address is pre-approved; the
+    inviter shares the Space's ordinary link themselves. The invitee is admitted
+    on their first login, by ``app.auth.dependencies``, and only when their token
+    carries ``email_verified: true`` — an invitation trusts the *proof* of an
+    address, never the address as typed here.
+
+    403 if the requested role is above the caller's own: an admin inviting at
+    ``owner`` would otherwise be the escalation path that the members routes
+    already close. 409 if the address is already a member or already has a
+    pending invitation.
+    """
+    try:
+        invitation = service.create_invitation(
+            session,
+            context.space,
+            context.user,
+            email=payload.email,
+            role=payload.role,
+            inviter_role=context.role,
+        )
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.InvitationRoleTooHighError:
+        raise _invitation_role_too_high()
+    except service.InvitedUserAlreadyMemberError:
+        raise _invited_already_member()
+    except service.DuplicatePendingInvitationError:
+        raise _duplicate_invitation()
+
+    return InvitationRead.build(invitation)
+
+
+@router.get("/{public_id}/invitations", response_model=list[InvitationRead])
+def list_invitations(
+    context: AdminContext,
+    session: SessionDep,
+    invitation_status: Annotated[Optional[InvitationStatus], Query(alias="status")] = None,
+) -> list[InvitationRead]:
+    """Who has been invited here, and what became of each invitation. Admin+.
+
+    Admin+ rather than members, because this lists the addresses of people who
+    are *not* in the Space — who is being recruited is not every member's
+    business.
+
+    As with the access-request queue, the parameter is ``invitation_status`` in
+    Python and ``status`` over the wire: ``status`` is FastAPI's status-code
+    module, imported throughout this file.
+    """
+    return [
+        InvitationRead.build(invitation)
+        for invitation in service.list_invitations(session, context.space, status=invitation_status)
+    ]
+
+
+@router.delete("/{public_id}/invitations/{invitation_id}", response_model=InvitationRead)
+def revoke_invitation(
+    invitation_id: int, context: AdminContext, session: SessionDep
+) -> InvitationRead:
+    """Withdraw a pending invitation. Admin+.
+
+    ``DELETE`` by URL shape, but a **status transition** underneath: the row
+    survives as ``revoked`` so the record of who invited whom is not erased along
+    with the access. That is also why this returns the invitation rather than 204
+    — there is still a row to describe, and its ``status`` is the evidence the
+    revocation took effect.
+
+    409 if the invitation was already accepted or already revoked. An accepted
+    one is the case worth stating: the invitee is a member by now, and revoking
+    would not remove that membership, so succeeding here would tell the admin
+    they had withdrawn access they still hold. Removing the membership is the
+    action they want.
+    """
+    try:
+        invitation = service.revoke_invitation(session, context.space, invitation_id=invitation_id)
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.InvitationNotFoundError:
+        raise _invitation_not_found()
+    except service.InvitationAlreadyResolvedError:
+        raise _invitation_resolved()
+
+    return InvitationRead.build(invitation)
