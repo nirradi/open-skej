@@ -55,3 +55,18 @@ PyJWT==2.13.0
 cryptography==49.0.0
 cffi==2.1.0
 pycparser==3.0
+
+# Stream 3 (task 3.10) — the rule engine, which the API imports and runs in-process.
+# Appended as a block, matching the 2.1 and 2.3 blocks above.
+#
+# An editable install of the sibling source tree rather than a pinned release: there is
+# no index to publish to and the two move together in one repo, so a version pin would
+# be a number nobody bumps. Editable also means a change under `rules/` is live in the
+# backend without a reinstall, which is the behaviour a monorepo checkout should have.
+#
+# The path is relative to the working directory, and every caller runs pip from
+# `app/backend` — both CI jobs (`backend` and `e2e`) set `working-directory: app/backend`,
+# and a developer's venv lives there too. `rules/pyproject.toml` ships the `rules` package
+# only, so `generation` does not become importable here.
+-e ../../rules
+# It carries no dependencies of its own; nothing above needs to move.

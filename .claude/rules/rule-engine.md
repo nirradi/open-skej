@@ -70,6 +70,25 @@ against the context (`Context` cannot do this itself — the request is not in s
 built), run the canon in order **fail-fast** (the first denial wins and nothing after it runs), and
 contain a buggy rule.
 
+## Backend integration
+
+`rules` is installed into the backend as an editable sibling package (`-e ../../rules`), and only the
+`rules` package is distributed — never `generation`. "Nothing generated is imported by the app" is
+therefore a fact about the packaging, not a promise a reviewer must keep.
+
+`app/backend/app/rules_stub.py` is the adapter, and the whole of it. It holds no rule logic; it
+translates between the HTTP boundary and `evaluate_request`, and three translations live there and
+nowhere else. **It converts every datetime to UTC** (`.astimezone(timezone.utc)`) before building
+engine types — the engine rejects a non-zero offset outright, so a booking a client sends as
+`+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
+message**: `RuleResult(passed=True)` carries no copy, but the API shows friendly text on success. **It
+passes empty history**, because `DEFAULT_CANON` holds only the request-local rules; the day a counting
+rule joins the canon, the adapter is where the history query is added, capped to `history_window`.
+
+`ContextMismatchError` is deliberately not caught at this boundary: the adapter builds both the
+request and the context from one booking, so a mismatch is an adapter bug and must reach the error
+tracker, not be served as a polite refusal.
+
 ## The canon
 
 `canon.py` holds the four hand-written rules every Space enforces: `NotInThePastRule()`,

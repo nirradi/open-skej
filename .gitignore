@@ -18,6 +18,10 @@ venv/
 __pycache__/
 *.pyc
 .pytest_cache/
+# Editable-install metadata for the `rules` package (app/backend depends on it via -e).
+*.egg-info/
+build/
+dist/
 
 # Node
 node_modules/
