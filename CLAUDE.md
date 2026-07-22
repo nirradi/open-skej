@@ -31,7 +31,8 @@ app/backend/app/
                    authz.py — require_space_role, the per-Space authorization dependency
   db/            Declarative Base, session, UtcDateTime, driver abstraction
   routers/       Booking endpoints
-  rules_stub.py  Placeholder engine; replaced by `rules/` at integration
+  rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
+                   builds the engine Context. Name is historical; it holds no rule logic
 app/frontend/    React SPA
   src/auth/      Auth0 wiring, the session guard, the api client's token bridge
   src/space/     `/s/{public_id}` — the cold link-holder preview and access request
