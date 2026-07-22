@@ -1,10 +1,18 @@
-"""Tests for the stub rule engine, focused on the boundary directions."""
+"""Tests for the rule-engine adapter, focused on the boundary directions.
+
+`app.rules_stub` no longer decides anything — it translates between the HTTP
+boundary and `rules.evaluate_request`. These cases are kept pointed at the
+observable verdict rather than at the adapter's internals, so they assert the
+behaviour the API actually ships and survived the swap unchanged. The two that
+did not are marked as such in their own docstrings.
+"""
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from app.rules_stub import (
+    ALLOWED_MESSAGE,
     AVAILABILITY_CLOSE,
     AVAILABILITY_OPEN,
     BOOKING_HORIZON_DAYS,
@@ -46,6 +54,18 @@ def test_booking_inside_hours_and_under_max_duration_is_allowed():
 
     assert result.allowed
     assert result.message
+
+
+def test_the_allow_path_carries_the_friendly_message():
+    """The success banner must not ship blank.
+
+    The engine's own `RuleResult` drops copy when it passes — `passed=True`
+    implies `fail_reason is None` — so the adapter has to supply this itself.
+    Asserting the exact string, not merely a truthy one: `routers/bookings.py`
+    passes `message` straight through to the client on the allow path, and an
+    empty one is a UI bug no denial-path test would ever catch.
+    """
+    assert evaluate(request(at(10), at(11))).message == ALLOWED_MESSAGE
 
 
 def test_booking_longer_than_max_duration_is_denied():
@@ -123,16 +143,54 @@ def test_denial_messages_are_human_readable():
         assert "Traceback" not in message
 
 
-def test_non_utc_offsets_are_judged_in_their_own_timezone():
-    """09:00 local is inside hours even though it is 02:00 UTC."""
+def test_non_utc_offsets_are_converted_to_utc_before_evaluation():
+    """A booking is judged on its UTC wall clock, not the client's local one.
+
+    **This reverses the stub's behaviour and is a deliberate behaviour change.**
+    The stub compared `start_at.time()` as supplied, so 09:00+07:00 read as 09:00
+    and passed the availability window. Availability hours are UTC clock times
+    (`.claude/rules/rule-engine.md`), so the same instant is 02:00 UTC — before
+    opening — and is now refused. `app/e2e/playwright.config.ts` flagged exactly
+    this mismatch and pinned the browser to UTC to sidestep it pending "a product
+    decision for the Stream 3 integration"; this is that decision landing.
+
+    An offset is therefore never a way to reach a slot the UTC window excludes.
+    """
     local = timezone(timedelta(hours=7))
     start = datetime(2026, 7, 20, 9, 0, tzinfo=local)
 
-    assert evaluate(request(start, start + timedelta(hours=1))).allowed
+    result = evaluate(request(start, start + timedelta(hours=1)))
+
+    assert not result.allowed
+    assert "06:00" in result.message
 
 
-def test_history_is_accepted_and_ignored_by_the_stub():
-    """The Context parameter exists for Stream 3; the stub's rules are local."""
+def test_offset_and_utc_spellings_of_one_instant_agree():
+    """The conversion is a change of spelling, not of verdict.
+
+    13:00+07:00 and 06:00Z are the same instant, so they must draw the same
+    answer — which is what makes the rule about the moment booked rather than
+    about how the client chose to serialise it.
+    """
+    local = timezone(timedelta(hours=7))
+    offset_spelling = datetime(2026, 7, 20, 13, 0, tzinfo=local)
+    utc_spelling = datetime(2026, 7, 20, 6, 0, tzinfo=timezone.utc)
+
+    assert offset_spelling == utc_spelling
+
+    hour = timedelta(hours=1)
+    assert evaluate(request(offset_spelling, offset_spelling + hour)).allowed
+    assert evaluate(request(utc_spelling, utc_spelling + hour)).allowed
+
+
+def test_history_is_accepted_and_ignored_by_the_current_canon():
+    """Every rule in the canon in force today is local to the request.
+
+    The history-counting rules exist (`rules.MaxBookingsPerWeekRule`) but are
+    deliberately not in `DEFAULT_CANON`, so the adapter forwards no history and
+    passing some changes nothing. When one joins the canon this test is the one
+    that should start failing.
+    """
     booking = request(at(10), at(11))
     history = Context(now=NOW, history=(request(at(8), at(9)), request(at(12), at(13))))
 

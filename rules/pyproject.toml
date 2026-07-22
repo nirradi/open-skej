@@ -1,3 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-skej-rules"
+version = "0.1.0"
+description = "The Open-Skej rule engine: the contract, the canon, and safe execution."
+requires-python = ">=3.12"
+# No runtime dependencies. The engine is standard-library only, which is what lets
+# `interfaces.py` be shipped into the sandbox as a plain file (see generation/harness.py)
+# and what keeps installing it into the backend a zero-risk addition to its dependency set.
+dependencies = []
+
+[tool.setuptools]
+# `rules` only. `generation` is the developer-facing AI loop and is deliberately left
+# out of the distribution: the booking API installs this package, so anything listed
+# here is importable in-process. "Nothing generated is imported by the app" stays a
+# property of the packaging, not a promise.
+packages = ["rules"]
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]
