@@ -1,11 +1,16 @@
-"""Tests for the booking data layer, focused on the overlap invariant."""
+"""Tests for the booking data layer, focused on the overlap invariant.
 
-import threading
+The driver is Postgres-only (the ``driver`` fixture lives in ``conftest.py`` and
+skips when ``DATABASE_URL`` is unset). Overlap is enforced by the database's
+``EXCLUDE USING gist`` constraint rather than by an application-level probe, so
+the concurrency test at the bottom asserts the database itself serialises two
+racing writers.
+"""
+
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event
 
 from app.db import (
     DEFAULT_RESOURCE_ID,
@@ -14,21 +19,16 @@ from app.db import (
     BookingNotFoundError,
     BookingStatus,
     OverlapError,
-    SQLiteBookingDriver,
 )
+from tests.conftest import requires_postgres
+
+pytestmark = requires_postgres
 
 DAY = datetime(2026, 7, 20, tzinfo=timezone.utc)
 
 
 def at(hour: int, minute: int = 0) -> datetime:
     return DAY + timedelta(hours=hour, minutes=minute)
-
-
-@pytest.fixture
-def driver(tmp_path):
-    driver = SQLiteBookingDriver(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
-    yield driver
-    driver.close()
 
 
 @pytest.fixture
@@ -198,36 +198,16 @@ def test_non_positive_intervals_are_rejected(driver, start, end):
 # --- Concurrency ---------------------------------------------------------
 
 
-def _stall_after_overlap_probe(driver, barrier):
-    """Hold each writer between its overlap probe and its insert.
-
-    Simply starting two threads at once does not test anything: the winner
-    reliably finishes before the loser issues its first statement, so the race
-    never happens and the test passes even with the locking removed. Parking
-    each connection *after* its overlap SELECT forces the interleaving that a
-    DEFERRED transaction would get wrong — both readers seeing "no conflict"
-    before either writes.
-
-    Under BEGIN IMMEDIATE the second writer cannot reach the probe at all until
-    the first commits, so the first waits out `barrier` and breaks it; the
-    resulting BrokenBarrierError is the expected path, not a failure.
-    """
-
-    def after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
-        if statement.startswith("SELECT bookings.id") and "LIMIT" in statement:
-            try:
-                barrier.wait()
-            except threading.BrokenBarrierError:
-                pass
-
-    event.listen(driver.engine, "after_cursor_execute", after_cursor_execute)
-    return after_cursor_execute
-
-
 def test_racing_overlapping_creates_yield_exactly_one_success(driver):
-    """Two overlapping writers must not both win."""
-    barrier = threading.Barrier(2, timeout=0.5)
-    listener = _stall_after_overlap_probe(driver, barrier)
+    """Two overlapping writers must not both win.
+
+    Unlike the SQLite driver, which had to serialise a read-then-write itself,
+    Postgres enforces the overlap invariant in the ``EXCLUDE USING gist``
+    constraint: the second insert blocks on the first and then fails its
+    constraint check, surfacing as ``OverlapError``. Two threads inserting
+    overlapping intervals at once is the honest test of that — the winner is
+    whichever commits first, and there must be exactly one.
+    """
 
     def attempt(offset_minutes: int):
         try:
@@ -237,17 +217,12 @@ def test_racing_overlapping_creates_yield_exactly_one_success(driver):
         except OverlapError as exc:
             return exc
 
-    try:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(attempt, [0, 30]))
-    finally:
-        event.remove(driver.engine, "after_cursor_execute", listener)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, [0, 30]))
 
     successes = [r for r in results if not isinstance(r, Exception)]
     overlaps = [r for r in results if isinstance(r, OverlapError)]
 
-    # Anything else — two successes, or an OperationalError from a writer that
-    # deadlocked upgrading a read transaction — means the slot was not serialised.
     assert len(successes) == 1, results
     assert len(overlaps) == 1, results
     assert driver.list_bookings(start=at(0), end=at(24)) == successes

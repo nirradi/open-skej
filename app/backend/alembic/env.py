@@ -4,9 +4,11 @@ The database URL comes from ``app.settings.Settings`` (``DATABASE_URL``) rather
 than from ``alembic.ini``, so there is one source of truth and no credentials in
 the repo.
 
-``target_metadata`` is the shared ``Base.metadata`` from ``app.db.models``, but
-autogenerate is filtered by ``app.migration_filter.include_object`` so Stream 1's
-``bookings`` table is never picked up. See that module for the full rationale.
+``target_metadata`` is the shared ``Base.metadata`` from ``app.db.models``.
+Autogenerate compares it against the database and now manages *both* halves — the
+identity tables and the ``bookings`` table — since Stream 4 folded booking
+storage into Alembic. There is no table-scoping filter: one migration history
+owns the whole schema.
 """
 
 from logging.config import fileConfig
@@ -15,14 +17,14 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.db.models import Base, UtcDateTime
-from app.migration_filter import include_object
 from app.settings import get_settings
 
-# Imported for its side effect: registering Stream 2's identity models on
-# ``Base.metadata``. Autogenerate compares the metadata against the database, so
-# a model package that is never imported produces an empty migration rather than
-# an error — a failure that is easy to miss. `noqa: F401` because the names
-# themselves are unused here.
+# Imported for their side effect: registering every model on ``Base.metadata``.
+# Autogenerate compares the metadata against the database, so a model package
+# that is never imported produces an empty migration rather than an error — a
+# failure that is easy to miss. ``app.db.models`` (imported above for ``Base``)
+# carries the ``Booking`` model; ``app.identity`` carries the identity tables.
+# ``noqa: F401`` because the name itself is unused here.
 import app.identity  # noqa: F401
 
 config = context.config
@@ -69,7 +71,6 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        include_object=include_object,
         render_item=render_item,
         # Detect column type changes; off by default and easy to miss otherwise.
         compare_type=True,
@@ -92,7 +93,6 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            include_object=include_object,
             render_item=render_item,
             compare_type=True,
         )

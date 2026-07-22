@@ -1,4 +1,4 @@
-"""Booking persistence: models, the driver contract, and the SQLite driver."""
+"""Booking persistence: models, the driver contract, and the Postgres driver."""
 
 from app.db.constants import DEFAULT_RESOURCE_ID, DEFAULT_USER_ID
 from app.db.driver import (
@@ -9,10 +9,9 @@ from app.db.driver import (
     OverlapError,
 )
 from app.db.models import Base, Booking, BookingStatus
-from app.db.sqlite import DEFAULT_DATABASE_URL, SQLiteBookingDriver
+from app.db.postgres import PostgresBookingDriver
 
 __all__ = [
-    "DEFAULT_DATABASE_URL",
     "DEFAULT_RESOURCE_ID",
     "DEFAULT_USER_ID",
     "Base",
@@ -23,5 +22,5 @@ __all__ = [
     "BookingNotFoundError",
     "BookingStatus",
     "OverlapError",
-    "SQLiteBookingDriver",
+    "PostgresBookingDriver",
 ]

@@ -31,8 +31,9 @@ jobs:
       run:
         working-directory: app/backend
     services:
-      # Stream 2's Alembic tests need a real Postgres. Stream 1's SQLite tests
-      # ignore it entirely — they read SKEJ_DATABASE_URL, not DATABASE_URL.
+      # The backend is Postgres-only: the driver and the identity layer share one
+      # database. The Postgres-only tests skip without DATABASE_URL, but CI sets
+      # it, so the whole suite runs here against a real database.
       postgres:
         image: postgres:16
         env:
@@ -86,6 +87,23 @@ jobs:
     defaults:
       run:
         working-directory: app/e2e
+    services:
+      # The backend Playwright boots is Postgres-only now. This service is the
+      # disposable database it runs against; `global-setup.ts` migrates it to
+      # head before the first test.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: skej
+          POSTGRES_PASSWORD: skej
+          POSTGRES_DB: skej
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U skej -d skej"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       # Playwright boots both servers itself, so this job needs both runtimes.
@@ -110,6 +128,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm test
+        env:
+          DATABASE_URL: postgresql+psycopg://skej:skej@localhost:5432/skej
       - uses: actions/upload-artifact@v4
         # The HTML report and traces are only worth keeping when something broke.
         if: failure()

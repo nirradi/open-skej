@@ -3,26 +3,24 @@
  *
  * This package is deliberately separate from `app/frontend`. The frontend's own
  * Vitest suite mocks `fetch` and renders into jsdom; this one drives a real
- * browser against a real uvicorn process writing to a real SQLite file. Keeping
+ * browser against a real uvicorn process writing to a real Postgres. Keeping
  * Playwright out of the frontend's `package.json` is what stops the two from
  * quietly sharing config and turning into one suite with two runners.
  *
  * ## The throwaway database
  *
- * `SKEJ_DATABASE_URL` (see `app/backend/app/dependencies.py`) overrides
- * `DEFAULT_DATABASE_URL`, which points at `./skej.db` — a developer's real
- * local data. The suite must never write there, so the backend `webServer`
- * below is handed a path under `app/e2e/.tmp/`, which is gitignored.
- *
- * The file is deleted at *config load* time rather than in `globalSetup`,
- * because Playwright's ordering of `globalSetup` relative to `webServer` has
- * changed across versions and the guarantee "the backend boots against an empty
- * database" must not depend on which side of that line we land on. This module
- * is evaluated once, before either, so the deletion is unconditionally first.
+ * The backend is Postgres-only since Stream 4 unified the data layer, so the
+ * suite runs against the disposable Postgres named by `DATABASE_URL` — the same
+ * convention the backend test suite uses, and in CI a `postgres:16` service
+ * dedicated to the job. `global-setup.ts` runs `alembic upgrade head` against it
+ * before any test, so the schema exists on the first request; per-test isolation
+ * stays with `fixtures.ts`, which cancels every confirmed booking through the
+ * public API. The suite refuses to run with `DATABASE_URL` unset rather than
+ * inventing a default that could point at real data.
  */
 
 import { defineConfig, devices } from '@playwright/test'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -43,31 +41,36 @@ const PYTHON = existsSync(VENV_PYTHON) ? VENV_PYTHON : 'python3'
 const BACKEND_PORT = 8000
 const FRONTEND_PORT = 5173
 
-/** Gitignored scratch space for the throwaway database. */
-const TMP_DIR = join(here, '.tmp')
-const DB_PATH = join(TMP_DIR, 'e2e.db')
-
-// WAL mode (see `_configure_sqlite`) means the data lives across three files;
-// leaving the sidecars behind would resurrect rows from a previous run.
-for (const suffix of ['', '-wal', '-shm']) {
-  rmSync(`${DB_PATH}${suffix}`, { force: true })
+/**
+ * The disposable Postgres the backend and the migration step both use. Fail
+ * closed: a missing value must not silently fall back to a developer's real
+ * database, so the suite refuses to start rather than guess.
+ */
+const DATABASE_URL = process.env.DATABASE_URL
+if (!DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL is unset. The E2E suite runs the real backend against a ' +
+      'disposable Postgres. Start one with `docker compose up -d` and export ' +
+      'DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej',
+  )
 }
-
-// SQLite will not create the containing directory, and a missing one surfaces
-// as `unable to open database file` from deep inside SQLAlchemy on the first
-// request rather than at boot — so create it here, after the wipe above.
-mkdirSync(TMP_DIR, { recursive: true })
 
 export default defineConfig({
   testDir: './tests',
 
+  // Migrate the disposable Postgres to head before anything boots. See
+  // `global-setup.ts`; ordering against `webServer` does not matter because the
+  // backend engine is lazy and touches the database only on the first request,
+  // which no test issues until global setup has returned.
+  globalSetup: './global-setup.ts',
+
   /**
    * One worker, no parallelism.
    *
-   * The stack under test is a single backend process owning a single SQLite
-   * file, so parallel tests would book against each other's state no matter how
-   * the per-test reset is written. Serialising is the honest expression of that
-   * constraint; the suite is four specs and runs in seconds.
+   * The stack under test is a single backend process owning a single Postgres
+   * database, so parallel tests would book against each other's state no matter
+   * how the per-test reset is written. Serialising is the honest expression of
+   * that constraint; the suite is four specs and runs in seconds.
    */
   fullyParallel: false,
   workers: 1,
@@ -105,11 +108,11 @@ export default defineConfig({
       command: `${PYTHON} -m uvicorn app.main:app --port ${BACKEND_PORT}`,
       cwd: join(here, '..', 'backend'),
       port: BACKEND_PORT,
-      env: { SKEJ_DATABASE_URL: `sqlite+pysqlite:///${DB_PATH}` },
+      env: { DATABASE_URL },
       /**
        * Never reuse. A backend already listening on 8000 is almost certainly a
-       * developer's own `uvicorn`, pointed at the real `./skej.db` — reusing it
-       * would let the suite create and cancel bookings in their data. Better to
+       * developer's own `uvicorn`, pointed at their real database — reusing it
+       * would let the suite create and cancel bookings in that data. Better to
        * fail with "port already in use" than to silently do that.
        */
       reuseExistingServer: false,

@@ -1,9 +1,10 @@
 """Tests for the booking endpoints.
 
-The driver is overridden with a per-test SQLite file under ``tmp_path``. That is
-not only for isolation: ``get_driver`` builds the real ``./skej.db`` on first
-call, so leaving it un-overridden would have the suite writing to the developer's
-actual database.
+The driver is overridden with the Postgres ``driver`` fixture from ``conftest.py``
+(a freshly created ``bookings`` table per test). That is not only for isolation:
+``get_driver`` builds the process-wide driver on the shared engine on first call,
+so leaving it un-overridden would have the suite writing to the configured
+database. The module is Postgres-only — it skips when ``DATABASE_URL`` is unset.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -11,9 +12,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from app.db import SQLiteBookingDriver
 from app.dependencies import get_driver
 from app.main import app
+from tests.conftest import requires_postgres
+
+pytestmark = requires_postgres
 
 # Tomorrow, not a fixed date. These tests drive the real endpoint, which calls
 # ``evaluate`` without a Context and so judges the booking horizon against the
@@ -30,13 +33,6 @@ def at(hour: int, minute: int = 0) -> datetime:
 
 def iso(value: datetime) -> str:
     return value.isoformat()
-
-
-@pytest.fixture
-def driver(tmp_path):
-    driver = SQLiteBookingDriver(f"sqlite+pysqlite:///{tmp_path / 'api.db'}")
-    yield driver
-    driver.close()
 
 
 @pytest.fixture

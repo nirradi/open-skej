@@ -105,9 +105,9 @@ index predicates like `WHERE status = 'pending'` as ordinary string comparisons.
 
 **One declarative `Base`**, imported from `app.db.models` rather than redefined. One metadata
 registry is what lets integration turn `bookings.resource_id` / `bookings.user_id` into real foreign
-keys onto `spaces.id` / `users.id` without a cross-base reference. The resulting risk — autogenerate
-claiming the booking tables — is handled mechanically by `app.migration_filter`, which scopes
-migrations to identity tables.
+keys onto `spaces.id` / `users.id` without a cross-base reference. The booking store is folded into
+Alembic alongside the identity tables, so **a single migration history owns the whole schema** and
+autogenerate manages both halves — there is no table-scoping filter.
 
 **Timestamps use `UtcDateTime`**, which rejects naive datetimes outright, so a local time cannot be
 stored as if it were UTC.

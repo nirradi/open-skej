@@ -1,12 +1,13 @@
 """Postgres engine, session factory and the FastAPI session dependency.
 
-This is Stream 2's entry point into the real database. Stream 1's SQLite driver
-in ``app/db/sqlite.py`` builds its own engine and is untouched by anything here;
-the two coexist until Stream 4 merges them.
+This is the single entry point into the database. Both the identity layer and the
+booking driver (``app.db.postgres.PostgresBookingDriver``) draw their sessions
+from the factory here, so the whole backend runs on one engine and one connection
+pool behind ``DATABASE_URL``.
 
 The engine is built lazily rather than at import time so that importing this
-module with no ``DATABASE_URL`` set is harmless — Stream 1's test suite imports
-the package without a Postgres anywhere in sight.
+module with no ``DATABASE_URL`` set is harmless — the Postgres-only tests import
+the package and then skip, with no database anywhere in sight.
 """
 
 from collections.abc import Iterator

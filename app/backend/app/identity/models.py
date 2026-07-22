@@ -1,16 +1,15 @@
 """SQLAlchemy models for Stream 2's identity and access schema.
 
-These are the tables Stream 2 owns: who a user is, what Spaces exist, and who is
-allowed into them. Booking mechanics stay entirely in Stream 1's
-``app/db/models.py``; the two only ever meet in Stream 4, which turns
-``bookings.resource_id`` and ``bookings.user_id`` into real foreign keys onto
-``spaces.id`` and ``users.id``.
+These are the identity and access tables: who a user is, what Spaces exist, and
+who is allowed into them. Booking mechanics stay in ``app/db/models.py``; the
+foreign keys turning ``bookings.resource_id`` and ``bookings.user_id`` into real
+references onto ``spaces.id`` and ``users.id`` land in Stream 4's task 4.2.
 
 ``Base``, ``UtcDateTime`` and ``utcnow`` are imported from ``app.db.models``
 rather than redefined. One declarative base means one metadata registry, which is
-what lets Stream 4 write those foreign keys without a cross-base reference. The
-resulting risk — that autogenerate would try to claim Stream 1's ``bookings``
-table — is handled mechanically by ``app.migration_filter``.
+what lets those foreign keys be written without a cross-base reference — and, now
+that the booking store is folded into Alembic, what lets a single migration
+history own the whole schema with no table-scoping filter.
 
 Design notes that apply throughout:
 
