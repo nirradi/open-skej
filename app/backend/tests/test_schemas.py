@@ -5,8 +5,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from pydantic import ValidationError
 
-from app.db import DEFAULT_RESOURCE_ID, DEFAULT_USER_ID, BookingStatus, SQLiteBookingDriver
+from app.db import DEFAULT_RESOURCE_ID, DEFAULT_USER_ID, BookingStatus
 from app.schemas import BookingCreate, BookingRead
+from tests.conftest import requires_postgres
 
 START = datetime(2026, 7, 20, 10, tzinfo=timezone.utc)
 END = START + timedelta(hours=1)
@@ -42,14 +43,11 @@ def test_to_rule_request_carries_identity_and_interval():
     assert rule_request.end_at == END
 
 
-def test_booking_read_serialises_a_stored_booking(tmp_path):
-    driver = SQLiteBookingDriver(f"sqlite+pysqlite:///{tmp_path / 'test.db'}")
-    try:
-        booking = driver.create_booking(start_at=START, end_at=END)
+@requires_postgres
+def test_booking_read_serialises_a_stored_booking(driver):
+    booking = driver.create_booking(start_at=START, end_at=END)
 
-        read = BookingRead.model_validate(booking)
-    finally:
-        driver.close()
+    read = BookingRead.model_validate(booking)
 
     assert read.id == booking.id
     assert read.start_at == START

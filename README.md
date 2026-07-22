@@ -20,7 +20,7 @@ Work is split into three vertical streams that develop independently before a fi
 Repository layout:
 
 ```
-app/backend    FastAPI service (Python) — booking endpoints, SQLite driver, stub rule engine
+app/backend    FastAPI service (Python) — booking endpoints, Postgres driver, stub rule engine
 app/frontend   Vite + React 19 + Tailwind — the calendar grid and booking flow
 app/e2e        Standalone Playwright suite; boots both servers itself
 rules          Stream 3's rule engine package (currently a placeholder)
@@ -80,12 +80,19 @@ cp app/frontend/.env.example app/frontend/.env
 
 ## Running locally
 
-Two processes, two terminals.
+Two processes, two terminals — plus Postgres. The backend is Postgres-only: booking storage and
+identity share one database behind `DATABASE_URL`, and the server refuses to touch the database until
+that variable is set.
 
 **Terminal 1 — backend:**
 
 ```bash
+# From the repository root: start Postgres and migrate the schema (once).
+docker compose up -d
+docker compose ps          # wait for STATUS to read "healthy"
 cd app/backend
+export DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej
+./venv/bin/alembic upgrade head
 ./venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
 
@@ -108,29 +115,31 @@ frontend from any other origin will fail preflight.
 
 ### Where the data lives
 
-The backend writes to `./skej.db` relative to its working directory, i.e. `app/backend/skej.db`.
-SQLite runs in WAL mode, so you will also see `skej.db-wal` and `skej.db-shm`. All three are
-gitignored. Override the location with `SKEJ_DATABASE_URL` (see `app/backend/app/dependencies.py`):
+Everything is in the one Postgres database named by `DATABASE_URL` — booking rows and identity rows
+alike, behind a single engine and connection pool (`app/backend/app/db/session.py`). The compose
+service stores it in a named Docker volume that survives `docker compose down`.
+
+To reset your local data, throw the volume away and re-migrate:
 
 ```bash
-SKEJ_DATABASE_URL="sqlite+pysqlite:///$(pwd)/scratch.db" ./venv/bin/python -m uvicorn app.main:app --port 8000
+docker compose down -v && docker compose up -d
+cd app/backend && export DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej
+./venv/bin/alembic upgrade head
 ```
-
-To reset your local data, stop the server and delete all three files.
 
 ## Running with accounts and Spaces
 
-Everything above runs with no login and no database server: one hardcoded user, one hardcoded
-resource, SQLite on disk. This section turns on the real thing — Auth0 accounts, Postgres, and
-multi-tenant Spaces.
+Everything above runs the calendar with no login: one hardcoded user, one hardcoded resource. This
+section turns on the real thing — Auth0 accounts and multi-tenant Spaces. (The Postgres and migration
+steps below are the same ones "Running locally" already needs; they are repeated here so this section
+stands alone.)
 
 **The two halves are still separate.** Signing in and creating a Space does not change what the
 calendar at `/` does: bookings remain the single-user Stream 1 contract until integration scopes them
 to a Space. So the calendar works without any of this, and this works without touching the calendar.
 
-**Two databases, two variables, and they are not interchangeable.** Stream 1's booking tables live in
-SQLite under `SKEJ_DATABASE_URL`. The identity tables — users, Spaces, memberships, access requests,
-invitations — live in Postgres under `DATABASE_URL`. Setting one does not affect the other.
+**One database, one variable.** Booking rows and identity rows — users, Spaces, memberships, access
+requests, invitations — live in the same Postgres database under `DATABASE_URL`, behind one engine.
 
 ### 1. Start Postgres
 
@@ -159,9 +168,8 @@ export DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej
 Without `DATABASE_URL` set, Alembic stops with a message telling you to start compose — it never
 falls back to a default.
 
-Autogenerate is **filtered to the identity tables** (`app/backend/app/migration_filter.py`): the
-booking tables share a declarative `Base` but are not Stream 2's to migrate, so a new revision will
-not pick them up.
+One migration history owns the whole schema — the identity tables and the `bookings` table both share
+a declarative `Base`, and autogenerate manages both halves. There is no table-scoping filter.
 
 ### 3. Provision the Auth0 tenant
 
@@ -348,8 +356,8 @@ npm test
 > ### Stop your dev servers first
 >
 > `playwright.config.ts` sets `reuseExistingServer: false` for **both** the backend and the frontend,
-> and boots its own pair against a throwaway database in `app/e2e/.tmp/`. If your own servers are
-> running, the suite refuses to start:
+> and boots its own pair against the disposable Postgres named by `DATABASE_URL`. If your own servers
+> are running, the suite refuses to start:
 >
 > ```
 > Error: http://localhost:8000 is already used, make sure that nothing is running
@@ -357,11 +365,11 @@ npm test
 > ```
 >
 > This is deliberate, not a bug. Reusing a developer's backend would let the suite create and cancel
-> bookings in the real `./skej.db`. Stop both servers and re-run.
+> bookings in their database. Stop both servers and re-run.
 
 Other scripts: `npm run test:headed` to watch it drive a real browser, `npm run report` to open the
-HTML report. The suite is serialised to one worker — a single backend process owning a single SQLite
-file cannot be tested in parallel.
+HTML report. The suite is serialised to one worker — a single backend process owning a single Postgres
+database cannot be tested in parallel.
 
 ## Changing the slot configuration
 
@@ -408,16 +416,16 @@ cd app/backend
 ./venv/bin/black --check . && ./venv/bin/flake8 . && ./venv/bin/pytest
 ```
 
-Locally this reports **71 passed, 29 skipped**. The skips are Stream 2's Postgres-backed identity and
-migration tests, which need a live database. CI supplies one as a service container; to run them
-locally, start Postgres and export the URL CI uses:
+With no `DATABASE_URL` set this reports roughly **60 passed, 184 skipped**. The skips are every
+Postgres-backed test — the booking driver, the identity layer, and the migrations — which all need a
+live database now that the backend is Postgres-only. CI supplies one as a service container; to run
+them locally, start Postgres and export the URL CI uses:
 
 ```bash
 DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej ./venv/bin/pytest
 ```
 
-Note the two variables are distinct: Stream 1's SQLite tests read `SKEJ_DATABASE_URL`, Stream 2's
-Alembic tests read `DATABASE_URL`.
+With the database up the whole suite runs (nothing skipped).
 
 **Rule engine:**
 
@@ -426,10 +434,12 @@ cd rules
 ./venv/bin/black --check . && ./venv/bin/flake8 . && ./venv/bin/pytest
 ```
 
-**E2E:** as above, with no dev servers running.
+**E2E:** with no dev servers running — Playwright boots the backend and frontend itself. It needs a
+disposable Postgres, which its global setup migrates to head before the first test; point it at the
+compose database with `DATABASE_URL` (the suite refuses to start without it).
 
 ```bash
-cd app/e2e && npm test
+cd app/e2e && DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej npm test
 ```
 
 ## Current limitations

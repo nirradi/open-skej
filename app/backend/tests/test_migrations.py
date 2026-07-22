@@ -1,8 +1,14 @@
-"""Postgres migration tests for Stream 2's Alembic setup.
+"""Postgres migration tests for the unified Alembic setup.
 
-The whole module is skipped when ``DATABASE_URL`` is unset so Stream 1's SQLite
-suite keeps running standalone with no Postgres anywhere in sight. CI provides a
-``postgres:16`` service and sets the variable, so these run there.
+The whole module is skipped when ``DATABASE_URL`` is unset so the rest of the
+suite keeps running with no Postgres in sight. CI provides a ``postgres:16``
+service and sets the variable, so these run there.
+
+One migration history now owns the whole schema — the identity tables and the
+``bookings`` table both — so there is no table-scoping filter to exercise. What
+these prove instead is that the history is complete and honest: upgrading to head
+creates both halves, and an autogenerate against head wants no table changes, so
+``Base.metadata`` and the migrations agree.
 """
 
 import os
@@ -12,7 +18,6 @@ import pytest
 from sqlalchemy import create_engine, inspect
 
 from app.db.models import Base
-from app.migration_filter import STREAM_1_OWNED_TABLES, include_object
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -22,6 +27,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+# Both halves of the schema. `bookings` was created outside migrations until
+# Stream 4 folded it into the single history.
+IDENTITY_TABLES = {"users", "spaces"}
+BOOKING_TABLE = "bookings"
 
 
 @pytest.fixture
@@ -51,110 +61,65 @@ def test_upgrade_head_then_downgrade_base_runs_clean(alembic_config):
     command.downgrade(alembic_config, "base")
 
 
-def test_migrations_never_create_stream_1_tables(alembic_config, engine):
-    """Upgrading to head must not bring Stream 1's `bookings` table into being.
+def test_upgrade_head_creates_both_halves(alembic_config, engine):
+    """Upgrading to head brings the identity tables *and* `bookings` into being.
 
-    Stream 1 creates that table itself via `Base.metadata.create_all` on SQLite.
-    If a Stream 2 migration ever creates it on Postgres, the filter has leaked
-    and the two streams are both claiming the same schema.
+    The inverse of the retired filter test: `bookings` used to be deliberately
+    absent from the migration history. Now the single history owns it, so a schema
+    upgraded to head without a `bookings` table would mean the fold-in regressed.
     """
     from alembic import command
 
     command.upgrade(alembic_config, "head")
     try:
         tables = set(inspect(engine).get_table_names())
-        assert not (
-            tables & STREAM_1_OWNED_TABLES
-        ), f"Stream 2 migrations created Stream 1 tables: {tables & STREAM_1_OWNED_TABLES}"
+        assert IDENTITY_TABLES <= tables, f"identity tables missing: {IDENTITY_TABLES - tables}"
+        assert BOOKING_TABLE in tables, "the bookings table was not created by any migration"
     finally:
         command.downgrade(alembic_config, "base")
 
 
-def _touched_table_names(ops) -> set[str]:
-    """Every table name an autogenerate op tree refers to.
+def _table_change_ops(ops) -> set[str]:
+    """Every table an autogenerate op tree would create or drop.
 
     Ops must be walked rather than repr'd: alembic's op classes use the default
     object repr, so a substring check against `repr(upgrade_ops)` can never fail
-    and would pass even with the filter removed entirely.
+    and would pass even against a genuine diff. Only table-level create/drop is
+    inspected — unambiguous, unlike a column-type nuance that varies by driver
+    version.
     """
+    from alembic.operations.ops import CreateTableOp, DropTableOp
+
     names: set[str] = set()
     for op in getattr(ops, "ops", []):
-        name = getattr(op, "table_name", None)
-        if name is not None:
-            names.add(str(name))
-        names |= _touched_table_names(op)
+        if isinstance(op, (CreateTableOp, DropTableOp)):
+            names.add(str(op.table_name))
+        names |= _table_change_ops(op)
     return names
 
 
-def test_autogenerate_does_not_emit_stream_1_tables(engine):
-    """Autogenerate against a real empty database must skip `bookings`.
+def test_autogenerate_after_head_wants_no_table_changes(alembic_config, engine):
+    """Against a database at head, autogenerate must emit no create/drop table.
 
-    This is the end-to-end proof of the filter: `Base.metadata` genuinely
-    contains the Booking model, and the database genuinely lacks the table, so an
-    unfiltered comparison would certainly emit a `create_table('bookings')`.
+    This is the end-to-end proof that the migrations describe `Base.metadata` in
+    full: every table the models declare — both halves — already exists, so a
+    fresh comparison finds nothing to create, and no stray table to drop. A
+    `bookings` model that had drifted from its migration would surface here.
     """
+    from alembic import command
     from alembic.autogenerate import produce_migrations
     from alembic.migration import MigrationContext
 
-    with engine.connect() as connection:
-        context = MigrationContext.configure(
-            connection,
-            opts={"include_object": include_object, "compare_type": True},
-        )
-        migrations = produce_migrations(context, Base.metadata)
+    command.upgrade(alembic_config, "head")
+    try:
+        with engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection,
+                opts={"compare_type": True},
+            )
+            migrations = produce_migrations(context, Base.metadata)
 
-    touched = _touched_table_names(migrations.upgrade_ops)
-    assert not (
-        touched & STREAM_1_OWNED_TABLES
-    ), f"autogenerate leaked Stream 1 tables: {touched & STREAM_1_OWNED_TABLES}"
-
-
-# --- The filter hook itself, called directly. -------------------------------
-
-
-def test_include_object_excludes_bookings_table():
-    assert (
-        include_object(Base.metadata.tables["bookings"], "bookings", "table", False, None) is False
-    )
-
-
-def test_include_object_allows_an_identity_table():
-    """A Stream 2 table is included.
-
-    Paired with the test above so the hook is proven to discriminate rather than
-    to reject everything — a filter that always returned False would also keep
-    `bookings` out, while silently blocking every migration Stream 2 needs.
-    """
-    from sqlalchemy import Column, Integer, MetaData, String, Table
-
-    metadata = MetaData()
-    users = Table(
-        "users",
-        metadata,
-        Column("id", Integer, primary_key=True),
-        Column("auth0_sub", String(255), unique=True),
-    )
-
-    assert include_object(users, "users", "table", False, None) is True
-
-
-def test_include_object_excludes_indexes_owned_by_bookings():
-    """Indexes are offered separately and must be filtered by their owning table.
-
-    Excluding only the table would emit an index against a table the migration
-    never creates.
-    """
-    bookings = Base.metadata.tables["bookings"]
-    (index,) = [ix for ix in bookings.indexes if ix.name == "ix_bookings_resource_status_start"]
-
-    assert include_object(index, index.name, "index", False, None) is False
-
-
-def test_include_object_excludes_constraints_and_columns_owned_by_bookings():
-    bookings = Base.metadata.tables["bookings"]
-
-    column = bookings.c.resource_id
-    assert include_object(column, column.name, "column", False, None) is False
-
-    constraint = next(c for c in bookings.constraints if c.name == "ck_bookings_positive_duration")
-    assert include_object(constraint, constraint.name, "check_constraint", False, None) is False
+        changed = _table_change_ops(migrations.upgrade_ops)
+        assert not changed, f"autogenerate wants table changes at head: {changed}"
+    finally:
+        command.downgrade(alembic_config, "base")

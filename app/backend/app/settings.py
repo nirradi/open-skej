@@ -1,10 +1,10 @@
 """Application settings, read from the environment or a local ``.env``.
 
-Stream 2 owns the real database and the Auth0 integration, both of which are
-configured entirely through environment variables. ``DATABASE_URL`` is
-deliberately distinct from Stream 1's ``SKEJ_DATABASE_URL``: Stream 1 points at
-a local SQLite file, Stream 2 at Postgres, and neither should reconfigure the
-other. Stream 4 collapses the two when the drivers merge.
+The real database and the Auth0 integration are both configured entirely through
+environment variables. ``DATABASE_URL`` is the one Postgres connection string for
+the whole backend — booking storage and identity share it, behind one engine and
+one session factory. (Stream 1's separate ``SKEJ_DATABASE_URL`` / SQLite file is
+retired; the drivers are unified on Postgres.)
 
 Every field is optional so importing this module never raises. A missing
 ``DATABASE_URL`` is what the Postgres-only tests skip on, and the Auth0 values

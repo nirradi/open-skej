@@ -4,7 +4,17 @@ import enum
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, Index, String, TypeDecorator
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    Index,
+    String,
+    TypeDecorator,
+    literal_column,
+    text,
+)
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -16,10 +26,16 @@ def utcnow() -> datetime:
 class UtcDateTime(TypeDecorator[datetime]):
     """A DateTime that is always timezone-aware UTC on the Python side.
 
-    SQLite has no timezone-aware storage type, so aware values are normalised to
-    UTC and stored naive, then re-tagged as UTC on the way back out. Naive input
+    Values are normalised to UTC and stored naive (a ``timestamp without time
+    zone`` on Postgres), then re-tagged as UTC on the way back out. Naive input
     is rejected rather than assumed to be UTC, so an accidental local time cannot
     silently land in the database and shift a booking by the offset.
+
+    Storing naive rather than ``timestamptz`` keeps every stored value on one
+    absolute clock — the UTC-everywhere invariant — and is what lets the booking
+    overlap constraint index ``tsrange(start_at, end_at)``: that expression is
+    IMMUTABLE, whereas a ``tstzrange`` over these columns would fold in the
+    session ``TimeZone`` and Postgres rejects a non-immutable index expression.
     """
 
     impl = DateTime
@@ -89,8 +105,22 @@ class Booking(Base):
             " OR (status = 'confirmed' AND cancelled_at IS NULL)",
             name="ck_bookings_cancelled_at_matches_status",
         ),
-        # Covers the overlap probe in create_booking and the window scan in
-        # list_bookings, both of which filter on resource then status then time.
+        # The overlap invariant, enforced by the database rather than by a
+        # read-then-write probe: no two *confirmed* bookings on one resource may
+        # cover overlapping intervals. The ``WHERE`` makes it partial so a
+        # cancelled row frees its slot for rebooking, and the ``&&`` on a
+        # half-open ``tsrange`` treats touching intervals (prev.end == next.start)
+        # as non-overlapping. Needs the ``btree_gist`` extension for the
+        # ``resource_id WITH =`` term; the migration creates it.
+        ExcludeConstraint(
+            ("resource_id", "="),
+            (literal_column("tsrange(start_at, end_at)"), "&&"),
+            name="ex_bookings_confirmed_no_overlap",
+            using="gist",
+            where=text("status = 'confirmed'"),
+        ),
+        # Covers the window scan in list_bookings, which filters on resource then
+        # status then time.
         Index("ix_bookings_resource_status_start", "resource_id", "status", "start_at"),
     )
 

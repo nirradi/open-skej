@@ -1,9 +1,8 @@
-# Local development Postgres for Stream 2.
+# Local development Postgres.
 #
-# Stream 1's SQLite driver is unaffected by this file — it reads SKEJ_DATABASE_URL
-# and defaults to an on-disk ./skej.db. Postgres is reached through DATABASE_URL,
-# a separate variable, so bringing this service up does not change Stream 1's
-# behaviour and leaving it down does not break Stream 1's tests.
+# Postgres is the one database the backend runs on — booking storage and identity
+# share it behind DATABASE_URL. The Postgres-only tests skip when that variable is
+# unset, so leaving this service down does not break the rest of the suite.
 #
 #   docker compose up -d
 #   export DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5432/skej
