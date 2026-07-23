@@ -15,12 +15,15 @@ import type {
   AuthenticatedResult,
   Booking,
   CancelBookingResult,
+  CancelResourceBookingResult,
   CreateBookingResult,
+  CreateResourceBookingResult,
   CurrentUser,
   GetCurrentUserResult,
   Invitation,
   InvitationStatus,
   ListBookingsResult,
+  ListResourceBookingsResult,
   Member,
   MembershipRole,
   MutatingResult,
@@ -376,6 +379,30 @@ function unexpectedDiscriminator(error: string): {
 }
 
 /**
+ * Turns an undiscriminated 409 into a failure, for a route that declares no
+ * bare-conflict outcome at all.
+ *
+ * The resource-scoped booking routes only ever refuse with a discriminated
+ * `error` — `overlap`, `space_archived`, `already_started`, `already_cancelled`
+ * — every one of which is claimed by the `discriminated` branch before this
+ * runs. A bare 409 reaching here is contract drift with `resource_bookings.py`,
+ * not a domain refusal this client forgot to model, so it fails loudly the same
+ * way `unexpectedDiscriminator` does rather than inventing a `conflict` outcome
+ * these result unions do not have.
+ */
+function unexpectedConflict(message: string): {
+  outcome: 'failed'
+  message: string
+  cause: unknown
+} {
+  return {
+    outcome: 'failed',
+    message: UNEXPECTED_FAILURE_MESSAGE,
+    cause: `unexpected undiscriminated conflict from a booking route: "${message}"`,
+  }
+}
+
+/**
  * Rejects an invalid `Date` before it can reach `toISOString()`.
  *
  * `new Date('nonsense').toISOString()` throws a `RangeError`, which would break
@@ -521,6 +548,148 @@ export async function cancelBooking(bookingId: number): Promise<CancelBookingRes
     case 'not_found':
     case 'conflict':
       return unmodelledAccessOutcome(envelope.kind)
+    case 'failed':
+      return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
+  }
+}
+
+/** The URL prefix every resource-scoped booking route sits under. */
+function resourceBookingsPath(publicId: string, resourceId: number): string {
+  return `/spaces/${encodeURIComponent(publicId)}/resources/${resourceId}/bookings`
+}
+
+/**
+ * `GET /spaces/{public_id}/resources/{resource_id}/bookings?from=&to=`
+ *
+ * The scoped counterpart of `listBookings`: same half-open `[from, to)` window
+ * and overlap semantics, but authenticated and authorized through
+ * `require_space_role`, so `unauthenticated` / `forbidden` / `not_found` are
+ * reachable here in a way the unscoped route cannot produce — see
+ * `ListResourceBookingsResult`. A read has no domain refusal to add on top, so
+ * this is a thin wrapper over `authenticatedRequest`.
+ */
+export async function listResourceBookings(
+  publicId: string,
+  resourceId: number,
+  from: Date,
+  to: Date,
+  options: { includeCancelled?: boolean } = {},
+): Promise<ListResourceBookingsResult> {
+  const invalid = rejectInvalidDates({ from, to })
+  if (invalid) return invalid
+
+  const query = new URLSearchParams({
+    from: from.toISOString(),
+    to: to.toISOString(),
+  })
+  if (options.includeCancelled) {
+    query.set('include_cancelled', 'true')
+  }
+
+  return authenticatedRequest<Booking[]>(`${resourceBookingsPath(publicId, resourceId)}?${query}`)
+}
+
+/**
+ * `POST /spaces/{public_id}/resources/{resource_id}/bookings`
+ *
+ * The scoped counterpart of `createBooking`, widened with the access floor and
+ * one more domain refusal: `space_archived`, for a create against a Resource
+ * whose Space has been archived. Distinct from `overlap` even though both are
+ * 409 — see `ApiSpaceArchived` — so the UI can tell "someone beat you to this
+ * slot, try another" from "this venue is closed, stop offering the form".
+ */
+export async function createResourceBooking(
+  publicId: string,
+  resourceId: number,
+  startAt: Date,
+  endAt: Date,
+): Promise<CreateResourceBookingResult> {
+  const invalid = rejectInvalidDates({ start_at: startAt, end_at: endAt })
+  if (invalid) return invalid
+
+  const envelope = await request(resourceBookingsPath(publicId, resourceId), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ start_at: startAt.toISOString(), end_at: endAt.toISOString() }),
+  })
+
+  switch (envelope.kind) {
+    case 'ok':
+      return { outcome: 'ok', data: envelope.body as Booking }
+    case 'invalid_request':
+      return { outcome: 'invalid_request', detail: envelope.detail, raw: envelope.raw }
+    case 'discriminated':
+      switch (envelope.error) {
+        case 'rule_denied':
+          return { outcome: 'rule_denied', message: envelope.message }
+        case 'overlap':
+          return { outcome: 'overlap', message: envelope.message }
+        case 'space_archived':
+          return { outcome: 'space_archived', message: envelope.message }
+        default:
+          return unexpectedDiscriminator(envelope.error)
+      }
+    case 'unauthenticated':
+      return { outcome: 'unauthenticated', message: envelope.message }
+    case 'forbidden':
+      return { outcome: 'forbidden', message: envelope.message }
+    case 'not_found':
+      return { outcome: 'not_found', message: envelope.message }
+    case 'conflict':
+      return unexpectedConflict(envelope.message)
+    case 'failed':
+      return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
+  }
+}
+
+/**
+ * `DELETE /spaces/{public_id}/resources/{resource_id}/bookings/{booking_id}`
+ *
+ * The scoped counterpart of `cancelBooking`, widened with the access floor and
+ * one more domain refusal: `already_started`, for a cancel against a booking
+ * whose start time has already passed. Unlike `already_cancelled`, there is no
+ * remedy — the interval is under way — so the UI should not offer a retry.
+ *
+ * `not_found` here covers three things the server keeps indistinguishable on
+ * purpose — see `ListResourceBookingsResult`'s docstring — so this function
+ * does not attempt to tell them apart either.
+ */
+export async function cancelResourceBooking(
+  publicId: string,
+  resourceId: number,
+  bookingId: number,
+): Promise<CancelResourceBookingResult> {
+  const envelope = await request(`${resourceBookingsPath(publicId, resourceId)}/${bookingId}`, {
+    method: 'DELETE',
+  })
+
+  switch (envelope.kind) {
+    case 'ok':
+      return { outcome: 'ok', data: envelope.body as Booking }
+    case 'invalid_request':
+      return { outcome: 'invalid_request', detail: envelope.detail, raw: envelope.raw }
+    case 'discriminated':
+      switch (envelope.error) {
+        case 'not_found':
+          return { outcome: 'not_found', message: envelope.message }
+        case 'already_cancelled':
+          return { outcome: 'already_cancelled', message: envelope.message }
+        case 'already_started':
+          return { outcome: 'already_started', message: envelope.message }
+        default:
+          return unexpectedDiscriminator(envelope.error)
+      }
+    case 'unauthenticated':
+      return { outcome: 'unauthenticated', message: envelope.message }
+    case 'forbidden':
+      return { outcome: 'forbidden', message: envelope.message }
+    case 'not_found':
+      // A bare 404 (no `error` key): the Space or the Resource is not the
+      // caller's. Folded into the same variant as the discriminated
+      // `not_found` above — see the function docstring.
+      return { outcome: 'not_found', message: envelope.message }
+    case 'conflict':
+      return unexpectedConflict(envelope.message)
     case 'failed':
       return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
   }
@@ -707,10 +876,10 @@ export async function requestAccess(
   publicId: string,
   message?: string | null,
 ): Promise<MutatingResult<AccessRequest>> {
-  return mutatingRequest<AccessRequest>(
-    `/spaces/${encodeURIComponent(publicId)}/access-requests`,
-    { method: 'POST', ...jsonBody({ message: message ?? null }) },
-  )
+  return mutatingRequest<AccessRequest>(`/spaces/${encodeURIComponent(publicId)}/access-requests`, {
+    method: 'POST',
+    ...jsonBody({ message: message ?? null }),
+  })
 }
 
 /** `GET /spaces/{public_id}/members` — who is in the Space. Members and up. */
@@ -736,10 +905,10 @@ export async function updateMemberRole(
   userId: number,
   role: MembershipRole,
 ): Promise<MutatingResult<Member>> {
-  return mutatingRequest<Member>(
-    `/spaces/${encodeURIComponent(publicId)}/members/${userId}`,
-    { method: 'PATCH', ...jsonBody({ role }) },
-  )
+  return mutatingRequest<Member>(`/spaces/${encodeURIComponent(publicId)}/members/${userId}`, {
+    method: 'PATCH',
+    ...jsonBody({ role }),
+  })
 }
 
 /**
