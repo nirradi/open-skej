@@ -40,8 +40,8 @@ function bookingAt(dayOffset: number, startHour: number, endHour: number): Booki
   end.setHours(endHour, 0, 0, 0)
   return {
     id: 1,
-    resource_id: 'default-resource',
-    user_id: 'default-user',
+    resource_id: 1,
+    user_id: 1,
     start_at: start.toISOString(),
     end_at: end.toISOString(),
     status: 'confirmed',

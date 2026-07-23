@@ -15,6 +15,12 @@
  * schema, not reset it — any confirmed rows a previous run left behind are
  * cancelled by the first test's fixture.
  *
+ * After migrating it seeds the **default booking target**: `bookings.resource_id`
+ * and `bookings.user_id` are now foreign keys, so the still-unauthenticated
+ * `POST /bookings` needs a real default Resource and user to point at. The seed
+ * is idempotent, so re-running against a database from a previous run is a no-op
+ * rather than an error.
+ *
  * The interpreter is resolved the same way `playwright.config.ts` resolves it:
  * the checked-out venv locally, or the `setup-python` interpreter on PATH in CI.
  */
@@ -41,6 +47,12 @@ export default function globalSetup(): void {
   }
 
   execFileSync(PYTHON, ['-m', 'alembic', 'upgrade', 'head'], {
+    cwd: BACKEND_DIR,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: 'inherit',
+  })
+
+  execFileSync(PYTHON, ['-m', 'app.db.bootstrap'], {
     cwd: BACKEND_DIR,
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdio: 'inherit',

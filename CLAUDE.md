@@ -4,10 +4,13 @@ This file and `.claude/rules/*.md` describe **what the system is and why**.
 
 ## What it is
 
-Open-Skej books time on shared resources — a tennis court, a piece of expensive equipment. The
-differentiator is **AI-driven rule configuration**: booking constraints are authored in natural
-language ("only 1 hour sessions", "no more than twice a week") and stored as parameterized Python
-snippets that the rule engine executes.
+Open-Skej books time on shared resources — a tennis court, a piece of expensive equipment. Each such
+resource is a **Resource**: a bookable calendar. Resources are grouped under a **Space** — a venue
+(a club, a lab) that owns many of them and is the boundary of who may book. A booking is always
+against one Resource; membership and roles are held at the Space, so a member of the venue may book
+any Resource in it. The differentiator is **AI-driven rule configuration**: booking constraints are
+authored in natural language ("only 1 hour sessions", "no more than twice a week") and stored as
+parameterized Python snippets that the rule engine executes, per Resource.
 
 Rule evaluation is bounded to **at most one calendar month of history**. That bound is a design
 constraint, not a tuning knob: it caps the work any single booking attempt can cause, so a rule
@@ -59,6 +62,10 @@ booking**. See `.claude/rules/rule-engine.md` for the three containment paths.
 **The link is the capability.** A Space is reachable only by its unguessable `public_id`. There is no
 listing endpoint, and a caller outside a Space gets **404, never 403** — a 403 would confirm the id
 exists and turn every capability URL into an oracle. The integer primary key is never exposed.
+`public_id` lives on the Space alone: a Resource carries no such id, because admission is Space-level
+and a Resource is reachable only once you are already inside its Space. Access to a Resource is
+decided at its Space and nowhere else, so the same oracle-free 404 covers a Resource that is not
+yours.
 
 **Nothing is deleted.** Spaces archive (`archived_at`); access requests and invitations retain their
 decided rows as history. Consequently no foreign key carries `ON DELETE CASCADE` — there is no delete

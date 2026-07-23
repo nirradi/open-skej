@@ -54,7 +54,7 @@ class PostgresBookingDriver:
         *,
         start: datetime,
         end: datetime,
-        resource_id: str = DEFAULT_RESOURCE_ID,
+        resource_id: int = DEFAULT_RESOURCE_ID,
         include_cancelled: bool = False,
     ) -> list[Booking]:
         _require_aware("start", start)
@@ -82,8 +82,8 @@ class PostgresBookingDriver:
         *,
         start_at: datetime,
         end_at: datetime,
-        user_id: str = DEFAULT_USER_ID,
-        resource_id: str = DEFAULT_RESOURCE_ID,
+        user_id: int = DEFAULT_USER_ID,
+        resource_id: int = DEFAULT_RESOURCE_ID,
     ) -> Booking:
         _require_aware("start_at", start_at)
         _require_aware("end_at", end_at)

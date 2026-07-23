@@ -37,6 +37,7 @@ from app.identity.models import (
     AccessRequestStatus,
     InvitationStatus,
     MembershipRole,
+    Resource,
     Space,
     SpaceAccessRequest,
     SpaceInvitation,
@@ -432,6 +433,30 @@ def test_creating_a_space_makes_the_creator_its_owner(
 
     space = session.execute(select(Space).where(Space.public_id == body["public_id"])).scalar_one()
     assert _role_of(session, space, alice) is MembershipRole.OWNER
+
+
+def test_creating_a_space_auto_creates_one_resource(
+    api: Api, session: Session, alice: User
+) -> None:
+    """A fresh Space is a venue with one bookable calendar, not an empty shell.
+
+    The auto-created Resource is what keeps the admin's primary flow off an
+    empty-state path and the schema from having to represent a Space with no
+    Resource in the product.
+    """
+    response = api.as_user(alice).post("/spaces", json={"name": "New Court"})
+    assert response.status_code == 201
+
+    space = session.execute(
+        select(Space).where(Space.public_id == response.json()["public_id"])
+    ).scalar_one()
+    resources = list(
+        session.execute(select(Resource).where(Resource.space_id == space.id)).scalars()
+    )
+    assert len(resources) == 1
+    assert resources[0].space_id == space.id
+    # The Space carries the venue timezone, defaulting to UTC; the Resource does not.
+    assert space.timezone == "UTC"
 
 
 def test_list_spaces_returns_only_the_callers_own(

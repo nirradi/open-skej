@@ -42,8 +42,8 @@ function resolveWith(bookings: Booking[] = []) {
 function booking(id: number, start: Date, end: Date): Booking {
   return {
     id,
-    resource_id: 'default-resource',
-    user_id: 'default-user',
+    resource_id: 1,
+    user_id: 1,
     start_at: start.toISOString(),
     end_at: end.toISOString(),
     status: 'confirmed',

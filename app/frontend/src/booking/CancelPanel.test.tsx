@@ -21,8 +21,8 @@ import type { Booking } from '../api'
 
 const booking: Booking = {
   id: 42,
-  resource_id: 'default-space',
-  user_id: 'default-user',
+  resource_id: 1,
+  user_id: 1,
   start_at: new Date(2026, 6, 24, 8, 0).toISOString(),
   end_at: new Date(2026, 6, 24, 9, 30).toISOString(),
   status: 'confirmed',

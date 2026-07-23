@@ -20,7 +20,7 @@ from app.db import (
     BookingStatus,
     OverlapError,
 )
-from tests.conftest import requires_postgres
+from tests.conftest import OTHER_RESOURCE_ID, requires_postgres
 
 pytestmark = requires_postgres
 
@@ -112,10 +112,10 @@ def test_adjacent_booking_is_allowed(driver, booked, label, start, end):
 
 
 def test_overlap_is_scoped_to_the_resource(driver, booked):
-    other = driver.create_booking(start_at=at(10), end_at=at(11), resource_id="court-2")
+    other = driver.create_booking(start_at=at(10), end_at=at(11), resource_id=OTHER_RESOURCE_ID)
 
     assert other.id != booked.id
-    assert driver.list_bookings(start=at(0), end=at(24), resource_id="court-2") == [other]
+    assert driver.list_bookings(start=at(0), end=at(24), resource_id=OTHER_RESOURCE_ID) == [other]
 
 
 # --- Cancellation --------------------------------------------------------
