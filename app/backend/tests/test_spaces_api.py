@@ -107,6 +107,90 @@ SPACE_SCOPED_ROUTES = _space_scoped_routes()
 GENERIC_BODY: dict[str, Any] = {"name": "Renamed", "role": "member"}
 
 
+# --- The role-requirement matrix, for the parametrised role-enforcement sweep.
+
+
+def _all_space_scoped_routes() -> set[tuple[str, str]]:
+    """Every route under ``/spaces/{public_id}``, link-holder routes included.
+
+    Deliberately independent of :func:`_space_scoped_routes`, which already
+    subtracts ``LINK_HOLDER_ROUTES``, so the completeness guard below does not
+    silently inherit a bug in that subtraction. If ``_space_scoped_routes`` ever
+    over- or under-excluded a route, this still reads the ground truth straight
+    from the application's own OpenAPI schema.
+    """
+    found: set[tuple[str, str]] = set()
+    for path, operations in app.openapi()["paths"].items():
+        if not path.startswith("/spaces/{public_id}"):
+            continue
+        for method in operations:
+            if method.upper() in _HTTP_METHODS:
+                found.add((method.upper(), path))
+    return found
+
+
+# Every space-scoped route's minimum role, read off the ``require_space_role``
+# in its own definition rather than guessed from the path. An explicit
+# (method, path) mapping and deliberately not a rule derived from a prefix or
+# suffix: ``GET`` and ``POST`` on ``/resources`` require different roles
+# (listing is member+, creating is admin+), and every booking route is
+# member-level despite living under ``/resources/{resource_id}`` — no shortcut
+# taken from the URL shape would be correct for either. Membership routes are
+# listed as ``ADMIN`` because that is what their ``require_space_role``
+# declares; the stricter owner-only refusal for granting the owner role or
+# touching an existing owner's membership is a business rule enforced in
+# ``service.py``, not a second role gate, so it is proven by
+# ``test_an_admin_cannot_promote_themselves_to_owner`` and its neighbours above,
+# not by this table.
+ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
+    ("GET", "/spaces/{public_id}"): MembershipRole.MEMBER,
+    ("PATCH", "/spaces/{public_id}"): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/archive"): MembershipRole.OWNER,
+    ("GET", "/spaces/{public_id}/members"): MembershipRole.MEMBER,
+    ("PATCH", "/spaces/{public_id}/members/{user_id}"): MembershipRole.ADMIN,
+    ("DELETE", "/spaces/{public_id}/members/{user_id}"): MembershipRole.ADMIN,
+    ("GET", "/spaces/{public_id}/access-requests"): MembershipRole.ADMIN,
+    (
+        "POST",
+        "/spaces/{public_id}/access-requests/{request_id}/approve",
+    ): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/access-requests/{request_id}/deny"): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/invitations"): MembershipRole.ADMIN,
+    ("GET", "/spaces/{public_id}/invitations"): MembershipRole.ADMIN,
+    ("DELETE", "/spaces/{public_id}/invitations/{invitation_id}"): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/resources"): MembershipRole.ADMIN,
+    ("GET", "/spaces/{public_id}/resources"): MembershipRole.MEMBER,
+    ("GET", "/spaces/{public_id}/resources/{resource_id}"): MembershipRole.MEMBER,
+    ("PATCH", "/spaces/{public_id}/resources/{resource_id}"): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/resources/{resource_id}/archive"): MembershipRole.ADMIN,
+    ("GET", "/spaces/{public_id}/resources/{resource_id}/bookings"): MembershipRole.MEMBER,
+    ("POST", "/spaces/{public_id}/resources/{resource_id}/bookings"): MembershipRole.MEMBER,
+    (
+        "DELETE",
+        "/spaces/{public_id}/resources/{resource_id}/bookings/{booking_id}",
+    ): MembershipRole.MEMBER,
+}
+
+# One rank below each non-member minimum — the caller the under-privileged half
+# of the sweep needs in order to prove the gate holds *that* line specifically:
+# an admin denied on an owner-only route says nothing about whether a plain
+# member would also be refused there.
+_ONE_RANK_BELOW: dict[MembershipRole, MembershipRole] = {
+    MembershipRole.ADMIN: MembershipRole.MEMBER,
+    MembershipRole.OWNER: MembershipRole.ADMIN,
+}
+
+_UNDER_PRIVILEGED_ROUTES = sorted(
+    (method, path, minimum)
+    for (method, path), minimum in ROLE_TABLE.items()
+    if minimum is not MembershipRole.MEMBER
+)
+
+_ALL_ROLE_TABLE_ROUTES = sorted(
+    (method, path, minimum) for (method, path), minimum in ROLE_TABLE.items()
+)
+
+
 # --- Fixtures. --------------------------------------------------------------
 
 
@@ -310,6 +394,21 @@ def test_the_route_table_actually_yielded_routes_to_test() -> None:
     assert len(SPACE_SCOPED_ROUTES) >= 6, SPACE_SCOPED_ROUTES
 
 
+def test_every_space_scoped_route_is_classified() -> None:
+    """The security-critical guard on ``ROLE_TABLE``.
+
+    Equality, in both directions: a route the OpenAPI schema knows about but
+    that is absent from both ``ROLE_TABLE`` and ``LINK_HOLDER_ROUTES`` is a route
+    added since this table was written, with no role decision ever made about
+    it — the exact gap this task exists to close. A stale table entry naming a
+    route that no longer exists would silently stop proving anything and nobody
+    would notice either. Checked against :func:`_all_space_scoped_routes` rather
+    than the already-filtered ``SPACE_SCOPED_ROUTES``, so a bug in that filtering
+    could not hide from this guard too.
+    """
+    assert _all_space_scoped_routes() == LINK_HOLDER_ROUTES | set(ROLE_TABLE.keys())
+
+
 def test_the_isolation_sweep_leaves_no_placeholder_unfilled() -> None:
     """Guards :func:`_fill`, which the sweep's meaning depends on.
 
@@ -402,6 +501,95 @@ def test_an_admin_gets_403_on_the_owner_only_archive_route(
     response = api.as_user(carol).post(f"/spaces/{space_a.public_id}/archive")
 
     assert response.status_code == 403
+
+
+def test_the_role_enforcement_sweep_has_something_to_prove() -> None:
+    """Guards the parametrisation below, mirroring
+    :func:`test_the_route_table_actually_yielded_routes_to_test` for the
+    isolation sweep. If every route in ``ROLE_TABLE`` were member-level, the
+    under-privileged half of the sweep would silently parametrize to nothing and
+    the suite would still be green.
+    """
+    assert len(_UNDER_PRIVILEGED_ROUTES) >= 6, _UNDER_PRIVILEGED_ROUTES
+
+
+@pytest.mark.parametrize(
+    "method,path,minimum",
+    _UNDER_PRIVILEGED_ROUTES,
+    ids=[f"{m} {p} (needs {r.value})" for m, p, r in _UNDER_PRIVILEGED_ROUTES],
+)
+def test_a_caller_one_rank_below_the_minimum_gets_403(
+    api: Api,
+    session: Session,
+    alice: User,
+    bob: User,
+    carol: User,
+    space_a: Space,
+    method: str,
+    path: str,
+    minimum: MembershipRole,
+) -> None:
+    """The systematic form of the two hand-written tests above, run over every
+    route whose minimum is above ``member``.
+
+    ``require_space_role`` runs before any handler body or sub-resource lookup,
+    so this 403 holds regardless of the path's ``{resource_id}``/``{booking_id}``
+    — Carol is refused at the gate itself, before either is ever looked up. Bob
+    is added as a plain member purely so a route's ``{user_id}`` names a real
+    member of Space A rather than a bogus id, which is not what this test is
+    checking — targeting the actual owner would risk tripping the separate
+    owner-authority rule and reading the wrong 403 as this one.
+    """
+    _add_member(session, space_a, bob, MembershipRole.MEMBER)
+    _add_member(session, space_a, carol, _ONE_RANK_BELOW[minimum])
+
+    url = _fill(path, space_a.public_id, bob)
+    response = api.as_user(carol).request(method, url, json=GENERIC_BODY)
+
+    assert response.status_code == 403, (
+        f"{method} {path} requires {minimum.value}, but a caller ranked"
+        f" {_ONE_RANK_BELOW[minimum].value} was not refused"
+        f" (got {response.status_code}, body {response.text})"
+    )
+
+
+@pytest.mark.parametrize(
+    "method,path,minimum",
+    _ALL_ROLE_TABLE_ROUTES,
+    ids=[f"{m} {p} (min {r.value})" for m, p, r in _ALL_ROLE_TABLE_ROUTES],
+)
+def test_a_caller_at_the_minimum_role_is_not_refused_by_the_gate(
+    api: Api,
+    session: Session,
+    alice: User,
+    bob: User,
+    carol: User,
+    space_a: Space,
+    method: str,
+    path: str,
+    minimum: MembershipRole,
+) -> None:
+    """The positive control the sweep above needs, proving 403 discriminates
+    rather than being returned unconditionally.
+
+    Only ``!= 403`` — never a specific code, and never "not 404" — because a
+    caller who clears the role gate can still legitimately meet a 404 (a bogus
+    ``{resource_id}``/``{booking_id}``), a 422 (``GENERIC_BODY`` doesn't fit
+    every route's own schema), a 400, or a 409 raised by the handler body. The
+    gate's job ends at "not refused for role"; everything past that belongs to
+    the handler, not this test. Bob, again, is only the ``{user_id}`` filler and
+    never the caller under test.
+    """
+    _add_member(session, space_a, bob, MembershipRole.MEMBER)
+    _add_member(session, space_a, carol, minimum)
+
+    url = _fill(path, space_a.public_id, bob)
+    response = api.as_user(carol).request(method, url, json=GENERIC_BODY)
+
+    assert response.status_code != 403, (
+        f"{method} {path} refused a caller holding exactly its {minimum.value}"
+        f" minimum (body {response.text})"
+    )
 
 
 def test_role_ordering_is_owner_over_admin_over_member() -> None:
