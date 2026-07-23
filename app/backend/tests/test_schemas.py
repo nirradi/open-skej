@@ -37,8 +37,10 @@ def test_to_rule_request_carries_identity_and_interval():
 
     rule_request = payload.to_rule_request(user_id=DEFAULT_USER_ID, resource_id=DEFAULT_RESOURCE_ID)
 
-    assert rule_request.user_id == DEFAULT_USER_ID
-    assert rule_request.resource_id == DEFAULT_RESOURCE_ID
+    # The engine identifies user and resource by opaque string label, so the
+    # integer foreign-key ids are stringified at this boundary.
+    assert rule_request.user_id == str(DEFAULT_USER_ID)
+    assert rule_request.resource_id == str(DEFAULT_RESOURCE_ID)
     assert rule_request.start_at == START
     assert rule_request.end_at == END
 

@@ -33,11 +33,18 @@ class BookingCreate(BaseModel):
             raise ValueError("start_at must be before end_at")
         return self
 
-    def to_rule_request(self, *, user_id: str, resource_id: str) -> BookingRequest:
-        """Adapt to the rule engine's input model."""
+    def to_rule_request(self, *, user_id: int, resource_id: int) -> BookingRequest:
+        """Adapt to the rule engine's input model.
+
+        The ids are stringified because the engine treats them as opaque labels —
+        its ``BookingRequest`` types them as ``str`` and no canon rule branches on
+        their value — while the data layer keys foreign keys and the overlap
+        constraint on the integers. Converting here keeps the engine boundary
+        exactly as it was and the storage boundary correctly typed.
+        """
         return BookingRequest(
-            user_id=user_id,
-            resource_id=resource_id,
+            user_id=str(user_id),
+            resource_id=str(resource_id),
             start_at=self.start_at,
             end_at=self.end_at,
         )
@@ -49,8 +56,8 @@ class BookingRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    resource_id: str
-    user_id: str
+    resource_id: int
+    user_id: int
     start_at: datetime
     end_at: datetime
     status: BookingStatus

@@ -18,8 +18,8 @@ export type BookingStatus = 'confirmed' | 'cancelled'
  */
 export interface Booking {
   id: number
-  resource_id: string
-  user_id: string
+  resource_id: number
+  user_id: number
   start_at: string
   end_at: string
   status: BookingStatus

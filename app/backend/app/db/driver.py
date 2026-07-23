@@ -40,7 +40,7 @@ class BookingDriver(Protocol):
         *,
         start: datetime,
         end: datetime,
-        resource_id: str = DEFAULT_RESOURCE_ID,
+        resource_id: int = DEFAULT_RESOURCE_ID,
         include_cancelled: bool = False,
     ) -> list[Booking]:
         """Return bookings overlapping the half-open window [start, end).
@@ -54,8 +54,8 @@ class BookingDriver(Protocol):
         *,
         start_at: datetime,
         end_at: datetime,
-        user_id: str = DEFAULT_USER_ID,
-        resource_id: str = DEFAULT_RESOURCE_ID,
+        user_id: int = DEFAULT_USER_ID,
+        resource_id: int = DEFAULT_RESOURCE_ID,
     ) -> Booking:
         """Persist a confirmed booking over [start_at, end_at).
 

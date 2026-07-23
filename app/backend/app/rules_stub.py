@@ -42,9 +42,15 @@ from rules import (
 from rules import BookingRequest as EngineBookingRequest
 from rules import Context as EngineContext
 
-from app.db.constants import DEFAULT_RESOURCE_ID, DEFAULT_USER_ID
-
 ALLOWED_MESSAGE = "Looks good — this slot is available."
+
+# The engine identifies a booking's user and resource by opaque string label —
+# no canon rule branches on either — so these defaults are the engine boundary's
+# own concern, deliberately independent of the data layer's integer foreign keys
+# in ``app.db.constants``. A caller that has real ids passes them (stringified);
+# these only fill the gap for a request built with neither.
+_DEFAULT_USER_ID = "default-user"
+_DEFAULT_RESOURCE_ID = "default-resource"
 
 #: The week convention handed to ``CalendarContext``, which requires one.
 #:
@@ -85,8 +91,8 @@ class BookingRequest(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    user_id: str = DEFAULT_USER_ID
-    resource_id: str = DEFAULT_RESOURCE_ID
+    user_id: str = _DEFAULT_USER_ID
+    resource_id: str = _DEFAULT_RESOURCE_ID
     start_at: datetime
     end_at: datetime
 

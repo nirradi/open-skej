@@ -8,8 +8,8 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Enum,
+    ForeignKey,
     Index,
-    String,
     TypeDecorator,
     literal_column,
     text,
@@ -85,13 +85,19 @@ class Booking(Base):
     Bookings are variable length; nothing here assumes a fixed slot duration.
     Cancellation is a soft delete via ``status`` because Stream 3's rules count
     booking history, so a cancelled row must stay queryable.
+
+    ``resource_id`` and ``user_id`` are real foreign keys — onto ``resources.id``
+    and ``users.id`` — not the free-text placeholders Stream 1 shipped: a booking
+    is against a Resource of some Space, made by a known user. Neither carries
+    ``ON DELETE CASCADE``: nothing in this schema is deleted, and a cascade added
+    here would quietly destroy booking history when a Resource or user was removed.
     """
 
     __tablename__ = "bookings"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    resource_id: Mapped[str] = mapped_column(String(64))
-    user_id: Mapped[str] = mapped_column(String(64))
+    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     start_at: Mapped[datetime] = mapped_column(UtcDateTime)
     end_at: Mapped[datetime] = mapped_column(UtcDateTime)
     status: Mapped[BookingStatus] = mapped_column(_STATUS_TYPE, default=BookingStatus.CONFIRMED)

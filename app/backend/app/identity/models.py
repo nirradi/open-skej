@@ -1,9 +1,10 @@
 """SQLAlchemy models for Stream 2's identity and access schema.
 
-These are the identity and access tables: who a user is, what Spaces exist, and
-who is allowed into them. Booking mechanics stay in ``app/db/models.py``; the
-foreign keys turning ``bookings.resource_id`` and ``bookings.user_id`` into real
-references onto ``spaces.id`` and ``users.id`` land in Stream 4's task 4.2.
+These are the identity and access tables: who a user is, what Spaces exist, what
+Resources those Spaces hold, and who is allowed into them. Booking mechanics stay
+in ``app/db/models.py``, but ``bookings.resource_id`` and ``bookings.user_id`` are
+real foreign keys onto ``resources.id`` and ``users.id`` — both defined here — so
+a booking is against a real Resource, made by a real user.
 
 ``Base``, ``UtcDateTime`` and ``utcnow`` are imported from ``app.db.models``
 rather than redefined. One declarative base means one metadata registry, which is
@@ -29,10 +30,20 @@ Design notes that apply throughout:
 
 import enum
 import secrets
-from datetime import datetime
+from datetime import datetime, time
 from typing import Optional
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, Index, String, Text, text
+from sqlalchemy import (
+    CheckConstraint,
+    Enum,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    Time,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models import Base, UtcDateTime, utcnow
@@ -130,18 +141,37 @@ class User(Base):
 
 
 class Space(Base):
-    """One bookable thing — a court, a room, a piece of equipment.
+    """A venue holding many Resources — a club, a building, a shared lab.
+
+    A Space is *not* itself the thing booked: it is the tenant boundary and the
+    unit of admission. The bookable calendars are its :class:`Resource` rows (a
+    club has two tennis courts; a lab has three instruments), and a member of the
+    Space may book any of them. Membership, roles, invitations and access
+    requests are all Space-level for exactly that reason — you are admitted to the
+    venue, not to one court — which is what keeps the whole authorization model
+    unchanged by the venue/Resource split.
 
     Spaces are **not discoverable**: there is no endpoint that lists them all, so
     the only way to reach one you are not already a member of is to be handed its
     ``public_id`` link. That makes ``public_id`` a bearer capability, which is why
     it is a random token and why the integer ``id`` — sequential, and therefore
-    enumerable — is never exposed over the API.
+    enumerable — is never exposed over the API. ``public_id`` lives on the Space
+    and not on a Resource because admission is Space-level; a Resource is reachable
+    only once you are already inside the venue and needs no unguessable id.
 
-    ``archived_at`` is the sole end-state. Deleting a Space would have to decide
-    what happens to bookings already made against it, and bookings belong to
-    Stream 1, so that question is left to Stream 4 rather than pre-empted with a
-    ``DELETE`` here.
+    ``timezone`` is the venue's IANA zone (``Europe/Berlin``, never a fixed
+    offset). It lives here rather than on a Resource because a venue is in one
+    physical place, and it exists to resolve a Resource's *operating hours* —
+    local wall-clock config — to a UTC instant per date. Stored instants
+    everywhere else carry no zone; this is the one place a zone is a property of
+    the data, because operating hours are a rule that lands on a different UTC
+    moment as the calendar and DST move. An offset column would be the version of
+    this that looks right in July and is wrong in January.
+
+    ``archived_at`` is the sole end-state. An archived Space rejects new bookings
+    on any of its Resources; existing future bookings stay and remain cancellable.
+    Deleting is never an option here — it would decide the fate of bookings made
+    against the venue's Resources, and the audit trail is kept instead.
     """
 
     __tablename__ = "spaces"
@@ -150,6 +180,10 @@ class Space(Base):
     public_id: Mapped[str] = mapped_column(String(64), unique=True, default=generate_public_id)
     name: Mapped[str] = mapped_column(String(200))
     description: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    # An IANA zone name, defaulting to UTC. ``server_default`` so the column can
+    # be added NOT NULL to a table that already holds rows, and so a Space created
+    # by a path that does not set it still lands on a valid zone.
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC", server_default=text("'UTC'"))
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     archived_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
@@ -163,6 +197,55 @@ class Space(Base):
 
     def __repr__(self) -> str:
         return f"Space(id={self.id!r}, public_id={self.public_id!r}, name={self.name!r})"
+
+
+class Resource(Base):
+    """One bookable calendar inside a Space — a court, a room, a machine.
+
+    A Resource is what a booking is actually made against: ``bookings.resource_id``
+    is a foreign key onto this table, and the overlap invariant is keyed on it, so
+    two courts booked at the same hour do not collide while the same court twice
+    does. It belongs to exactly one :class:`Space` (its venue) and carries **no
+    permissions of its own** — a member of the Space may book any Resource in it.
+
+    A Resource has no ``public_id``. Admission is Space-level, so nothing reaches
+    a Resource without first being inside its Space; there is no capability URL to
+    protect and so no unguessable id to mint. Cross-tenant safety comes from
+    resolving every Resource route through ``require_space_role`` on the parent
+    Space, which returns 404 (never 403) for a Resource that exists but is not
+    yours — the same oracle-free rule the Space routes already follow.
+
+    The operating-hours columns — ``opens_at``, ``closes_at``, ``slot_minutes`` —
+    are the per-Resource booking configuration. They are **local wall-clock**
+    times, resolved against the parent Space's ``timezone`` to a UTC window per
+    date at the boundary; they are nullable because the configuration surface that
+    populates them is a later concern, and a Resource with none set simply has no
+    hours restriction yet. ``archived_at`` retires a Resource without deleting it,
+    matching the Space's own end-state; there is no delete and so no cascade.
+    """
+
+    __tablename__ = "resources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"))
+    name: Mapped[str] = mapped_column(String(200))
+    # Operating-hours configuration, populated by the configuration UI later.
+    # Stored as *local* wall-clock times against the Space's IANA zone; the
+    # conversion to a UTC window happens per date at the boundary, never here.
+    opens_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
+    closes_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
+    slot_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
+
+    __table_args__ = (
+        # "Which Resources are in this Space?" — the Space page and the Resource
+        # picker — filters on space_id alone.
+        Index("ix_resources_space", "space_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"Resource(id={self.id!r}, space_id={self.space_id!r}, name={self.name!r})"
 
 
 class SpaceMembership(Base):

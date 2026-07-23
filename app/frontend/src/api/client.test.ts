@@ -23,8 +23,8 @@ import type { Booking } from './types'
 /** A `BookingRead` as the backend sends it — snake_case, ISO-8601 strings. */
 const confirmedBooking: Booking = {
   id: 7,
-  resource_id: 'default-space',
-  user_id: 'default-user',
+  resource_id: 1,
+  user_id: 1,
   start_at: '2026-07-20T09:00:00Z',
   end_at: '2026-07-20T10:00:00Z',
   status: 'confirmed',

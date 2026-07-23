@@ -31,6 +31,7 @@ from app.identity.models import (
     AccessRequestStatus,
     InvitationStatus,
     MembershipRole,
+    Resource,
     Space,
     SpaceAccessRequest,
     SpaceInvitation,
@@ -38,6 +39,12 @@ from app.identity.models import (
     User,
 )
 from app.identity.schemas import PreviewStatus, SpaceUpdate
+
+# The name the auto-created first Resource is given. A fresh Space is a venue with
+# one bookable calendar rather than an empty shell, so the admin's primary flow
+# never meets an empty state and the schema never has to represent a Space with no
+# Resource even though it could.
+FIRST_RESOURCE_NAME = "Main"
 
 
 class SpaceArchivedError(Exception):
@@ -187,17 +194,21 @@ def _load_membership(session: Session, space_id: int, user_id: int) -> Optional[
 def create_space(
     session: Session, creator: User, *, name: str, description: Optional[str]
 ) -> Space:
-    """Create a Space and make its creator the owner, atomically.
+    """Create a Space, make its creator the owner, and give it one Resource, atomically.
 
-    The two writes share one transaction because a Space with no owner is
-    unrecoverable: nobody could archive it, manage it, or be added to it. If the
-    membership insert fails, the Space must not survive it.
+    Three writes share one transaction. The owner membership because a Space with
+    no owner is unrecoverable — nobody could archive it, manage it, or be added to
+    it. The first Resource because a Space is a *venue*: a fresh one with no
+    bookable calendar is a dead end, and creating it here means the product never
+    produces an empty Space even though the schema could represent one. If any
+    write fails, none of them survives.
     """
     space = Space(name=name, description=description, created_by_user_id=creator.id)
     session.add(space)
     session.flush()
 
     session.add(SpaceMembership(space_id=space.id, user_id=creator.id, role=MembershipRole.OWNER))
+    session.add(Resource(space_id=space.id, name=FIRST_RESOURCE_NAME))
     session.commit()
     return space
 

@@ -5,8 +5,9 @@ glob: "app/**/*"
 
 # Identity & Access
 
-Who a user is, what Spaces exist, and who is allowed into them. Booking mechanics are not this
-component's business.
+Who a user is, what Spaces exist, what Resources each Space holds, and who is allowed into them.
+Booking mechanics — the calendar, the overlap constraint, the rule engine — are not this component's
+business, but the `resources` table a booking is made against is.
 
 **Lives in:** `app/backend/app/{auth,identity,db}/`, `app/backend/alembic/`,
 `app/backend/scripts/`, and the root `docker-compose.yml`. This domain defines the production
@@ -49,6 +50,36 @@ books.
 is a `str` enum, so comparing two roles compares their strings — under which `"admin" < "member" <
 "owner"`, putting member above admin and granting every member admin authority. Declaration order is
 no safer: invisible at the comparison site and one reordered line from the same bug.
+
+## A Space is a venue; a Resource is the calendar
+
+A Space is not itself the thing booked. It is a **venue** — a club, a lab — that holds many
+**Resources**, and a Resource is the bookable calendar: `bookings.resource_id` is a foreign key onto
+`resources`, and the overlap constraint is keyed on it, so two courts booked at the same hour do not
+collide while the same court twice does. Creating a Space **auto-creates its first Resource**, so a
+fresh venue is never a dead end and no primary flow meets an empty state; the schema can represent a
+Space with no Resource, but nothing in the product produces one.
+
+**Membership and roles stay at the Space, never the Resource.** You are admitted to the venue, not to
+one court, and a member may book any Resource in the Space. This is deliberate and load-bearing: the
+entire authorization model above — roles, access requests, invitations, the unguessable `public_id`,
+404-not-403 — is untouched by the venue/Resource split. A Resource therefore carries **no `public_id`
+of its own**: admission is Space-level, nothing reaches a Resource without first being inside its
+Space, so there is no capability URL to protect. Access to a Resource is therefore decided at its
+Space and nowhere else, through `require_space_role` on the parent — which extends the same
+oracle-free **404, never 403** rule to a Resource id belonging to another tenant, resolved in one
+query so the timing does not leak either.
+
+**Timezone lives on the Space, not the Resource.** A venue is in one physical place, and the zone
+(an IANA name like `Europe/Berlin`, never a fixed offset that is right in July and wrong in January)
+exists only to resolve a Resource's *operating hours* — local wall-clock config — to a UTC instant
+per date at the boundary. That is the one place a zone is a property of the data; stored instants
+carry none. Operating hours (`opens_at`, `closes_at`, `slot_minutes`) are per-Resource columns.
+
+**No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
+reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a
+cascade would destroy booking history the moment a Resource or user was removed. A Resource retires
+via `archived_at`, matching the Space's own end-state.
 
 ## Spaces are not discoverable
 
@@ -104,8 +135,8 @@ change is among the more painful migrations to write; swapping a CHECK is not), 
 index predicates like `WHERE status = 'pending'` as ordinary string comparisons.
 
 **One declarative `Base`**, imported from `app.db.models` rather than redefined. One metadata
-registry is what lets integration turn `bookings.resource_id` / `bookings.user_id` into real foreign
-keys onto `spaces.id` / `users.id` without a cross-base reference. The booking store is folded into
+registry is what lets `bookings.resource_id` / `bookings.user_id` be real foreign keys onto
+`resources.id` / `users.id` without a cross-base reference. The booking store is folded into
 Alembic alongside the identity tables, so **a single migration history owns the whole schema** and
 autogenerate manages both halves — there is no table-scoping filter.
 

@@ -25,8 +25,10 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from app.db.models import Booking
+from app.db.bootstrap import ensure_booking_defaults
+from app.db.models import Base
 from app.db.postgres import PostgresBookingDriver
+from app.identity.models import Resource
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -34,6 +36,11 @@ requires_postgres = pytest.mark.skipif(
     not DATABASE_URL,
     reason="DATABASE_URL is unset; the booking driver is Postgres-only",
 )
+
+# A second Resource, distinct from the seeded default (id 1), for the test that
+# asserts the overlap invariant is scoped per Resource. Its own top-level constant
+# so test_db can name it rather than reaching for a bare literal.
+OTHER_RESOURCE_ID = 2
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -68,10 +75,23 @@ def pg_engine():
 
 @pytest.fixture
 def driver(pg_engine):
-    Booking.__table__.drop(pg_engine, checkfirst=True)
-    Booking.__table__.create(pg_engine)
+    """A driver over a freshly built schema seeded with the default booking target.
+
+    The whole schema rather than the ``bookings`` table alone: ``resource_id`` and
+    ``user_id`` are now foreign keys onto ``resources`` and ``users``, so those
+    tables must exist and hold the rows a booking points at. ``ensure_booking_defaults``
+    plants the default Resource (id 1) and user (id 1) the unscoped driver books
+    against; a second Resource is added so the resource-scoped overlap test has a
+    distinct id to use.
+    """
+    Base.metadata.drop_all(pg_engine)
+    Base.metadata.create_all(pg_engine)
     factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
+    with factory() as session:
+        ensure_booking_defaults(session)
+        session.add(Resource(id=OTHER_RESOURCE_ID, space_id=1, name="Court 2"))
+        session.commit()
     try:
         yield PostgresBookingDriver(factory)
     finally:
-        Booking.__table__.drop(pg_engine, checkfirst=True)
+        Base.metadata.drop_all(pg_engine)
