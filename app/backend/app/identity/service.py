@@ -19,6 +19,7 @@ Exceptions here are plain domain errors, translated to status codes by the
 router — the same split ``app.db.driver`` uses with ``OverlapError``.
 """
 
+from datetime import time
 from typing import Optional, Sequence
 
 from sqlalchemy import func, select
@@ -38,7 +39,7 @@ from app.identity.models import (
     SpaceMembership,
     User,
 )
-from app.identity.schemas import PreviewStatus, SpaceUpdate
+from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceUpdate
 
 # The name the auto-created first Resource is given. A fresh Space is a venue with
 # one bookable calendar rather than an empty shell, so the admin's primary flow
@@ -49,6 +50,22 @@ FIRST_RESOURCE_NAME = "Main"
 
 class SpaceArchivedError(Exception):
     """A mutation was attempted on a Space that has been archived."""
+
+
+class ResourceNotFoundError(Exception):
+    """No Resource with that id belongs to this Space.
+
+    Raised for a resource id that names nothing *and* for one that names a
+    Resource in another Space — the two are the same outcome by design. The
+    lookup is a single query scoped to ``space_id``, so a foreign id falls out as
+    "not found" on the same code path and in the same time as a missing one, and
+    the integer id discloses nothing about whether it is live elsewhere. This is
+    the Space-level 404-not-403 rule extended one level down to the Resource.
+    """
+
+
+class ResourceArchivedError(Exception):
+    """A mutation was attempted on a Resource that has been archived."""
 
 
 class MemberNotFoundError(Exception):
@@ -263,6 +280,121 @@ def archive_space(session: Session, space: Space) -> Space:
     space.archived_at = utcnow()
     session.commit()
     return space
+
+
+def list_resources(session: Session, space: Space, *, include_archived: bool) -> Sequence[Resource]:
+    """The Resources in this Space, oldest first.
+
+    Scoped to ``space_id``, so this is a list of *this* Space's calendars and can
+    never surface another tenant's however the query is later edited — the same
+    shape that keeps ``list_members`` safe. Reads work on an archived Space, so
+    this does not check ``_require_active``.
+    """
+    query = (
+        select(Resource)
+        .where(Resource.space_id == space.id)
+        .order_by(Resource.created_at, Resource.id)
+    )
+    if not include_archived:
+        query = query.where(Resource.archived_at.is_(None))
+
+    return session.execute(query).scalars().all()
+
+
+def get_resource(session: Session, space: Space, resource_id: int) -> Resource:
+    """One Resource of this Space, or raise :class:`ResourceNotFoundError`.
+
+    The ``space_id`` term is the access control, not a convenience: a Resource id
+    belonging to another Space returns nothing here and so is indistinguishable
+    from one that does not exist — see the exception's docstring for why that
+    identity is the point. One query, so both also take the same time.
+    """
+    resource = session.execute(
+        select(Resource).where(
+            Resource.id == resource_id,
+            Resource.space_id == space.id,
+        )
+    ).scalar_one_or_none()
+    if resource is None:
+        raise ResourceNotFoundError(resource_id)
+    return resource
+
+
+def create_resource(
+    session: Session,
+    space: Space,
+    *,
+    name: str,
+    opens_at: Optional[time] = None,
+    closes_at: Optional[time] = None,
+    slot_minutes: Optional[int] = None,
+) -> Resource:
+    """Add a bookable calendar to this Space.
+
+    Refused on an archived Space: a finished venue takes no new calendars, the
+    same rule every other mutation here follows. The operating-hours columns are
+    stored as given — local wall-clock values with no zone resolution, which is a
+    boundary concern and not this function's.
+    """
+    _require_active(space)
+
+    resource = Resource(
+        space_id=space.id,
+        name=name,
+        opens_at=opens_at,
+        closes_at=closes_at,
+        slot_minutes=slot_minutes,
+    )
+    session.add(resource)
+    session.commit()
+    return resource
+
+
+def update_resource(
+    session: Session, space: Space, *, resource_id: int, payload: ResourceUpdate
+) -> Resource:
+    """Apply a partial update to a Resource. Omitted fields are left alone.
+
+    An explicit null clears an operating-hours column back to "no restriction";
+    absence leaves it untouched, which is why this reads ``model_fields_set``
+    rather than the values. Refused on an archived Space (409) and on an archived
+    Resource (409) — a retired calendar is history, not something to reconfigure.
+    """
+    _require_active(space)
+    resource = get_resource(session, space, resource_id)
+    if resource.archived_at is not None:
+        raise ResourceArchivedError(resource_id)
+
+    fields = payload.model_fields_set
+    if "name" in fields and payload.name is not None:
+        resource.name = payload.name
+    if "opens_at" in fields:
+        resource.opens_at = payload.opens_at
+    if "closes_at" in fields:
+        resource.closes_at = payload.closes_at
+    if "slot_minutes" in fields:
+        resource.slot_minutes = payload.slot_minutes
+
+    session.commit()
+    return resource
+
+
+def archive_resource(session: Session, space: Space, *, resource_id: int) -> Resource:
+    """Retire a Resource without deleting it, matching the Space's own end-state.
+
+    There is no delete and no un-archive. Re-archiving is refused rather than
+    treated as a no-op, mirroring :func:`archive_space`: the caller believes they
+    are retiring something live, and silently succeeding would overwrite
+    ``archived_at`` and lose *when* it was actually retired.
+    """
+    _require_active(space)
+    resource = get_resource(session, space, resource_id)
+    if resource.archived_at is not None:
+        raise ResourceArchivedError(resource_id)
+
+    resource.archived_at = utcnow()
+    session.commit()
+    return resource
 
 
 def list_members(session: Session, space: Space) -> Sequence[tuple[SpaceMembership, User]]:

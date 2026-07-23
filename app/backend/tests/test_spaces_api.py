@@ -211,10 +211,10 @@ def _fill(path: str, public_id: str, member: User) -> str:
     """Turn a templated route into a request URL for the isolation sweep.
 
     ``{user_id}`` resolves to a genuine member of the Space under test, so a 404
-    cannot be explained away as "that user does not exist". ``{request_id}`` and
-    ``{invitation_id}`` are arbitrary integers — the authorization dependency
-    rejects the caller before any row with that id is looked up, which is the
-    property being asserted.
+    cannot be explained away as "that user does not exist". ``{request_id}``,
+    ``{invitation_id}`` and ``{resource_id}`` are arbitrary integers — the
+    authorization dependency rejects the caller before any row with that id is
+    looked up, which is the property being asserted.
 
     Every path parameter a swept route declares must be substituted here. An
     unsubstituted ``{...}`` would fail FastAPI's ``int`` parsing and return 422,
@@ -227,6 +227,7 @@ def _fill(path: str, public_id: str, member: User) -> str:
         .replace("{user_id}", str(member.id))
         .replace("{request_id}", "1")
         .replace("{invitation_id}", "1")
+        .replace("{resource_id}", "1")
     )
 
 
@@ -1576,3 +1577,253 @@ def test_an_archived_spaces_invitations_can_still_be_read(
     response = client.get(base)
     assert response.status_code == 200, response.text
     assert len(response.json()) == 1
+
+
+# --- Resource CRUD, Space-scoped. -------------------------------------------
+#
+# A Resource is a bookable calendar inside a Space and carries no permissions of
+# its own: every route below is authorized entirely by ``require_space_role`` on
+# the parent Space. Configuring Resources is admin+ venue management; listing and
+# reading them is member+, because a member needs the list to pick a calendar to
+# book against. The load-bearing security property is that a Resource id
+# belonging to another Space is indistinguishable from one that does not exist —
+# 404, never 403, resolved in one Space-scoped query.
+
+
+def _resource_ids(client: TestClient, public_id: str) -> list[int]:
+    response = client.get(f"/spaces/{public_id}/resources")
+    assert response.status_code == 200, response.text
+    return [entry["id"] for entry in response.json()]
+
+
+def test_a_new_space_lists_its_auto_created_resource(api: Api, alice: User, space_a: Space) -> None:
+    """Creating a Space plants one Resource; the list surfaces it, not an empty
+    set. A fresh venue is never a dead end.
+    """
+    response = api.as_user(alice).get(f"/spaces/{space_a.public_id}/resources")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["name"] == service.FIRST_RESOURCE_NAME
+    assert body[0]["archived_at"] is None
+
+
+def test_an_admin_creates_a_resource(api: Api, alice: User, space_a: Space) -> None:
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/resources",
+        json={"name": "Court 2", "opens_at": "07:00", "closes_at": "22:00", "slot_minutes": 60},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["name"] == "Court 2"
+    assert body["opens_at"] == "07:00:00"
+    assert body["closes_at"] == "22:00:00"
+    assert body["slot_minutes"] == 60
+    assert body["archived_at"] is None
+    assert isinstance(body["id"], int)
+
+
+def test_a_resource_created_with_no_hours_carries_no_restriction(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """The operating-hours columns are optional — a Resource with none set simply
+    has no hours restriction yet.
+    """
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/resources", json={"name": "Bare"}
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["opens_at"] is None
+    assert body["closes_at"] is None
+    assert body["slot_minutes"] is None
+
+
+def test_slot_minutes_must_be_positive_and_within_a_day(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    client = api.as_user(alice)
+    base = f"/spaces/{space_a.public_id}/resources"
+
+    assert client.post(base, json={"name": "Zero", "slot_minutes": 0}).status_code == 422
+    assert client.post(base, json={"name": "Neg", "slot_minutes": -5}).status_code == 422
+    assert client.post(base, json={"name": "TooLong", "slot_minutes": 1441}).status_code == 422
+
+
+def test_a_member_can_list_and_read_but_not_create_a_resource(
+    api: Api, session: Session, alice: User, carol: User, space_a: Space
+) -> None:
+    """Members book, admins configure. A member reaching a config route is inside
+    the Space and knows it exists, so the refusal is a genuine 403, not a 404.
+    """
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+    client = api.as_user(carol)
+    resource_id = _resource_ids(client, space_a.public_id)[0]
+
+    assert client.get(f"/spaces/{space_a.public_id}/resources").status_code == 200
+    assert client.get(f"/spaces/{space_a.public_id}/resources/{resource_id}").status_code == 200
+
+    assert (
+        client.post(f"/spaces/{space_a.public_id}/resources", json={"name": "Nope"}).status_code
+        == 403
+    )
+    assert (
+        client.patch(
+            f"/spaces/{space_a.public_id}/resources/{resource_id}", json={"name": "Nope"}
+        ).status_code
+        == 403
+    )
+    assert (
+        client.post(f"/spaces/{space_a.public_id}/resources/{resource_id}/archive").status_code
+        == 403
+    )
+
+
+@pytest.mark.parametrize(
+    "method,suffix,body",
+    [
+        ("GET", "", None),
+        ("PATCH", "", {"name": "Renamed"}),
+        ("POST", "/archive", None),
+    ],
+    ids=["read", "update", "archive"],
+)
+def test_a_resource_of_another_space_is_a_404_identical_to_a_missing_one(
+    api: Api,
+    session: Session,
+    alice: User,
+    bob: User,
+    space_a: Space,
+    space_b: Space,
+    method: str,
+    suffix: str,
+    body: dict[str, Any] | None,
+) -> None:
+    """The headline of this task: Alice, owner of Space A, addresses one of Bob's
+    Resources through *her own* Space's URL. It must read as "no such resource
+    here" — 404, byte-identical to an id that names nothing — never a 403 or a
+    different body that would confirm the integer id is live in some other Space.
+    """
+    foreign_resource_id = _resource_ids(api.as_user(bob), space_b.public_id)[0]
+    missing_resource_id = 999_999
+
+    client = api.as_user(alice)
+    foreign = client.request(
+        method, f"/spaces/{space_a.public_id}/resources/{foreign_resource_id}{suffix}", json=body
+    )
+    missing = client.request(
+        method, f"/spaces/{space_a.public_id}/resources/{missing_resource_id}{suffix}", json=body
+    )
+
+    assert foreign.status_code == 404, foreign.text
+    assert foreign.status_code == missing.status_code
+    assert foreign.json() == missing.json()
+
+
+def test_updating_a_resource_renames_and_clears_hours(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """An explicit null clears an hours column; an omitted field is left alone."""
+    client = api.as_user(alice)
+    created = client.post(
+        f"/spaces/{space_a.public_id}/resources",
+        json={"name": "Court 2", "opens_at": "07:00", "closes_at": "22:00", "slot_minutes": 60},
+    ).json()
+    url = f"/spaces/{space_a.public_id}/resources/{created['id']}"
+
+    renamed = client.patch(url, json={"name": "Centre Court"})
+    assert renamed.status_code == 200, renamed.text
+    # Name changed; the omitted hours are untouched.
+    assert renamed.json()["name"] == "Centre Court"
+    assert renamed.json()["opens_at"] == "07:00:00"
+
+    cleared = client.patch(url, json={"opens_at": None})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["opens_at"] is None
+    # closes_at, not mentioned, survives the clear of opens_at.
+    assert cleared.json()["closes_at"] == "22:00:00"
+
+
+def test_a_null_name_is_rejected_rather_than_stored(api: Api, alice: User, space_a: Space) -> None:
+    client = api.as_user(alice)
+    resource_id = _resource_ids(client, space_a.public_id)[0]
+
+    response = client.patch(
+        f"/spaces/{space_a.public_id}/resources/{resource_id}", json={"name": None}
+    )
+    assert response.status_code == 422
+
+
+def test_archiving_a_resource_stamps_it_and_hides_it_from_the_default_list(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    client = api.as_user(alice)
+    created = client.post(f"/spaces/{space_a.public_id}/resources", json={"name": "Court 2"}).json()
+    url = f"/spaces/{space_a.public_id}/resources/{created['id']}"
+
+    archived = client.post(f"{url}/archive")
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["archived_at"] is not None
+
+    # Gone from the default list, present when archived rows are asked for.
+    assert created["id"] not in _resource_ids(client, space_a.public_id)
+    with_archived = client.get(f"/spaces/{space_a.public_id}/resources?include_archived=true")
+    assert created["id"] in [entry["id"] for entry in with_archived.json()]
+
+    # An archived Resource is still readable, but no longer mutable.
+    assert client.get(url).status_code == 200
+    assert client.post(f"{url}/archive").status_code == 409
+    assert client.patch(url, json={"name": "Nope"}).status_code == 409
+
+
+@pytest.mark.parametrize(
+    "method,suffix,body",
+    [
+        ("POST", "", {"name": "New"}),
+        ("PATCH", "/{resource_id}", {"name": "Renamed"}),
+        ("POST", "/{resource_id}/archive", None),
+    ],
+    ids=["create", "update", "archive"],
+)
+def test_an_archived_space_rejects_resource_mutations_with_409(
+    api: Api,
+    alice: User,
+    space_a: Space,
+    method: str,
+    suffix: str,
+    body: dict[str, Any] | None,
+) -> None:
+    client = api.as_user(alice)
+    resource_id = _resource_ids(client, space_a.public_id)[0]
+    assert client.post(f"/spaces/{space_a.public_id}/archive").status_code == 200
+
+    base = f"/spaces/{space_a.public_id}/resources"
+    url = base + suffix.replace("{resource_id}", str(resource_id))
+    assert client.request(method, url, json=body).status_code == 409
+
+
+def test_an_archived_spaces_resources_can_still_be_listed(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """Archiving is not deletion — the calendars stay readable."""
+    client = api.as_user(alice)
+    client.post(f"/spaces/{space_a.public_id}/archive")
+
+    response = client.get(f"/spaces/{space_a.public_id}/resources")
+    assert response.status_code == 200, response.text
+    assert len(response.json()) == 1
+
+
+def test_a_resource_body_never_exposes_its_space_id(api: Api, alice: User, space_a: Space) -> None:
+    """A Resource discloses its own ``id`` deliberately — its routes are addressed
+    by it — but never its parent's integer ``space_id``, which stays as enumerable
+    and as hidden as it is on every Space response.
+    """
+    client = api.as_user(alice)
+    created = client.post(f"/spaces/{space_a.public_id}/resources", json={"name": "Court 2"}).json()
+
+    assert "space_id" not in created
+    assert "id" in created
