@@ -35,6 +35,9 @@ from app.identity.schemas import (
     InvitationRead,
     MemberRead,
     MembershipUpdate,
+    ResourceCreate,
+    ResourceRead,
+    ResourceUpdate,
     SpaceCreate,
     SpacePreview,
     SpaceRead,
@@ -51,6 +54,8 @@ AdminContext = Annotated[SpaceContext, Depends(require_space_role(MembershipRole
 OwnerContext = Annotated[SpaceContext, Depends(require_space_role(MembershipRole.OWNER))]
 
 ARCHIVED_DETAIL = "This Space is archived and can no longer be changed."
+RESOURCE_NOT_FOUND_DETAIL = "Resource not found"
+RESOURCE_ARCHIVED_DETAIL = "This resource is archived and can no longer be changed."
 MEMBER_NOT_FOUND_DETAIL = "That user is not a member of this Space."
 LAST_OWNER_DETAIL = (
     "This Space must always have at least one owner."
@@ -73,6 +78,14 @@ INVITATION_ROLE_TOO_HIGH_DETAIL = "You cannot invite someone at a role above you
 
 def _archived() -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ARCHIVED_DETAIL)
+
+
+def _resource_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=RESOURCE_NOT_FOUND_DETAIL)
+
+
+def _resource_archived() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=RESOURCE_ARCHIVED_DETAIL)
 
 
 def _last_owner() -> HTTPException:
@@ -210,6 +223,108 @@ def archive_space(context: OwnerContext, session: SessionDep) -> SpaceRead:
         raise _archived()
 
     return SpaceRead.build(space, context.role)
+
+
+@router.post(
+    "/{public_id}/resources",
+    response_model=ResourceRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_resource(
+    payload: ResourceCreate, context: AdminContext, session: SessionDep
+) -> ResourceRead:
+    """Add a bookable calendar to this Space. Admin+.
+
+    Configuring the venue's Resources is venue management, not booking, so it is
+    admin+ — a plain member books against a Resource but does not create one. The
+    authorization is decided entirely by ``require_space_role`` on the parent
+    Space in the signature; a Resource carries no permissions of its own.
+    """
+    try:
+        resource = service.create_resource(
+            session,
+            context.space,
+            name=payload.name,
+            opens_at=payload.opens_at,
+            closes_at=payload.closes_at,
+            slot_minutes=payload.slot_minutes,
+        )
+    except service.SpaceArchivedError:
+        raise _archived()
+
+    return ResourceRead.build(resource)
+
+
+@router.get("/{public_id}/resources", response_model=list[ResourceRead])
+def list_resources(
+    context: MemberContext, session: SessionDep, include_archived: bool = False
+) -> list[ResourceRead]:
+    """The Resources in this Space. Members+, because a member needs the list to
+    pick a calendar to book against. Outsiders never reach here — 404 before this
+    handler runs.
+    """
+    return [
+        ResourceRead.build(resource)
+        for resource in service.list_resources(
+            session, context.space, include_archived=include_archived
+        )
+    ]
+
+
+@router.get("/{public_id}/resources/{resource_id}", response_model=ResourceRead)
+def read_resource(resource_id: int, context: MemberContext, session: SessionDep) -> ResourceRead:
+    """One Resource of this Space. Members+.
+
+    A ``resource_id`` naming a Resource in another Space returns 404, identical to
+    one that names nothing — the lookup is scoped to this Space, so the integer id
+    is not an oracle for a neighbouring tenant's Resources.
+    """
+    try:
+        resource = service.get_resource(session, context.space, resource_id)
+    except service.ResourceNotFoundError:
+        raise _resource_not_found()
+
+    return ResourceRead.build(resource)
+
+
+@router.patch("/{public_id}/resources/{resource_id}", response_model=ResourceRead)
+def update_resource(
+    resource_id: int, payload: ResourceUpdate, context: AdminContext, session: SessionDep
+) -> ResourceRead:
+    """Rename a Resource or edit its operating-hours configuration. Admin+."""
+    try:
+        resource = service.update_resource(
+            session, context.space, resource_id=resource_id, payload=payload
+        )
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.ResourceNotFoundError:
+        raise _resource_not_found()
+    except service.ResourceArchivedError:
+        raise _resource_archived()
+
+    return ResourceRead.build(resource)
+
+
+@router.post("/{public_id}/resources/{resource_id}/archive", response_model=ResourceRead)
+def archive_resource(resource_id: int, context: AdminContext, session: SessionDep) -> ResourceRead:
+    """Retire a Resource. Admin+, and there is no delete.
+
+    Admin+ rather than owner-only: retiring one calendar is venue management, not
+    the one irreversible whole-venue act that archiving the Space is. The row is
+    kept — ``archived_at`` is set, nothing is deleted — so booking history against
+    it survives.
+    """
+    try:
+        resource = service.archive_resource(session, context.space, resource_id=resource_id)
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.ResourceNotFoundError:
+        raise _resource_not_found()
+    except service.ResourceArchivedError:
+        raise _resource_archived()
+
+    return ResourceRead.build(resource)
 
 
 @router.get("/{public_id}/members", response_model=list[MemberRead])

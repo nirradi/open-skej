@@ -13,12 +13,17 @@ protection is structural rather than a matter of remembering: none of the models
 below declares an ``id`` field, so Pydantic will not serialise one even when it
 is handed an ORM object that has it.
 
-``users.id`` *is* exposed, as ``user_id``. That is a different judgement, not an
-oversight: a member id is only ever visible to people already inside the Space,
-and the membership routes are addressed by it, so it has to cross the wire.
+``users.id`` *is* exposed, as ``user_id``, and ``resources.id`` as ``id`` on
+:class:`ResourceRead`. That is a different judgement, not an oversight: both are
+only ever visible to people already inside the Space, and their routes are
+addressed by those ids, so they have to cross the wire. What makes ``Space.id``
+different is that it is the one integer an *outsider* could reason about — the
+capability is the ``public_id`` link, and admission is Space-level, so a Resource
+is never reachable without first being a member of its Space and its sequential
+id discloses nothing to anyone who is not already there.
 """
 
-from datetime import datetime
+from datetime import datetime, time
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -27,6 +32,7 @@ from app.identity.models import (
     AccessRequestStatus,
     InvitationStatus,
     MembershipRole,
+    Resource,
     Space,
     SpaceAccessRequest,
     SpaceInvitation,
@@ -41,6 +47,11 @@ PreviewStatus = Literal["none", "pending", "denied", "member"]
 _NAME_MAX = 200
 _DESCRIPTION_MAX = 4000
 _MESSAGE_MAX = 1000
+# A slot cannot be longer than the day it sits in. This is a sanity bound on the
+# stored column, not the operating-hours model: resolving these local wall-clock
+# values against the Space's zone to a bookable UTC window is a boundary concern,
+# owned where booking evaluation happens and not here.
+_SLOT_MINUTES_MAX = 1440
 # Matches ``users.email`` and ``space_invitations.email``, both String(320) — the
 # maximum length RFC 5321 permits for a full address.
 _EMAIL_MAX = 320
@@ -120,6 +131,75 @@ class SpacePreview(BaseModel):
     name: str
     description: Optional[str]
     status: PreviewStatus
+
+
+class ResourceCreate(BaseModel):
+    """The body of ``POST /spaces/{public_id}/resources``.
+
+    Only ``name`` is required. The operating-hours columns are optional because
+    the configuration surface that sets them is a later, deliberately narrow
+    concern — a Resource created with none of them simply carries no hours
+    restriction yet. They are validated for shape here (a slot is a positive
+    number of minutes, no longer than a day) but not *resolved*: turning a local
+    wall-clock ``opens_at`` into a bookable UTC window against the Space's zone
+    happens at the booking boundary, not at creation.
+    """
+
+    name: str = Field(min_length=1, max_length=_NAME_MAX)
+    opens_at: Optional[time] = None
+    closes_at: Optional[time] = None
+    slot_minutes: Optional[int] = Field(default=None, gt=0, le=_SLOT_MINUTES_MAX)
+
+
+class ResourceUpdate(BaseModel):
+    """The body of ``PATCH /spaces/{public_id}/resources/{resource_id}``.
+
+    Partial, and *omitted* is distinct from *explicitly null* — the same rule as
+    :class:`SpaceUpdate`. Omitting ``opens_at`` leaves it as it was; sending
+    ``null`` clears it back to "no restriction". The router reads
+    ``model_fields_set`` to tell the two apart, the only way to express "clear
+    this field" in a PATCH without a sentinel.
+
+    ``name`` is the exception: it is ``NOT NULL`` in the database, so an explicit
+    null is a client error rejected here as 422 rather than left to surface as an
+    ``IntegrityError`` 500.
+    """
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=_NAME_MAX)
+    opens_at: Optional[time] = None
+    closes_at: Optional[time] = None
+    slot_minutes: Optional[int] = Field(default=None, gt=0, le=_SLOT_MINUTES_MAX)
+
+    @model_validator(mode="after")
+    def _reject_explicit_null_name(self) -> "ResourceUpdate":
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("name may not be null; omit it to leave it unchanged")
+        return self
+
+
+class ResourceRead(BaseModel):
+    """A Resource as seen from inside its Space.
+
+    ``id`` is the integer primary key and it is exposed deliberately: a Resource
+    carries no ``public_id`` because admission is Space-level, so this id is the
+    handle its own routes are addressed by, and it is only ever visible to people
+    already inside the Space. That is the same judgement made for ``user_id`` and
+    the opposite of the one made for ``Space.id`` — see this module's docstring.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    opens_at: Optional[time]
+    closes_at: Optional[time]
+    slot_minutes: Optional[int]
+    created_at: datetime
+    archived_at: Optional[datetime]
+
+    @classmethod
+    def build(cls, resource: Resource) -> "ResourceRead":
+        return cls.model_validate(resource)
 
 
 class MemberRead(BaseModel):
