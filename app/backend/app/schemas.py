@@ -102,6 +102,34 @@ class BookingNotFound(BaseModel):
     message: str
 
 
+class BookingSpaceArchived(BaseModel):
+    """The 409 body for a create against a Resource whose Space is archived.
+
+    A distinct ``error`` from :class:`BookingConflict` even though both are 409:
+    an overlap means someone else took the slot and a refresh is worth it, while
+    this means the whole venue is closed and no slot on it will ever open. The UI
+    reacts differently — the second is terminal, not a race — so the discriminator
+    keeps them apart. An archived Space still *reads*, and its existing future
+    bookings stay cancellable; only new bookings are refused.
+    """
+
+    error: Literal["space_archived"] = "space_archived"
+    message: str
+
+
+class BookingAlreadyStarted(BaseModel):
+    """The 409 body for cancelling a booking that has already begun.
+
+    Shares its status with the other 409s but not its ``error``: a booking in
+    progress cannot be released, which is neither a race (``overlap``) nor a
+    benign double-click (``already_cancelled``). The remedy is none — the interval
+    is under way — so the copy states that rather than inviting a retry.
+    """
+
+    error: Literal["already_started"] = "already_started"
+    message: str
+
+
 class BookingAlreadyCancelled(BaseModel):
     """The 409 body for cancelling a booking that is already cancelled.
 

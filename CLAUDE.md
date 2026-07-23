@@ -33,7 +33,11 @@ app/backend/app/
   identity/      Users, Spaces, memberships, access requests, invitations
                    authz.py — require_space_role, the per-Space authorization dependency
   db/            Declarative Base, session, UtcDateTime, driver abstraction
-  routers/       Booking endpoints
+  routers/       Booking endpoints, in two modules. `resource_bookings.py` is Space-scoped and
+                   authenticated: a booking is made against a Resource inside a Space the caller
+                   belongs to, resolved through `require_space_role`. `bookings.py` is unauthenticated
+                   and books against one fixed default Resource and user; it backs the still-
+                   unauthenticated calendar view and carries no Space or Resource of its own
   rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
                    builds the engine Context. Name is historical; it holds no rule logic
 app/frontend/    React SPA

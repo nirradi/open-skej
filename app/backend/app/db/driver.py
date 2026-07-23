@@ -35,6 +35,15 @@ class BookingAlreadyCancelledError(BookingError):
 
 
 class BookingDriver(Protocol):
+    def get_booking(self, booking_id: int) -> Booking:
+        """Return the booking with this id.
+
+        Raises BookingNotFoundError if none exists. Read-only, so callers can
+        inspect a booking — its resource, its start time — before deciding
+        whether an action on it is allowed.
+        """
+        ...
+
     def list_bookings(
         self,
         *,

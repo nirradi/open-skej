@@ -146,6 +146,35 @@ export interface ApiAlreadyCancelled {
 }
 
 /**
+ * 409 + `error: "space_archived"` — a create against a Resource whose Space is
+ * archived.
+ *
+ * Distinct from `overlap` even though both are 409 on the same route: an
+ * overlap means someone else got the slot and a refetch is worth trying, this
+ * means the whole venue is closed and no slot on it will ever open. Terminal,
+ * not a race — the UI should stop offering the form rather than inviting a
+ * retry. Mirrors `BookingSpaceArchived` in `app/backend/app/schemas.py`.
+ */
+export interface ApiSpaceArchived {
+  outcome: 'space_archived'
+  message: string
+}
+
+/**
+ * 409 + `error: "already_started"` — a cancel against a booking whose start
+ * time has already passed.
+ *
+ * Distinct from `already_cancelled`: that one is benign (the desired end state
+ * already holds), this one has no remedy at all — the interval is under way
+ * and cannot be released. Mirrors `BookingAlreadyStarted` in
+ * `app/backend/app/schemas.py`.
+ */
+export interface ApiAlreadyStarted {
+  outcome: 'already_started'
+  message: string
+}
+
+/**
  * The server rejected the request as malformed — a 422 with no `error` key
  * (FastAPI request validation) or a 400 (bad window, naive datetime).
  *
@@ -225,11 +254,18 @@ export type CancelBookingResult =
  * instead, the way `CreateBookingResult` does — this alias is the floor, not a
  * ceiling.
  *
- * The booking endpoints deliberately do **not** use it. They are still the
- * single-user Stream 1 contract and none of them is authenticated yet; folding
- * `unauthenticated` into `ListBookingsResult` today would add a branch the
- * server cannot currently produce. Stream 4 space-scopes bookings behind
- * `require_space_role`, and that is the change that should widen those unions.
+ * The *unscoped* booking endpoints (`listBookings`, `createBooking`,
+ * `cancelBooking`) deliberately do **not** use it and never will: they are the
+ * single-user Stream 1 contract, unauthenticated, and task 4.11 deletes them.
+ * Folding `unauthenticated` into `ListBookingsResult` would add a branch the
+ * server cannot produce and a component (`BookingPanel`, `CancelPanel`) would
+ * have to be edited to ignore.
+ *
+ * The *resource-scoped* routes below (`listResourceBookings` and friends) are
+ * the ones Stream 4 actually authenticates, and this is the floor they build
+ * on — `ListResourceBookingsResult` is exactly this alias, and
+ * `CreateResourceBookingResult` / `CancelResourceBookingResult` widen it with
+ * their own domain discriminators the same way `CreateBookingResult` does.
  */
 export type AuthenticatedResult<T> =
   ApiOk<T> | ApiUnauthenticated | ApiForbidden | ApiNotFound | ApiInvalidRequest | ApiFailure
@@ -370,3 +406,57 @@ export interface CurrentUser {
  * `default` that would also swallow a real one.
  */
 export type GetCurrentUserResult = AuthenticatedResult<CurrentUser>
+
+/**
+ * The resource-scoped booking routes — `/spaces/{public_id}/resources/{id}/bookings`.
+ *
+ * Mirrors `app/backend/app/routers/resource_bookings.py`. Where the unscoped
+ * `ListBookingsResult` / `CreateBookingResult` / `CancelBookingResult` above are
+ * frozen at the single-user Stream 1 contract, these are authenticated behind
+ * `require_space_role` and so carry the full access floor — `unauthenticated`,
+ * `forbidden`, `not_found` — on top of each route's own domain outcomes.
+ *
+ * `not_found` here is doubly collapsed, the same way `ApiNotFound` already
+ * documents for the Space API: it is the *Resource's* parent Space not being
+ * the caller's (a bare 404 from `require_space_role`), a `resource_id` that
+ * exists but belongs to another Space (also a bare 404, resolved in the same
+ * query), **and** — on the cancel route only — a `booking_id` that does not
+ * exist or belongs to a different Resource (a discriminated 404). All three
+ * collapse into one variant because the UI's remedy is identical for each:
+ * there is nothing here for you to act on.
+ */
+
+/** `GET .../bookings` — a read, so only the access floor, nothing domain-specific. */
+export type ListResourceBookingsResult = AuthenticatedResult<Booking[]>
+
+/**
+ * `POST .../bookings` — the access floor plus the three ways a create is
+ * refused: the rule engine denies it, the slot is already taken, or the
+ * Resource's Space is archived and takes no new bookings.
+ */
+export type CreateResourceBookingResult =
+  | ApiOk<Booking>
+  | ApiRuleDenied
+  | ApiOverlap
+  | ApiSpaceArchived
+  | ApiUnauthenticated
+  | ApiForbidden
+  | ApiNotFound
+  | ApiInvalidRequest
+  | ApiFailure
+
+/**
+ * `DELETE .../bookings/{id}` — the access floor plus the three ways a cancel is
+ * refused. `already_cancelled` is benign (the desired end state already
+ * holds); `already_started` has no remedy at all, unlike the unscoped routes,
+ * which have no such check.
+ */
+export type CancelResourceBookingResult =
+  | ApiOk<Booking>
+  | ApiNotFound
+  | ApiAlreadyCancelled
+  | ApiAlreadyStarted
+  | ApiUnauthenticated
+  | ApiForbidden
+  | ApiInvalidRequest
+  | ApiFailure

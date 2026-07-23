@@ -115,6 +115,13 @@ class PostgresBookingDriver:
                 raise
             return booking
 
+    def get_booking(self, booking_id: int) -> Booking:
+        with self._session_factory() as session:
+            booking = session.get(Booking, booking_id)
+            if booking is None:
+                raise BookingNotFoundError(f"no booking with id {booking_id}")
+            return booking
+
     def cancel_booking(self, booking_id: int) -> Booking:
         with self._session_factory() as session:
             booking = session.get(Booking, booking_id)
