@@ -212,9 +212,9 @@ def _fill(path: str, public_id: str, member: User) -> str:
 
     ``{user_id}`` resolves to a genuine member of the Space under test, so a 404
     cannot be explained away as "that user does not exist". ``{request_id}``,
-    ``{invitation_id}`` and ``{resource_id}`` are arbitrary integers — the
-    authorization dependency rejects the caller before any row with that id is
-    looked up, which is the property being asserted.
+    ``{invitation_id}``, ``{resource_id}`` and ``{booking_id}`` are arbitrary
+    integers — the authorization dependency rejects the caller before any row
+    with that id is looked up, which is the property being asserted.
 
     Every path parameter a swept route declares must be substituted here. An
     unsubstituted ``{...}`` would fail FastAPI's ``int`` parsing and return 422,
@@ -228,6 +228,7 @@ def _fill(path: str, public_id: str, member: User) -> str:
         .replace("{request_id}", "1")
         .replace("{invitation_id}", "1")
         .replace("{resource_id}", "1")
+        .replace("{booking_id}", "1")
     )
 
 
