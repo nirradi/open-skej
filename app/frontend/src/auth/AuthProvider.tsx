@@ -2,8 +2,10 @@ import type { ReactNode } from 'react'
 import { Auth0Provider, type AppState } from '@auth0/auth0-react'
 
 import { AccessTokenBridge } from './AccessTokenBridge'
+import { SandboxAuthProvider } from './SandboxAuthProvider'
 import { AuthConfigContext } from './authConfigContext'
 import { readAuth0Config } from './config'
+import { readSandboxConfig } from './sandboxConfig'
 
 /**
  * Restores the URL the user was on before they were sent to Auth0.
@@ -47,7 +49,26 @@ function onRedirectCallback(appState?: AppState) {
  * delegating to the component that calls the hook.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
+  // `readSandboxConfig` throws if sandbox mode and any `VITE_AUTH0_*`
+  // variable are both set — see that module. It is called unconditionally,
+  // before `readAuth0Config`, so a misconfigured build fails here rather than
+  // silently choosing Auth0 mode with the sandbox switch quietly ignored.
+  const sandboxEnabled = readSandboxConfig()
   const result = readAuth0Config()
+
+  if (sandboxEnabled) {
+    // Mutual exclusivity above guarantees no `VITE_AUTH0_*` variable is set
+    // here, so `result.status` is always `'missing'` in this branch — the
+    // same context value `ProtectedRoute` and `SpacePage` already read as
+    // "no Auth0 tenant configured", which remains true: sandbox mode installs
+    // a token source for the api client, it does not stand in for
+    // `Auth0Provider` or its config status.
+    return (
+      <AuthConfigContext value={result}>
+        <SandboxAuthProvider>{children}</SandboxAuthProvider>
+      </AuthConfigContext>
+    )
+  }
 
   if (result.status === 'missing') {
     return <AuthConfigContext value={result}>{children}</AuthConfigContext>
