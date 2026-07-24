@@ -60,6 +60,21 @@ schema, the interface dataclasses in the engine). Timezone is a UI presentation 
 backend entity carries one. This is not pedantry: rules read `.hour` to enforce opening windows, so
 a `+02:00` value would yield a *local* hour and silently mis-enforce them. Convert at the boundary.
 
+**Instants carry no zone; recurring configuration does.** A stored datetime — a booking's `start_at`,
+`created_at`, any instant — is UTC and carries no timezone, full stop: an instant is an absolute
+point, and a zone on it would add ambiguity without adding information. The one exception is
+recurring wall-clock configuration, not an instant at all — a Resource's operating hours are
+authored as local clock times against the Space's IANA zone (`.claude/rules/identity-and-access.md`
+has the full model) — and that split is exactly why it is the exception: a rule resolving to a
+different UTC instant per date is the one thing that needs a zone to resolve at all.
+
+**Conversion happens at the boundary, per date, never once at write time.** Resolving local operating
+hours to a UTC window is repeated for every date the question is asked about, not computed once and
+cached as a fixed offset. A cached offset is correct for the day it was computed and silently wrong
+the next time the zone's DST rule flips — the version of this bug that looks right in July and wrong
+in January. Doing the conversion at the boundary, on demand, is what keeps every entity past that
+point — a booking, a rule reading `.hour` — timezone-free and correct in both months.
+
 **Fail closed.** Any failure to positively establish that a booking is permitted results in **no
 booking**. See `.claude/rules/rule-engine.md` for the three containment paths.
 
