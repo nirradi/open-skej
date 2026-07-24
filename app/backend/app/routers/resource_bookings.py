@@ -1,18 +1,17 @@
 """Resource-scoped booking endpoints.
 
-These are the Stream 4 booking routes: a booking is made against a specific
+These are the only booking routes: a booking is made against a specific
 Resource of a specific Space, by the authenticated caller, and authorization is
 resolved through ``require_space_role`` on the parent Space — the same one place
 every Space-scoped route decides access. A member of the Space may book any
 Resource in it; roles never live on the Resource.
 
-They sit **alongside** the unscoped Stream 1 routes in ``app.routers.bookings``,
-which keep working until task 4.11 deletes them. This module is the "expand" half
-of that expand-then-contract: nothing here replaces a route in place, so the
-calendar and the E2E suite stay green throughout.
+They were introduced alongside the unscoped Stream 1 routes in
+``app.routers.bookings``, which task 4.11 deleted once the calendar and the E2E
+suite were rebuilt on this module. Nothing books against a fixed default
+Resource and user any more.
 
-The mapping of outcomes to status codes mirrors the unscoped routes and adds the
-two Stream 4 refusals:
+The mapping of outcomes to status codes:
 
 * **404 (``detail``)** — the Space is not the caller's, or the Resource / booking
   is not in it. Raised by ``require_space_role`` and the scoped lookups, and a
@@ -26,9 +25,7 @@ two Stream 4 refusals:
   targets a missing or already-cancelled booking.
 
 **The rule-engine call keeps its Stream 3 shape**: ``evaluate(request)`` read as
-``verdict.allowed`` / ``verdict.message``. Only *what* is passed changes — the
-real ``user_id`` and ``resource_id`` instead of the unscoped defaults — which is
-the acceptance criterion this task is held to.
+``verdict.allowed`` / ``verdict.message``.
 """
 
 from dataclasses import dataclass

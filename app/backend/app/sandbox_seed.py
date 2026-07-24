@@ -47,11 +47,12 @@ Re-running this module must yield the same row counts, not doubled ones.
 ``_reset`` deletes every application row in FK-safe order before anything is
 (re)inserted — this is a disposable sandbox database, so unlike the
 production "nothing is deleted" invariant (see ``CLAUDE.md``), a seed
-script wiping its own fixtures is exactly the point. The default booking
-target (``DEFAULT_USER_ID`` / ``DEFAULT_RESOURCE_ID``, both id ``1``) is
-then replanted by ``ensure_booking_defaults`` before anything else, so the
-still-unscoped ``POST /bookings`` always has a row to point at, in this
-seed's output as much as in ``app.db.bootstrap``'s.
+script wiping its own fixtures is exactly the point. ``ensure_booking_defaults``
+still runs first to replant the explicit-id-1 rows (``DEFAULT_USER_ID`` /
+``DEFAULT_RESOURCE_ID``) it always has — task 4.11 deleted the unscoped
+``POST /bookings`` those rows used to back, but nothing books against them any
+more, and removing the plant would mean also reworking the sequence-sync
+below it for no behavioural gain, so the harmless row stays.
 """
 
 from datetime import date, datetime, time, timedelta, timezone
