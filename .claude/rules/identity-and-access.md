@@ -38,6 +38,36 @@ lives on `auth0_sub` alone.
 explicit algorithm allowlist is what rejects a forged `alg: none` or an HS256 token signed with the
 public key.
 
+## Sandbox auth mode is an explicit, mutually-exclusive alternative to Auth0
+
+`SANDBOX_AUTH=true` (`settings.sandbox_auth`) swaps `TokenVerifier` onto an in-process RSA keypair —
+generated lazily and never persisted — instead of the real Auth0 tenant, so Playwright and manual QA
+can authenticate deterministically with no hosted login page. It reuses `TokenVerifier` itself: the
+sandbox path differs only in which key, issuer and audience it trusts, never in the RS256 allowlist
+or the claim checks. `app.auth.sandbox` holds the keypair and the minter; `app.auth.jwt.get_token_verifier`
+is where the mode is selected and its guardrails enforced, because that is the one place a verifier
+for the running process comes into existence.
+
+This is test fixture apparatus — the same in-process-keypair, stub-JWKS shape the JWT test suite
+already used — promoted to something a running backend does, which is exactly how an auth bypass
+ships if the promotion is not disciplined. Three properties hold as a consequence:
+
+* **Off by default, and never inferred.** The switch is a dedicated boolean, false unless set
+  explicitly. An unconfigured Auth0 tenant is not read as permission to fall back to the sandbox key;
+  with neither configured, verification fails closed exactly as it always has.
+* **Mutually exclusive with a real tenant.** Enabling the sandbox switch while `auth0_domain` /
+  `auth0_api_audience` are also set raises at verifier construction rather than picking one config to
+  prefer. A backend willing to trust either a sandbox-signed token or a real Auth0 one is strictly
+  worse than a backend with no sandbox at all — it would accept whichever credential an attacker
+  could obtain first.
+* **A sandbox token carries an issuer and audience no real tenant can match**, so even a verifier
+  built for the wrong config rejects it on those claims, not merely on an unfamiliar signature.
+
+**The sandbox login endpoint exists only when sandbox mode is on.** It is registered by a conditional
+`include_router` rather than guarded inside the handler, so a caller against a normally-configured
+backend gets a genuine 404 for the route — the same oracle-free posture Spaces use for `public_id`,
+applied here to whether sandbox mode is even present, not just whether a request to it succeeds.
+
 ## Roles are per-Space; there is no superuser
 
 `owner | admin | member`, scoped to one Space. Anyone may create a Space and becomes its owner.

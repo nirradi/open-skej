@@ -7,6 +7,7 @@ from app.auth.jwt import AuthError
 from app.identity.models import User
 from app.identity.router import router as spaces_router
 from app.routers import bookings, resource_bookings
+from app.settings import get_settings
 
 # The Vite dev server. Stream 2 owns the real deployed origins; until then this
 # is an explicit allowlist rather than "*" so credentialed requests keep working
@@ -26,6 +27,16 @@ app.add_middleware(
 app.include_router(bookings.router)
 app.include_router(resource_bookings.router)
 app.include_router(spaces_router)
+
+if get_settings().sandbox_auth:
+    # Conditional on purpose: `/sandbox/token` must not exist at all on a
+    # normally-configured backend, so a caller there gets 404 rather than a
+    # 403 that would first require the route to exist in order to refuse it.
+    # See `app.routers.sandbox` and `app.auth.sandbox` for the rest of the
+    # sandbox-auth-mode guardrails.
+    from app.routers import sandbox as sandbox_router
+
+    app.include_router(sandbox_router.router)
 
 
 @app.exception_handler(AuthError)

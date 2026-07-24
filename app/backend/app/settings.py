@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     auth0_domain: str | None = None
     auth0_api_audience: str | None = None
 
+    # Sandbox auth mode: signs and verifies tokens against an in-process keypair
+    # instead of the real Auth0 tenant, for Playwright and manual QA with no
+    # hosted login. Off by default and never inferred from a missing Auth0
+    # value — see `app.auth.jwt.get_token_verifier` for the mutual-exclusion
+    # guard this switch is paired with, and `app.auth.sandbox` for the rest.
+    sandbox_auth: bool = False
+
     # The Vite dev server's default origin. A list rather than a single value so
     # task 2.8's frontend can be served from a second port without a code change.
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
