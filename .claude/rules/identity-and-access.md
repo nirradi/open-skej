@@ -186,22 +186,45 @@ Postgres is the only target. `postgresql_where` predicates are not a portability
 
 ## Frontend
 
-Auth0 React SDK for login/logout. An admin dashboard for Space creation, share links, and member
-management. Role menus offer only roles at or below the actor's own, which is a convenience — the
-server's 403 is the boundary.
+**Login is the front door.** `/` is authenticated: a signed-out visitor sees a sign-in card rendered
+in place, and the destination once signed in is the Space list — the user's memberships, not a
+generic calendar. There is no anonymous view of anything, `/s/{public_id}` included; every route
+requires a session before it shows a person anything about a Space. The Stream 1 calendar still
+works exactly as it did, behind the same guard, at its own route — it is not this domain's concern
+beyond that it, too, now requires a session to reach.
 
-`/s/{public_id}` renders the cold-link preview and the access request. It is **the only public entry
-point**, and the one route outside the session guard, because everything it exists to serve is a
-person who is not yet a member. Four properties follow from that and are load-bearing:
+**One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
+'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of
+which of Auth0 or sandbox mode (`SANDBOX_AUTH`'s frontend counterpart, `VITE_SANDBOX_AUTH`) is
+actually installed. An Auth0-backed implementation adapts `useAuth0`; a sandbox-backed one holds
+signed-in/signed-out state in React, backed by its own `localStorage` flag, distinct from the flag
+that merely selects which seeded identity a sandbox token mint is for — selecting an identity and
+committing to it are different actions, which is what lets a test open a deep link already
+"holding" an identity but still signed out, then sign in through the same control a real visitor
+would use. No route may call `useAuth0()` (or read sandbox internals) directly any more; a hook that
+assumes one mode's provider is in the tree throws under the other, which is exactly the failure this
+seam exists to prevent — sandbox mode has no `Auth0Provider`, and the Auth0 build has no sandbox
+session.
 
-* **It checks its own Auth0 configuration before any hook runs.** With the tenant unset there is no
-  `Auth0Provider` in the tree at all — the app keeps rendering so the unauthenticated calendar
-  survives a missing tenant — and calling `useAuth0()` in that state throws. The check lives in an
-  outer component and the hook in an inner one, since a hook cannot be called conditionally.
+An admin dashboard for Space creation, share links, and member management. Role menus offer only
+roles at or below the actor's own, which is a convenience — the server's 403 is the boundary.
+
+`/s/{public_id}` renders the cold-link preview and the access request. It is **the only route
+outside `ProtectedRoute`** — everything it exists to serve is a person who is not yet a member, so
+`ProtectedRoute`'s "you need an account to see this page" copy would be wrong here — but it still
+requires a session, checked by its own gate rather than that shared one. Four properties follow from
+that and are load-bearing:
+
+* **It checks its own auth mode before any session hook runs.** With neither Auth0 nor sandbox mode
+  configured there is no session provider in the tree at all, and reading one in that state throws.
+  The check lives in an outer component and the session read in an inner one, since a hook cannot be
+  called conditionally.
 * **A signed-out visitor gets a sign-in card, not the Space.** `/preview` is authenticated, so there
-  is nothing to show until they hold a token. Login renders *in place* rather than redirecting, and
-  carries `returnTo`: a visitor who followed a share link and was deposited on the calendar afterwards
-  would have lost the only handle to that Space that exists.
+  is nothing to show until they hold a session. Login renders *in place* rather than redirecting, and
+  carries `returnTo`: a visitor who followed a share link and was deposited on the Space list
+  afterwards would have lost the only handle to that Space that exists. The round trip survives
+  signup as well as login — a brand-new identity is just as often behind a forwarded link as a
+  returning one, and `get_current_user` provisions it just-in-time on the same first call either way.
 * **404 copy names the link, never the Space.** "That link doesn't work" — never "you don't have
   access to this Space", which would confirm the id is live and turn the capability URL into the
   oracle the 404 exists to prevent. This is the one piece of copy on the route that is a security

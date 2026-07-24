@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
 import { Auth0Provider, type AppState } from '@auth0/auth0-react'
 
-import { AccessTokenBridge } from './AccessTokenBridge'
+import { Auth0SessionProvider } from './Auth0SessionProvider'
 import { SandboxAuthProvider } from './SandboxAuthProvider'
-import { AuthConfigContext } from './authConfigContext'
+import { AuthModeContext } from './authConfigContext'
 import { readAuth0Config } from './config'
 import { readSandboxConfig } from './sandboxConfig'
 
@@ -39,14 +39,16 @@ function onRedirectCallback(appState?: AppState) {
  * staring at a configuration warning.
  *
  * So the failure is *reported*, not *enforced*, at this level. Children render
- * either way; the status goes down as context, and `ProtectedRoute` — the only
- * place that actually needs a tenant — shows the notice. The blast radius ends
- * up matching the dependency.
+ * either way; the mode goes down as context, and `ProtectedRoute` and
+ * `SpacePage` — the places that actually need a session — show the notice.
+ * The blast radius ends up matching the dependency.
  *
- * A consequence worth naming: with config missing there is no `Auth0Provider`
- * below this, so `useAuth0()` must not be called anywhere that can render in
- * that state. `ProtectedRoute` handles this by checking the context *before*
- * delegating to the component that calls the hook.
+ * A consequence worth naming: with config missing (and sandbox mode off)
+ * there is no `Auth0Provider` below this and no `SessionContext` provider
+ * either, so nothing below may call `useAuth0()` or assume `useSession()`
+ * resolves to anything but its safe default. `ProtectedRoute` and `SpacePage`
+ * handle this by checking `useAuthMode()` *before* delegating to a component
+ * that reads the session.
  */
 export function AuthProvider({ children }: { children: ReactNode }) {
   // `readSandboxConfig` throws if sandbox mode and any `VITE_AUTH0_*`
@@ -58,20 +60,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   if (sandboxEnabled) {
     // Mutual exclusivity above guarantees no `VITE_AUTH0_*` variable is set
-    // here, so `result.status` is always `'missing'` in this branch — the
-    // same context value `ProtectedRoute` and `SpacePage` already read as
-    // "no Auth0 tenant configured", which remains true: sandbox mode installs
-    // a token source for the api client, it does not stand in for
-    // `Auth0Provider` or its config status.
+    // here, so `result.status` is always `'missing'` in this branch — sandbox
+    // mode installs its own session provider rather than standing in for
+    // `Auth0Provider`, and the `sandbox` mode value is what tells
+    // `ProtectedRoute`/`SpacePage` this is a configured, working way to sign
+    // in rather than the genuine "nothing is configured" case.
     return (
-      <AuthConfigContext value={result}>
+      <AuthModeContext value={{ kind: 'sandbox' }}>
         <SandboxAuthProvider>{children}</SandboxAuthProvider>
-      </AuthConfigContext>
+      </AuthModeContext>
     )
   }
 
   if (result.status === 'missing') {
-    return <AuthConfigContext value={result}>{children}</AuthConfigContext>
+    return (
+      <AuthModeContext value={{ kind: 'unconfigured', missing: result.missing }}>
+        {children}
+      </AuthModeContext>
+    )
   }
 
   const { domain, clientId, audience } = result.config
@@ -100,9 +106,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Worth revisiting alongside the first real deployment — see DEFERRED.md.
       cacheLocation="localstorage"
     >
-      <AuthConfigContext value={result}>
-        <AccessTokenBridge>{children}</AccessTokenBridge>
-      </AuthConfigContext>
+      <AuthModeContext value={{ kind: 'auth0' }}>
+        <Auth0SessionProvider>{children}</Auth0SessionProvider>
+      </AuthModeContext>
     </Auth0Provider>
   )
 }

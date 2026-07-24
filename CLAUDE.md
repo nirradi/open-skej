@@ -41,8 +41,11 @@ app/backend/app/
   rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
                    builds the engine Context. Name is historical; it holds no rule logic
 app/frontend/    React SPA
-  src/auth/      Auth0 wiring, the session guard, the api client's token bridge
-  src/space/     `/s/{public_id}` — the cold link-holder preview and access request
+  src/auth/      Auth0 and sandbox wiring behind one `useSession()` seam, and the route guard
+                   built on it — `ProtectedRoute` is what makes `/` the front door: login rendered
+                   in place for a signed-out visitor, the api client's token bridge
+  src/space/     The Space list at `/`, and `/s/{public_id}` — the cold link-holder preview and
+                   access request
   src/admin/     Space creation, members, invitations, the access-request queue
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/

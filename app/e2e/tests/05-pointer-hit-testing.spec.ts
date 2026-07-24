@@ -43,7 +43,6 @@ const FREE_FIRST = 4
 const FREE_COUNT = 5
 
 test('clicking a booking block opens the cancel panel', async ({ page, api }) => {
-  await page.goto('/')
   const [day] = await gotoNextWeek(page)
 
   const booking = await createBookingViaApi(
@@ -77,7 +76,6 @@ test('drag-to-select across free slots still works with a booking on the grid', 
   page,
   api,
 }) => {
-  await page.goto('/')
   const [day] = await gotoNextWeek(page)
 
   await createBookingViaApi(api, slotInstant(day, BOOKED_SLOT), slotInstant(day, BOOKED_SLOT + 2))
@@ -111,7 +109,6 @@ test('a drag beginning on the slot directly below a booking selects normally', a
   page,
   api,
 }) => {
-  await page.goto('/')
   const [day] = await gotoNextWeek(page)
 
   // Booking covers slots 0–1, so slot 2 is the first free one and its top edge
@@ -128,7 +125,6 @@ test('a drag beginning on the slot directly below a booking selects normally', a
 })
 
 test('a drag cannot span the slots a booking occupies', async ({ page, api }) => {
-  await page.goto('/')
   const [day] = await gotoNextWeek(page)
 
   // Booking sits in the middle of the intended drag, at slots 6–7.

@@ -7,7 +7,7 @@ import { AccountPage, ProtectedRoute } from './auth'
 import { BookingPanel, CancelPanel } from './booking'
 import { CalendarGrid, type SelectedInterval } from './calendar'
 import { assertConfigIsCoherent, calendarConfig, slotsPerDay } from './config'
-import { SpacePage } from './space'
+import { SpaceListPage, SpacePage } from './space'
 
 // Fail at boot rather than rendering a subtly wrong grid.
 assertConfigIsCoherent()
@@ -76,20 +76,38 @@ function CalendarPage() {
  *
  * The router lives inside `App` rather than in `main.tsx` alongside the Auth0
  * provider so that rendering `<App />` in a test still produces a routable tree
- * — Stream 1's `App.test.tsx` does exactly that, and it must keep working
- * untouched.
+ * — `App.test.tsx` does exactly that, and it must keep working (with a
+ * session provided explicitly, since nothing above `<App />` installs one in
+ * that test).
  *
- * `/` stays the calendar, unauthenticated, exactly as Stream 1 left it. The
- * booking endpoints behind it are still the single-user Stream 1 contract, so
- * wrapping it in `ProtectedRoute` now would demand a login for an API that has
- * no idea who anyone is. Stream 4 space-scopes bookings; that is the change
- * that should move this route inside the guard.
+ * `/` is the front door: login is what an unauthenticated visitor sees there,
+ * rendered in place by `ProtectedRoute` rather than a redirect, and the
+ * destination once signed in is `SpaceListPage` — the user's Spaces, not a
+ * generic calendar. The single-Resource calendar Stream 1 built still works
+ * exactly as it did; it moved to its own route, `/calendar`, still behind the
+ * same guard, since the booking endpoints behind it (`/bookings`) are still
+ * the unscoped, single-user Stream 1 contract that a later task retires.
  */
 function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<CalendarPage />} />
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <SpaceListPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/calendar"
+          element={
+            <ProtectedRoute>
+              <CalendarPage />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/account"
           element={
@@ -99,16 +117,17 @@ function App() {
           }
         />
         {/*
-          `/admin` sits behind the same guard as `/account`, and for the same
-          reason: `AdminPage` opens by calling `GET /spaces`, which is
+          `/admin` sits behind the same guard as the routes above, and for the
+          same reason: `AdminPage` opens by calling `GET /spaces`, which is
           authenticated, so an unguarded render would just fill the screen with
           401s. The guard is convenience, not access control — `require_space_role`
           re-checks every call behind this page.
 
-          `ProtectedRoute` also absorbs the missing-config case, rendering the
-          notice without ever calling `useAuth0()`. That matters here because
-          with `VITE_AUTH0_*` unset there is no `Auth0Provider` in the tree at
-          all, and `AdminPage` is reachable only through this element.
+          `ProtectedRoute` also absorbs the unconfigured case, rendering the
+          notice without ever reading a session that does not exist. That
+          matters here because with neither Auth0 nor sandbox mode configured
+          there is no session provider in the tree at all, and `AdminPage` is
+          reachable only through this element.
         */}
         <Route
           path="/admin"
@@ -127,9 +146,10 @@ function App() {
           account at all. `ProtectedRoute` renders "You need an account to see
           this page", which is true of a members-only screen and wrong here —
           this screen's job is to explain what the link is and offer the way in.
-          `SpacePage` therefore runs the config check and the session check
+          `SpacePage` therefore runs the mode check and the session check
           itself, with its own copy, and returns the visitor to this exact URL
-          after login.
+          after login — through both login and signup, since a cold guest is
+          just as often a brand-new identity as a returning one.
         */}
         <Route path="/s/:publicId" element={<SpacePage />} />
       </Routes>

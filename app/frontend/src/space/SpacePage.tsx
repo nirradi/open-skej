@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { useAuth0 } from '@auth0/auth0-react'
 import { Navigate, useParams } from 'react-router-dom'
 
 import { previewSpace, requestAccess, type SpacePreview } from '../api'
-import { LoginControls, MissingConfigNotice, useAuthConfig } from '../auth'
+import { LoginControls, MissingConfigNotice, useAuthMode, useSession } from '../auth'
 import { messageFor } from '../ui/messages'
 
 /**
@@ -42,13 +41,14 @@ const BUTTON_CLASS =
  * is the entire distribution model, and the person opening it may have no
  * membership, no account, and no idea what Open-Skej is. Three things follow.
  *
- * **It is not behind `ProtectedRoute`,** so it does its own config check. With
- * `VITE_AUTH0_*` unset there is no `Auth0Provider` in the tree at all —
- * `AuthProvider` reports a missing configuration rather than enforcing it, so
- * that Stream 1's unauthenticated calendar survives an unconfigured tenant — and
- * `useAuth0()` must therefore not be called in that state. A hook cannot be
- * called conditionally, so the check lives in this component and the hook in
- * `SpaceLinkGate` below. Same split as `ProtectedRoute`, for the same reason.
+ * **It is not behind `ProtectedRoute`,** so it does its own mode check. With
+ * neither Auth0 nor sandbox mode configured there is no session provider in
+ * the tree at all, so a hook reading the session must not be called in that
+ * state. A hook cannot be called conditionally, so the check lives in this
+ * component and the session read lives in `SpaceLinkGate` below. Same split as
+ * `ProtectedRoute`, for the same reason — and the same fix this task made
+ * there: sandbox mode is a working way to sign in, not the unconfigured case,
+ * so only a genuine `unconfigured` mode shows `MissingConfigNotice`.
  *
  * **A signed-out visitor is shown a sign-in card, not the Space.**
  * `GET /preview` sits behind `get_current_user`, because the status it reports —
@@ -57,18 +57,20 @@ const BUTTON_CLASS =
  * before login. That is a real product consequence and the card says so plainly
  * instead of rendering an empty shell or letting a 401 surface as an error.
  *
- * **Login returns here.** `LoginControls` threads `returnTo` through Auth0's
- * `appState`, and without it a visitor who followed a share link would be
- * deposited on the calendar after signing in, having lost the only handle to the
- * Space that exists. That is why this route renders login in place rather than
+ * **Login returns here.** `LoginControls` passes `returnTo` to `session.login()`,
+ * which threads it back through however the running mode returns to the app —
+ * Auth0's `appState`, or sandbox's synchronous commit that never leaves the
+ * page. Without it a visitor who followed a share link would be deposited on
+ * the Space list after signing in, having lost the only handle to the Space
+ * that exists. That is why this route renders login in place rather than
  * redirecting to it: the URL stays intact and remains something to come back to.
  */
 export function SpacePage() {
   const { publicId } = useParams<{ publicId: string }>()
-  const config = useAuthConfig()
+  const mode = useAuthMode()
 
-  if (config.status === 'missing') {
-    return <MissingConfigNotice missing={config.missing} />
+  if (mode.kind === 'unconfigured') {
+    return <MissingConfigNotice missing={mode.missing} />
   }
 
   // The route pattern makes this unreachable; TypeScript does not know that, and
@@ -80,15 +82,15 @@ export function SpacePage() {
   return <SpaceLinkGate publicId={publicId} />
 }
 
-/** Requires a session before anything is fetched. Inside a configured provider only. */
+/** Requires a session before anything is fetched. Only rendered once some session provider is mounted. */
 function SpaceLinkGate({ publicId }: { publicId: string }) {
-  const { isAuthenticated, isLoading } = useAuth0()
+  const { status } = useSession()
 
   // The state that gets forgotten: the SDK starts every page load
   // unauthenticated while it looks for an existing session, so treating
-  // `!isAuthenticated` as "signed out" flashes the sign-in card at a member
+  // "not authenticated" as "signed out" flashes the sign-in card at a member
   // before swapping it for their Space.
-  if (isLoading) {
+  if (status === 'loading') {
     return (
       <main className={PAGE_CLASS}>
         <p className="text-sm text-slate-600" data-testid="space-auth-loading" role="status">
@@ -98,7 +100,7 @@ function SpaceLinkGate({ publicId }: { publicId: string }) {
     )
   }
 
-  if (!isAuthenticated) {
+  if (status === 'unauthenticated') {
     return (
       <main className={PAGE_CLASS}>
         <div className={CARD_CLASS} data-testid="space-sign-in">
@@ -214,11 +216,11 @@ function SpacePreviewCard({ publicId }: { publicId: string }) {
   const { preview } = load
 
   // A member is already inside; the preview is the outside of the door and has
-  // nothing to tell them. Until Stream 4 space-scopes bookings there is exactly
-  // one calendar and it is at `/`, so that is where "into the Space" leads. When
-  // a Space's calendar gets its own route, this is the line that changes.
-  // `replace` so the back button returns to wherever the link was opened from
-  // rather than bouncing through this redirect again.
+  // nothing to tell them. `/` is the Space list rather than a generic landing
+  // page, so that is where "into the Space" leads for now — a member landing
+  // *in* this specific Space, rather than a list containing it, is the next
+  // task's refinement. `replace` so the back button returns to wherever the
+  // link was opened from rather than bouncing through this redirect again.
   if (preview.status === 'member') {
     return <Navigate to="/" replace />
   }
