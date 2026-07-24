@@ -36,8 +36,9 @@ app/backend/app/
   routers/       Booking endpoints, in two modules. `resource_bookings.py` is Space-scoped and
                    authenticated: a booking is made against a Resource inside a Space the caller
                    belongs to, resolved through `require_space_role`. `bookings.py` is unauthenticated
-                   and books against one fixed default Resource and user; it backs the still-
-                   unauthenticated calendar view and carries no Space or Resource of its own
+                   and books against one fixed default Resource and user; it backs the Stream 1
+                   calendar view (now behind the login guard at `/calendar`) and carries no Space or
+                   Resource of its own
   rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
                    builds the engine Context. Name is historical; it holds no rule logic
 app/frontend/    React SPA
