@@ -163,12 +163,44 @@ def get_token_verifier() -> TokenVerifier:
 
     Cached so the JWKS is fetched once per process rather than once per request.
     Tests that vary the Auth0 settings call ``get_token_verifier.cache_clear()``.
+
+    This is also where sandbox auth mode (``SANDBOX_AUTH=true``, see
+    ``app.auth.sandbox``) is wired in, and where its guardrails are enforced —
+    at the one place a verifier for the running process comes into existence:
+
+    * **Mutual exclusion first, before anything else runs.** A backend with
+      the sandbox switch on *and* a real Auth0 tenant configured would trust a
+      token signed by either the sandbox key or the tenant's JWKS — that is
+      the auth bypass this whole mode exists to avoid shipping, so it is
+      refused loudly rather than one of the two configs silently winning.
+    * **Sandbox is never inferred.** A backend with neither Auth0 nor the
+      sandbox switch configured still fails exactly as it always has — the
+      branch below only ever *adds* a mode, it never treats an absent Auth0
+      config as permission to fall back to the sandbox key.
     """
     settings = get_settings()
-    if not settings.auth0_domain or not settings.auth0_api_audience:
+    real_auth0_configured = bool(settings.auth0_domain) and bool(settings.auth0_api_audience)
+
+    if settings.sandbox_auth and real_auth0_configured:
         raise RuntimeError(
-            "AUTH0_DOMAIN and AUTH0_API_AUDIENCE must be set to verify access tokens. "
-            "Run scripts/auth0_provision.py and copy the printed values into .env."
+            "SANDBOX_AUTH is enabled together with AUTH0_DOMAIN / AUTH0_API_AUDIENCE. "
+            "Sandbox mode trusts a local keypair instead of the real tenant; a backend "
+            "trusting both would accept a token signed by either. Unset one before starting — "
+            "sandbox mode is for a deployment with no real Auth0 tenant configured at all."
+        )
+
+    if settings.sandbox_auth:
+        # Local import: `app.auth.sandbox` imports `TokenVerifier` from this
+        # module, so importing it at module scope here would be a cycle.
+        from app.auth.sandbox import build_sandbox_verifier
+
+        return build_sandbox_verifier()
+
+    if not real_auth0_configured:
+        raise RuntimeError(
+            "AUTH0_DOMAIN and AUTH0_API_AUDIENCE must be set to verify access tokens, or "
+            "SANDBOX_AUTH=true for a local sandbox keypair. Run scripts/auth0_provision.py "
+            "and copy the printed values into .env."
         )
     return TokenVerifier(
         domain=settings.auth0_domain,
