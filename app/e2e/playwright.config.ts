@@ -108,7 +108,16 @@ export default defineConfig({
       command: `${PYTHON} -m uvicorn app.main:app --port ${BACKEND_PORT}`,
       cwd: join(here, '..', 'backend'),
       port: BACKEND_PORT,
-      env: { DATABASE_URL },
+      /**
+       * Sandbox auth mode (task 4.7), never the real Auth0 tenant. Nothing
+       * `AUTH0_*` is set alongside it — `app.auth.jwt.get_token_verifier`
+       * raises at verifier construction if it ever saw both, which is exactly
+       * the config this suite must never produce. Task 4.9 moved this suite
+       * onto a seeded sandbox session (`global-setup.ts` runs
+       * `app.sandbox_seed`) instead of depending on the unauthenticated
+       * calendar, so the frontend needs a real backend to mint tokens from.
+       */
+      env: { DATABASE_URL, SANDBOX_AUTH: 'true' },
       /**
        * Never reuse. A backend already listening on 8000 is almost certainly a
        * developer's own `uvicorn`, pointed at their real database — reusing it
@@ -124,6 +133,14 @@ export default defineConfig({
       command: `npm run dev -- --port ${FRONTEND_PORT} --strictPort`,
       cwd: join(here, '..', 'frontend'),
       port: FRONTEND_PORT,
+      /**
+       * The frontend counterpart of the backend's sandbox mode above: no
+       * `VITE_AUTH0_*` variable is set, and `VITE_SANDBOX_AUTH=true` selects
+       * `SandboxAuthProvider` (see `src/auth/AuthProvider.tsx`) in place of
+       * `Auth0Provider`, so the api client has a sandbox-signed token to send
+       * without a hosted login page ever being involved.
+       */
+      env: { VITE_SANDBOX_AUTH: 'true' },
       // Same reasoning as above, plus: a reused dev server might be running a
       // different `VITE_API_BASE_URL` and quietly talk to the wrong backend.
       reuseExistingServer: false,

@@ -21,6 +21,15 @@
  * is idempotent, so re-running against a database from a previous run is a no-op
  * rather than an error.
  *
+ * It then plants the **deterministic sandbox seed** (`app.sandbox_seed`, task
+ * 4.8): the owner, admin, member and stranger identities `fixtures.ts` signs
+ * in as, plus the Spaces, Resources, and pending access-request/invitation
+ * rows the suite (task 4.9 onward) authenticates against instead of relying
+ * on the unauthenticated calendar alone. Like the booking-default seed, it is
+ * idempotent — it resets its own rows before replanting them, so re-running
+ * against a database from a previous run yields the same fixtures rather
+ * than duplicates.
+ *
  * The interpreter is resolved the same way `playwright.config.ts` resolves it:
  * the checked-out venv locally, or the `setup-python` interpreter on PATH in CI.
  */
@@ -53,6 +62,12 @@ export default function globalSetup(): void {
   })
 
   execFileSync(PYTHON, ['-m', 'app.db.bootstrap'], {
+    cwd: BACKEND_DIR,
+    env: { ...process.env, DATABASE_URL: databaseUrl },
+    stdio: 'inherit',
+  })
+
+  execFileSync(PYTHON, ['-m', 'app.sandbox_seed'], {
     cwd: BACKEND_DIR,
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdio: 'inherit',

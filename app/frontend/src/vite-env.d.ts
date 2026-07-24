@@ -13,6 +13,12 @@ interface ImportMetaEnv {
    * when it is omitted.
    */
   readonly VITE_AUTH0_AUDIENCE?: string
+  /**
+   * Sandbox-auth mode: authenticate against an in-process sandbox token
+   * instead of Auth0. Off unless exactly `"true"`, and mutually exclusive
+   * with the `VITE_AUTH0_*` variables above — see `src/auth/sandboxConfig.ts`.
+   */
+  readonly VITE_SANDBOX_AUTH?: string
 }
 
 interface ImportMeta {

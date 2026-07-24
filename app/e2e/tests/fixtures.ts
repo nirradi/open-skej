@@ -36,6 +36,16 @@ import { slotTestId } from '../../frontend/src/calendar/week'
 
 const BACKEND_URL = 'http://localhost:8000'
 
+/**
+ * `src/auth/sandboxToken.ts`'s `SANDBOX_SUB_STORAGE_KEY`, mirrored as a
+ * literal rather than imported. Unlike `slotStartMinutes` and `slotTestId`
+ * above, that module sits behind the `auth` barrel, which pulls in the api
+ * client and its `import.meta.env` reference — meaningful under Vite, not
+ * under the plain esbuild transform Playwright loads this file with. The two
+ * copies must change together if the storage key ever does.
+ */
+const SANDBOX_SUB_STORAGE_KEY = 'skej.sandbox.sub'
+
 /** A window wide enough to sweep up anything a test could have created. */
 const SWEEP_YEARS = 1
 
@@ -110,6 +120,66 @@ export const test = base.extend<{ api: APIRequestContext }>({
 })
 
 export { expect }
+
+/**
+ * The seeded identities `app.sandbox_seed` (task 4.8) plants, mirrored here as
+ * literals rather than imported: that module is Python and this is
+ * TypeScript, so the two are mirrors of one another, not one source of truth
+ * — `src/auth/sandboxToken.ts`'s `DEFAULT_SANDBOX_SUB` is the third mirror.
+ * All three must change together if the seed's subs ever do.
+ */
+export const SANDBOX_OWNER_SUB = 'sandbox|owner'
+export const SANDBOX_OWNER_EMAIL = 'owner@sandbox.open-skej.local'
+
+export const SANDBOX_ADMIN_SUB = 'sandbox|admin'
+export const SANDBOX_ADMIN_EMAIL = 'admin@sandbox.open-skej.local'
+
+export const SANDBOX_MEMBER_SUB = 'sandbox|member'
+export const SANDBOX_MEMBER_EMAIL = 'member@sandbox.open-skej.local'
+
+export const SANDBOX_STRANGER_SUB = 'sandbox|stranger'
+export const SANDBOX_STRANGER_EMAIL = 'stranger@sandbox.open-skej.local'
+
+/**
+ * Mints a sandbox-signed access token for `sub`, the way `SandboxAuthProvider`
+ * does on the frontend.
+ *
+ * For a spec that needs a bearer token directly against the API — a resource-
+ * scoped booking route, say — rather than through a signed-in page. Reaches
+ * `POST /sandbox/token` (`app/backend/app/routers/sandbox.py`), which exists
+ * only because `playwright.config.ts` starts the backend with
+ * `SANDBOX_AUTH=true`; against a normally configured backend this route is a
+ * genuine 404, not a 403 — see `.claude/rules/identity-and-access.md`.
+ */
+export async function mintSandboxToken(api: APIRequestContext, sub: string): Promise<string> {
+  const response = await api.post(`${BACKEND_URL}/sandbox/token`, { data: { sub } })
+  expect(response.ok(), `POST /sandbox/token failed: ${response.status()}`).toBeTruthy()
+  const body = (await response.json()) as { access_token: string }
+  return body.access_token
+}
+
+/**
+ * Pins the sandbox identity a page authenticates as, before its first
+ * navigation.
+ *
+ * `SandboxAuthProvider` (`src/auth/sandboxToken.ts`) reads the sub to mint a
+ * token for out of `localStorage`, so it has to be there *before* the app's
+ * own script runs — setting it after `page.goto` would race the app's first
+ * read and land the wrong identity or none at all. `addInitScript` runs
+ * before every script on every subsequent navigation in this `page`, which is
+ * what makes this reliable ahead of a `goto` the caller has not made yet.
+ *
+ * Defaults to the seeded owner, the same default `SandboxAuthProvider` falls
+ * back to when nothing has chosen a sub — a spec that never calls this at all
+ * still authenticates as somebody, exactly as unmodified `page.goto('/')` did
+ * before this task.
+ */
+export async function signInAsSandbox(page: Page, sub: string = SANDBOX_OWNER_SUB): Promise<void> {
+  await page.addInitScript(
+    ({ key, value }: { key: string; value: string }) => window.localStorage.setItem(key, value),
+    { key: SANDBOX_SUB_STORAGE_KEY, value: sub },
+  )
+}
 
 /**
  * The `YYYY-MM-DD` keys of the seven days currently rendered.

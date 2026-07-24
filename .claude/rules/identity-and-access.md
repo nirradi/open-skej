@@ -68,6 +68,15 @@ ships if the promotion is not disciplined. Three properties hold as a consequenc
 backend gets a genuine 404 for the route — the same oracle-free posture Spaces use for `public_id`,
 applied here to whether sandbox mode is even present, not just whether a request to it succeeds.
 
+**The frontend has a matching sandbox-auth mode, selected by `VITE_SANDBOX_AUTH`.** `AuthProvider`
+renders `SandboxAuthProvider` in place of `Auth0Provider` when the switch is on, installing an
+access-token provider backed by `POST /sandbox/token` instead of `getAccessTokenSilently` — the same
+`setAccessTokenProvider` seam either path hands the api client, so nothing downstream of it knows
+which one is installed. It carries the backend's guardrails rather than a second copy of them: off by
+default and never inferred, and mutually exclusive with a real tenant — `VITE_SANDBOX_AUTH` set
+alongside any `VITE_AUTH0_*` variable fails loudly rather than one config silently winning, the same
+bypass the backend's mutual exclusion exists to prevent.
+
 ## Roles are per-Space; there is no superuser
 
 `owner | admin | member`, scoped to one Space. Anyone may create a Space and becomes its owner.
