@@ -27,6 +27,7 @@ import type {
   Member,
   MembershipRole,
   MutatingResult,
+  Resource,
   Space,
   SpacePreview,
 } from './types'
@@ -833,6 +834,26 @@ export async function listSpaces(
  */
 export async function getSpace(publicId: string): Promise<AuthenticatedResult<Space>> {
   return authenticatedRequest<Space>(`/spaces/${encodeURIComponent(publicId)}`)
+}
+
+/**
+ * `GET /spaces/{public_id}/resources` — the Resources a member may pick a
+ * calendar from.
+ *
+ * Members and up only; an outsider never reaches this because
+ * `require_space_role` on the parent Space already answered 404. Archived
+ * Resources are excluded unless asked for, matching `listSpaces`' treatment
+ * of an archived Space — the common case is choosing a calendar to book
+ * against, and an archived Resource takes no new bookings.
+ */
+export async function listResources(
+  publicId: string,
+  options: { includeArchived?: boolean } = {},
+): Promise<AuthenticatedResult<Resource[]>> {
+  const query = options.includeArchived ? '?include_archived=true' : ''
+  return authenticatedRequest<Resource[]>(
+    `/spaces/${encodeURIComponent(publicId)}/resources${query}`,
+  )
 }
 
 /**

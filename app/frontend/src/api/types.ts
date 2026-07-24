@@ -323,6 +323,31 @@ export interface Space {
 }
 
 /**
+ * Mirrors `ResourceRead` — a bookable calendar inside a Space, as seen by a
+ * member.
+ *
+ * `id` is the integer primary key, exposed deliberately: a Resource carries no
+ * `public_id` of its own because admission is Space-level, so this id is only
+ * ever visible to someone already inside the Space, and its own routes are
+ * addressed by it directly.
+ *
+ * `opens_at` / `closes_at` are `HH:MM:SS` strings (Python's `time` serialised
+ * by FastAPI), or `null` when the Resource carries no hours restriction yet.
+ * They are local wall-clock configuration, not instants — see
+ * `.claude/rules/identity-and-access.md` — so nothing here should be treated
+ * as UTC.
+ */
+export interface Resource {
+  id: number
+  name: string
+  opens_at: string | null
+  closes_at: string | null
+  slot_minutes: number | null
+  created_at: string
+  archived_at: string | null
+}
+
+/**
  * Mirrors `SpacePreview` — the thin view for someone holding the link.
  *
  * Deliberately carries no member list and no counts. Task 2.10 owns the screen

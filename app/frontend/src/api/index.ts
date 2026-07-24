@@ -17,6 +17,7 @@ export {
   listInvitations,
   listMembers,
   listResourceBookings,
+  listResources,
   listSpaces,
   mutatingRequest,
   previewSpace,
@@ -59,6 +60,7 @@ export type {
   MembershipRole,
   MutatingResult,
   PreviewStatus,
+  Resource,
   Space,
   SpacePreview,
 } from './types'
