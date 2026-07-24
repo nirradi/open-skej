@@ -36,13 +36,17 @@ app/backend/app/
   routers/       Booking endpoints, in two modules. `resource_bookings.py` is Space-scoped and
                    authenticated: a booking is made against a Resource inside a Space the caller
                    belongs to, resolved through `require_space_role`. `bookings.py` is unauthenticated
-                   and books against one fixed default Resource and user; it backs the still-
-                   unauthenticated calendar view and carries no Space or Resource of its own
+                   and books against one fixed default Resource and user; it backs the Stream 1
+                   calendar view (now behind the login guard at `/calendar`) and carries no Space or
+                   Resource of its own
   rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
                    builds the engine Context. Name is historical; it holds no rule logic
 app/frontend/    React SPA
-  src/auth/      Auth0 wiring, the session guard, the api client's token bridge
-  src/space/     `/s/{public_id}` — the cold link-holder preview and access request
+  src/auth/      Auth0 and sandbox wiring behind one `useSession()` seam, and the route guard
+                   built on it — `ProtectedRoute` is what makes `/` the front door: login rendered
+                   in place for a signed-out visitor, the api client's token bridge
+  src/space/     The Space list at `/`, and `/s/{public_id}` — the cold link-holder preview and
+                   access request
   src/admin/     Space creation, members, invitations, the access-request queue
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/

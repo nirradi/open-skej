@@ -21,9 +21,38 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import * as api from './api'
 import type { Booking } from './api'
+import { AuthModeContext, SessionContext, type Session } from './auth'
 import { bookingTestId, slotTestId, startOfWeek } from './calendar'
 
 const NOW = new Date(2026, 6, 20, 9, 0)
+
+const AUTHENTICATED_SESSION: Session = {
+  status: 'authenticated',
+  login: () => {},
+  logout: () => {},
+}
+
+/**
+ * Renders the app at `/calendar`, signed in.
+ *
+ * `App` no longer renders the calendar at `/` unauthenticated — this file
+ * predates that change and its subject is the grid and the booking panel
+ * working together, not the auth gate in front of them, so the session is
+ * supplied directly rather than through a real `AuthProvider`. `pushState`
+ * rather than a prop: `App` mounts its own `BrowserRouter`, which reads
+ * `window.location` at creation, so this is what puts it at the right route
+ * before that happens.
+ */
+function renderApp() {
+  window.history.pushState({}, '', '/calendar')
+  return render(
+    <AuthModeContext value={{ kind: 'sandbox' }}>
+      <SessionContext value={AUTHENTICATED_SESSION}>
+        <App />
+      </SessionContext>
+    </AuthModeContext>,
+  )
+}
 
 function slotOn(dayOffset: number, index: number): HTMLElement {
   const day = new Date(startOfWeek(NOW))
@@ -77,7 +106,7 @@ describe('booking end to end through the app shell', () => {
       .mockResolvedValue({ outcome: 'ok', data: [created] })
     vi.spyOn(api, 'createBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
-    render(<App />)
+    renderApp()
     await screen.findByTestId('calendar')
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
 
@@ -99,7 +128,7 @@ describe('booking end to end through the app shell', () => {
       .mockResolvedValue({ outcome: 'ok', data: [created] })
     vi.spyOn(api, 'createBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
 
     selectSlot(2, 8)
@@ -115,7 +144,7 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [] })
     vi.spyOn(api, 'createBooking').mockResolvedValue({ outcome: 'rule_denied', message })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
 
     selectSlot(2, 8)
@@ -130,7 +159,7 @@ describe('booking end to end through the app shell', () => {
 
   it('does not open the cancel panel for a range selection', async () => {
     vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [] })
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
 
     selectSlot(2, 8)
@@ -149,7 +178,7 @@ describe('booking end to end through the app shell', () => {
       message: 'That time has just been taken by another booking.',
     })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
 
     selectSlot(2, 8)
@@ -190,7 +219,7 @@ describe('cancelling end to end through the app shell', () => {
       data: { ...existing, status: 'cancelled', cancelled_at: NOW.toISOString() },
     })
 
-    render(<App />)
+    renderApp()
     // 10:00–11:00 is indices 8 and 9 from a 06:00 open at 30-minute slots.
     await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(true))
 
@@ -216,7 +245,7 @@ describe('cancelling end to end through the app shell', () => {
       data: { ...existing, status: 'cancelled', cancelled_at: NOW.toISOString() },
     })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
     await cancelVisibleBooking(existing)
 
@@ -236,7 +265,7 @@ describe('cancelling end to end through the app shell', () => {
       message: 'That booking has already been cancelled.',
     })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
     await cancelVisibleBooking(existing)
 
@@ -255,7 +284,7 @@ describe('cancelling end to end through the app shell', () => {
       message: 'No booking with that id.',
     })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
     await cancelVisibleBooking(existing)
 
@@ -271,7 +300,7 @@ describe('cancelling end to end through the app shell', () => {
       message: "We couldn't reach the server.",
     })
 
-    render(<App />)
+    renderApp()
     await waitFor(() => expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy())
     await cancelVisibleBooking(existing)
 
@@ -289,7 +318,7 @@ describe('cancelling end to end through the app shell', () => {
     const existing = bookingAt(2, 10, 11)
     vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [existing] })
 
-    render(<App />)
+    renderApp()
     fireEvent.click(await screen.findByTestId(bookingTestId(existing.id)))
     await screen.findByTestId('cancel-panel')
 

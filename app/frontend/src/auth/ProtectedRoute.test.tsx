@@ -2,86 +2,69 @@
 /**
  * Tests for the route guard and the login controls.
  *
- * `@auth0/auth0-react` is mocked wholesale. Nothing here touches the live
- * tenant, opens a redirect, or needs a network — the SDK's job is to produce
- * `{ isLoading, isAuthenticated }` and a `loginWithRedirect`, and what this
- * component does with those three is the entire subject.
+ * Neither `ProtectedRoute` nor `LoginControls` imports `@auth0/auth0-react`
+ * any more — both read the mode-agnostic `useAuthMode()`/`useSession()`
+ * seam instead, so this file supplies fake context values rather than
+ * mocking the SDK. That is the point of the abstraction: the same test
+ * shape exercises the gate regardless of which mode would really be
+ * installed underneath it.
  *
- * The state worth the most attention is `isLoading`. It is the one a two-branch
- * implementation drops, and dropping it is not a cosmetic bug: the SDK reports
- * `isAuthenticated: false` while it checks for an existing session, so a guard
- * that skipped it would flash the login screen at every already-signed-in user
- * on every page load.
+ * The state worth the most attention is still `loading`. It is the one a
+ * two-branch implementation drops, and dropping it is not cosmetic: a real
+ * session reports `unauthenticated` while it checks for an existing session,
+ * so a guard that skipped it would flash the login screen at every
+ * already-signed-in user on every page load.
  */
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useAuth0 } from '@auth0/auth0-react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { AuthConfigContext } from './authConfigContext'
-import type { Auth0ConfigResult } from './config'
+import { AuthModeContext, type AuthMode } from './authConfigContext'
 import { LoginControls, LogoutButton } from './LoginControls'
 import { ProtectedRoute } from './ProtectedRoute'
+import { SessionContext, type Session, type SessionStatus } from './session'
 
-vi.mock('@auth0/auth0-react', () => ({ useAuth0: vi.fn() }))
-
-const loginWithRedirect = vi.fn()
+const login = vi.fn()
 const logout = vi.fn()
 
-/** Puts the mocked SDK into one of its three states. */
-function auth0State(state: { isLoading?: boolean; isAuthenticated?: boolean }) {
-  vi.mocked(useAuth0).mockReturnValue({
-    isLoading: false,
-    isAuthenticated: false,
-    loginWithRedirect,
-    logout,
-    ...state,
-  } as unknown as ReturnType<typeof useAuth0>)
+function sessionState(status: SessionStatus): Session {
+  return { status, login, logout }
 }
 
-beforeEach(() => {
-  auth0State({})
-})
+/** A mode that is a working way to sign in, which is the precondition for the gate to run. */
+const CONFIGURED: AuthMode = { kind: 'auth0' }
+
+function guarded(mode: AuthMode = CONFIGURED, status: SessionStatus = 'unauthenticated') {
+  return (
+    <AuthModeContext value={mode}>
+      <SessionContext value={sessionState(status)}>
+        <ProtectedRoute>
+          <p data-testid="secret">Members only</p>
+        </ProtectedRoute>
+      </SessionContext>
+    </AuthModeContext>
+  )
+}
+
+function renderGuarded(mode: AuthMode = CONFIGURED, status: SessionStatus = 'unauthenticated') {
+  return render(guarded(mode, status))
+}
 
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
-/** A tenant that is configured, which is the precondition for the gate to run. */
-const CONFIGURED: Auth0ConfigResult = {
-  status: 'ok',
-  config: { domain: 'd.auth0.com', clientId: 'c', audience: 'https://api.open-skej.dev' },
-}
-
-function guarded(config: Auth0ConfigResult = CONFIGURED) {
-  return (
-    <AuthConfigContext value={config}>
-      <ProtectedRoute>
-        <p data-testid="secret">Members only</p>
-      </ProtectedRoute>
-    </AuthConfigContext>
-  )
-}
-
-function renderGuarded(config: Auth0ConfigResult = CONFIGURED) {
-  return render(guarded(config))
-}
-
 describe('ProtectedRoute', () => {
   it('renders its children when the user is authenticated', () => {
-    auth0State({ isAuthenticated: true })
-
-    renderGuarded()
+    renderGuarded(CONFIGURED, 'authenticated')
 
     expect(screen.getByTestId('secret')).toBeTruthy()
     expect(screen.queryByTestId('auth-required')).toBeNull()
   })
 
   it('renders the login controls when the user is not authenticated', () => {
-    auth0State({ isAuthenticated: false })
-
-    renderGuarded()
+    renderGuarded(CONFIGURED, 'unauthenticated')
 
     expect(screen.getByTestId('auth-required')).toBeTruthy()
     expect(screen.getByTestId('login-controls')).toBeTruthy()
@@ -90,10 +73,8 @@ describe('ProtectedRoute', () => {
     expect(screen.queryByTestId('secret')).toBeNull()
   })
 
-  it('shows a loading state while the SDK is still initialising', () => {
-    auth0State({ isLoading: true, isAuthenticated: false })
-
-    renderGuarded()
+  it('shows a loading state while the session is still resolving', () => {
+    renderGuarded(CONFIGURED, 'loading')
 
     expect(screen.getByTestId('auth-loading')).toBeTruthy()
     // Neither the content nor the login prompt: the answer is not known yet,
@@ -102,109 +83,115 @@ describe('ProtectedRoute', () => {
     expect(screen.queryByTestId('auth-required')).toBeNull()
   })
 
-  it('does not redirect to Auth0 on its own', () => {
-    // An automatic `loginWithRedirect` would throw an unauthenticated visitor
-    // off the site before they had read anything, and — combined with the
-    // `isLoading` window above — is the classic way to build a redirect loop.
-    auth0State({ isAuthenticated: false })
+  it('does not call login on its own', () => {
+    // An automatic login would throw an unauthenticated visitor off the site
+    // before they had read anything, and — combined with the `loading` window
+    // above — is the classic way to build a redirect loop.
+    renderGuarded(CONFIGURED, 'unauthenticated')
 
-    renderGuarded()
-
-    expect(loginWithRedirect).not.toHaveBeenCalled()
+    expect(login).not.toHaveBeenCalled()
   })
 
   it('keeps loading distinct from signed out across a state change', () => {
     // The regression that matters: an already-signed-in user must never see the
     // login prompt on the way to their page.
-    auth0State({ isLoading: true, isAuthenticated: false })
-    const { rerender } = renderGuarded()
+    const { rerender } = render(guarded(CONFIGURED, 'loading'))
     expect(screen.getByTestId('auth-loading')).toBeTruthy()
 
-    auth0State({ isLoading: false, isAuthenticated: true })
-    rerender(guarded())
+    rerender(guarded(CONFIGURED, 'authenticated'))
 
     expect(screen.getByTestId('secret')).toBeTruthy()
     expect(screen.queryByTestId('auth-required')).toBeNull()
   })
 
-  it('explains an unconfigured tenant instead of asking for a login that cannot work', () => {
-    // With no `VITE_AUTH0_*` there is no `Auth0Provider` in the tree, so this
-    // branch also has to render without ever calling `useAuth0` — which is why
-    // the check lives in a component above the one holding the hook.
-    auth0State({ isAuthenticated: false })
-
-    renderGuarded({ status: 'missing', missing: ['VITE_AUTH0_DOMAIN'] })
+  it('explains an unconfigured build instead of asking for a login that cannot work', () => {
+    renderGuarded({ kind: 'unconfigured', missing: ['VITE_AUTH0_DOMAIN'] }, 'unauthenticated')
 
     expect(screen.getByTestId('auth-config-missing')).toBeTruthy()
     expect(screen.getByText('VITE_AUTH0_DOMAIN')).toBeTruthy()
-    // A login button here would be a dead end: there is no tenant to send
-    // anyone to.
+    // A login button here would be a dead end: there is no way to sign in.
     expect(screen.queryByTestId('login-controls')).toBeNull()
     expect(screen.queryByTestId('secret')).toBeNull()
+  })
+
+  it('treats sandbox mode as a working way to sign in, not the unconfigured case', () => {
+    // The regression this task exists to fix: sandbox mode has no
+    // `VITE_AUTH0_*` variables by design, and used to read exactly like a
+    // genuinely unconfigured build, taking `/`, `/account` and `/admin` down
+    // for the whole Playwright suite.
+    renderGuarded({ kind: 'sandbox' }, 'authenticated')
+
+    expect(screen.getByTestId('secret')).toBeTruthy()
+    expect(screen.queryByTestId('auth-config-missing')).toBeNull()
   })
 })
 
 describe('LoginControls', () => {
+  function renderControls(returnTo?: string) {
+    return render(
+      <SessionContext value={sessionState('unauthenticated')}>
+        <LoginControls returnTo={returnTo} />
+      </SessionContext>,
+    )
+  }
+
   it('offers both Google and email/password', () => {
-    render(<LoginControls />)
+    renderControls()
 
     expect(screen.getByTestId('login-google')).toBeTruthy()
     expect(screen.getByTestId('login-email')).toBeTruthy()
   })
 
-  it('sends the Google button straight to the google-oauth2 connection', () => {
-    render(<LoginControls />)
+  it('sends the Google button with the google-oauth2 connection', () => {
+    renderControls()
 
     fireEvent.click(screen.getByTestId('login-google'))
 
-    expect(loginWithRedirect).toHaveBeenCalledTimes(1)
+    expect(login).toHaveBeenCalledTimes(1)
     // The exact string the provisioning script enables on the SPA client. A
     // typo here degrades silently into the generic login screen rather than
     // erroring, so it is asserted rather than eyeballed.
-    expect(loginWithRedirect.mock.calls[0][0].authorizationParams.connection).toBe('google-oauth2')
+    expect(login.mock.calls[0][0].connection).toBe('google-oauth2')
   })
 
-  it('sends the email button to Universal Login with no connection pinned', () => {
-    render(<LoginControls />)
+  it('sends the email button with no connection pinned', () => {
+    renderControls()
 
     fireEvent.click(screen.getByTestId('login-email'))
 
-    const args = loginWithRedirect.mock.calls[0][0]
     // No `connection` means Auth0's own screen, which offers the database
     // connection *and* Google — so neither button can strand a user who picked
     // the other method last time.
-    expect(args.authorizationParams?.connection).toBeUndefined()
+    expect(login.mock.calls[0][0].connection).toBeUndefined()
   })
 
   it('remembers where to come back to', () => {
-    // A Space share link is the entire distribution model: a user who follows
-    // one and is asked to sign in has to land back on that link afterwards, not
-    // on the calendar.
-    render(<LoginControls returnTo="/s/abc123" />)
+    renderControls('/s/abc123')
 
     fireEvent.click(screen.getByTestId('login-email'))
 
-    expect(loginWithRedirect.mock.calls[0][0].appState.returnTo).toBe('/s/abc123')
+    expect(login.mock.calls[0][0].returnTo).toBe('/s/abc123')
   })
 
   it('defaults returnTo to the current location', () => {
-    render(<LoginControls />)
+    renderControls()
 
     fireEvent.click(screen.getByTestId('login-google'))
 
-    expect(loginWithRedirect.mock.calls[0][0].appState.returnTo).toBe(window.location.pathname)
+    expect(login.mock.calls[0][0].returnTo).toBe(window.location.pathname)
   })
 })
 
 describe('LogoutButton', () => {
-  it('logs out back to this origin', () => {
-    render(<LogoutButton />)
+  it('calls session logout', () => {
+    render(
+      <SessionContext value={sessionState('authenticated')}>
+        <LogoutButton />
+      </SessionContext>,
+    )
 
     fireEvent.click(screen.getByTestId('logout'))
 
-    // Auth0 refuses a `returnTo` that is not in the client's allowed logout
-    // URLs and strands the user on its own error page, so this value has to
-    // match what `auth0_provision.py` registers.
-    expect(logout).toHaveBeenCalledWith({ logoutParams: { returnTo: window.location.origin } })
+    expect(logout).toHaveBeenCalledTimes(1)
   })
 })

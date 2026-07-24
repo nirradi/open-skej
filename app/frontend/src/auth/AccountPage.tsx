@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { useAuth0 } from '@auth0/auth0-react'
 
 import { getCurrentUser, type CurrentUser } from '../api'
 import { LogoutButton } from './LoginControls'
@@ -25,9 +24,14 @@ type Probe = { kind: 'user'; user: CurrentUser } | { kind: 'error'; message: str
  *
  * It is also where a just-in-time upsert and any pending invitation claim
  * actually happen, since both are side effects of `get_current_user` running.
+ *
+ * **Nothing here calls `useSession()` for identity fields**, and that is
+ * deliberate: `CurrentUser` from `GET /me` already carries `name` and `email`,
+ * so this screen has no need of a mode-specific `user` object and works
+ * identically under Auth0 and sandbox mode without either implementation
+ * having to supply one.
  */
 export function AccountPage() {
-  const { user } = useAuth0()
   const [probe, setProbe] = useState<Probe>(null)
 
   useEffect(() => {
@@ -55,6 +59,8 @@ export function AccountPage() {
     }
   }, [])
 
+  const identity = probe?.kind === 'user' ? probe.user : null
+
   return (
     <main className="min-h-screen bg-slate-50 p-8 text-slate-800">
       <div className="mx-auto max-w-md">
@@ -63,11 +69,11 @@ export function AccountPage() {
         <dl className="mt-6 space-y-2 text-sm" data-testid="account-identity">
           <div className="flex justify-between gap-4">
             <dt className="text-slate-500">Name</dt>
-            <dd className="text-slate-900">{user?.name ?? '—'}</dd>
+            <dd className="text-slate-900">{identity?.name ?? '—'}</dd>
           </div>
           <div className="flex justify-between gap-4">
             <dt className="text-slate-500">Email</dt>
-            <dd className="text-slate-900">{user?.email ?? '—'}</dd>
+            <dd className="text-slate-900">{identity?.email ?? '—'}</dd>
           </div>
         </dl>
 

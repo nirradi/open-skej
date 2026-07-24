@@ -1,4 +1,4 @@
-import { useAuth0 } from '@auth0/auth0-react'
+import { useSession } from './session'
 
 /**
  * The Auth0 identifier for the tenant's Google social connection.
@@ -8,6 +8,10 @@ import { useAuth0 } from '@auth0/auth0-react'
  * with email" path below) shows Auth0's own screen, which offers the database
  * connection *and* Google — so the two buttons differ only in how many clicks
  * the Google path takes, and neither can lock a user out of a method.
+ *
+ * Meaningless to the sandbox session — `SandboxAuthProvider.login()` ignores
+ * it — since there is no hosted screen to steer and both buttons commit the
+ * same already-selected identity.
  *
  * Enabled on the SPA client by `scripts/auth0_provision.py`, not by hand in the
  * dashboard.
@@ -22,14 +26,16 @@ const BUTTON_CLASS =
 /**
  * The two ways in, plus the return path.
  *
- * `returnTo` is threaded through `appState` so that a user bounced to login from
- * a deep link — a Space's share link, which is the whole distribution model —
- * lands back on it rather than on the calendar. `AuthProvider`'s
- * `onRedirectCallback` is what reads it back out.
+ * `returnTo` is passed to `session.login()`, which threads it through however
+ * the running mode gets back here — Auth0's `appState`, read back out by
+ * `AuthProvider`'s `onRedirectCallback`; sandbox's synchronous commit, which
+ * never leaves the page in the first place. Either way, a user bounced to
+ * login from a deep link — a Space's share link, which is the whole
+ * distribution model — lands back on it rather than on the Space list.
  */
 export function LoginControls({ returnTo }: { returnTo?: string }) {
-  const { loginWithRedirect } = useAuth0()
-  const appState = { returnTo: returnTo ?? `${window.location.pathname}${window.location.search}` }
+  const { login } = useSession()
+  const effectiveReturnTo = returnTo ?? `${window.location.pathname}${window.location.search}`
 
   return (
     <div className="flex flex-col gap-2" data-testid="login-controls">
@@ -37,12 +43,7 @@ export function LoginControls({ returnTo }: { returnTo?: string }) {
         type="button"
         className={BUTTON_CLASS}
         data-testid="login-google"
-        onClick={() =>
-          loginWithRedirect({
-            appState,
-            authorizationParams: { connection: GOOGLE_CONNECTION },
-          })
-        }
+        onClick={() => login({ returnTo: effectiveReturnTo, connection: GOOGLE_CONNECTION })}
       >
         Continue with Google
       </button>
@@ -50,7 +51,7 @@ export function LoginControls({ returnTo }: { returnTo?: string }) {
         type="button"
         className={BUTTON_CLASS}
         data-testid="login-email"
-        onClick={() => loginWithRedirect({ appState })}
+        onClick={() => login({ returnTo: effectiveReturnTo })}
       >
         Continue with email
       </button>
@@ -59,27 +60,20 @@ export function LoginControls({ returnTo }: { returnTo?: string }) {
 }
 
 /**
- * Signs the user out of both Auth0 and this app.
+ * Signs the user out of the current session.
  *
- * `logoutParams.returnTo` must be an allow-listed logout URL on the SPA client
- * or Auth0 refuses the redirect and strands the user on its own error page —
- * `scripts/auth0_provision.py` registers `http://localhost:5173` for this.
- *
- * The api client's token provider is deliberately left installed: the SDK has
- * already cleared its cache, so the provider now rejects, and the client turns
- * that into the `unauthenticated` outcome — the same branch a 401 takes. One
- * path for "not signed in" rather than two.
+ * The api client's token provider is deliberately left installed by both
+ * `Session` implementations rather than uninstalled here: each already turns
+ * "no session" into a rejecting provider on its own (a cleared Auth0 cache, a
+ * cleared sandbox flag), and the api client already turns a rejection into
+ * the `unauthenticated` outcome — the same branch a 401 takes. One path for
+ * "not signed in" rather than two.
  */
 export function LogoutButton() {
-  const { logout } = useAuth0()
+  const { logout } = useSession()
 
   return (
-    <button
-      type="button"
-      className={BUTTON_CLASS}
-      data-testid="logout"
-      onClick={() => logout({ logoutParams: { returnTo: window.location.origin } })}
-    >
+    <button type="button" className={BUTTON_CLASS} data-testid="logout" onClick={() => logout()}>
       Sign out
     </button>
   )

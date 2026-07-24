@@ -5,61 +5,48 @@
  * This is the only route a stranger reaches, so the coverage here is shaped by
  * *who can arrive* rather than by which branches exist:
  *
- * - Someone with no Auth0 configuration at all — a developer with an unset
- *   `.env`, in which case there is no `Auth0Provider` in the tree and calling
- *   `useAuth0()` would crash. The test asserts the hook is never called, not
- *   merely that a notice renders, because a component that calls the hook and
- *   then discards the result passes the weaker assertion and crashes in
- *   production.
+ * - Someone with no way to sign in at all — a developer with an unset `.env`
+ *   and sandbox mode off, in which case there is no session provider in the
+ *   tree and reading the session would crash. The unconfigured case is
+ *   asserted by mode alone; nothing here needs to spy on a hook, since
+ *   `SpacePage` reads `useAuthMode()` before ever touching `useSession()`.
  * - A signed-out visitor holding a forwarded link, who must get a coherent
  *   sign-in card that returns them **to this URL** afterwards. Losing the
- *   `returnTo` would strand them on the calendar with no way back to the only
- *   handle to the Space that exists.
+ *   `returnTo` would strand them on the Space list with no way back to the
+ *   only handle to the Space that exists.
  * - Each of the four preview statuses.
  * - Someone whose link resolves to nothing, where the copy is a **security**
  *   question rather than a wording one — see the 404 tests below.
  *
- * Both `../api` and `@auth0/auth0-react` are mocked wholesale: no network, no
- * tenant, no redirect.
+ * `../api` is mocked wholesale: no network. The session and auth-mode
+ * contexts are supplied directly rather than through a real `AuthProvider` —
+ * see `ProtectedRoute.test.tsx` for why that is the shape this task's
+ * abstraction is for.
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { useAuth0 } from '@auth0/auth0-react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
 import { previewSpace, requestAccess } from '../api'
 import type { AccessRequest, ApiOk, PreviewStatus, SpacePreview } from '../api'
-import { AuthConfigContext } from '../auth'
-import type { Auth0ConfigResult } from '../auth'
+import { AuthModeContext, SessionContext } from '../auth'
+import type { AuthMode, Session, SessionStatus } from '../auth'
 import { SpacePage } from './SpacePage'
 
-vi.mock('@auth0/auth0-react', () => ({ useAuth0: vi.fn() }))
 vi.mock('../api', () => ({ previewSpace: vi.fn(), requestAccess: vi.fn() }))
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 
-const loginWithRedirect = vi.fn()
+const login = vi.fn()
+const logout = vi.fn()
 
-const CONFIG_OK: Auth0ConfigResult = {
-  status: 'ok',
-  config: {
-    domain: 'tenant.example.com',
-    clientId: 'client-id',
-    audience: 'https://api.open-skej.dev',
-  },
+function sessionState(status: SessionStatus): Session {
+  return { status, login, logout }
 }
 
-const CONFIG_MISSING: Auth0ConfigResult = { status: 'missing', missing: ['VITE_AUTH0_DOMAIN'] }
-
-function auth0State(state: { isLoading?: boolean; isAuthenticated?: boolean }) {
-  vi.mocked(useAuth0).mockReturnValue({
-    isLoading: false,
-    isAuthenticated: true,
-    loginWithRedirect,
-    ...state,
-  } as unknown as ReturnType<typeof useAuth0>)
-}
+const MODE_CONFIGURED: AuthMode = { kind: 'auth0' }
+const MODE_UNCONFIGURED: AuthMode = { kind: 'unconfigured', missing: ['VITE_AUTH0_DOMAIN'] }
 
 function makePreview(overrides: Partial<SpacePreview> = {}): SpacePreview {
   return {
@@ -94,16 +81,18 @@ const CREATED_REQUEST: AccessRequest = {
  * the member redirect can be asserted as *arriving somewhere* instead of merely
  * as the preview disappearing.
  */
-function renderRoute(config: Auth0ConfigResult = CONFIG_OK) {
+function renderRoute(mode: AuthMode = MODE_CONFIGURED, status: SessionStatus = 'authenticated') {
   return render(
-    <AuthConfigContext value={config}>
-      <MemoryRouter initialEntries={[`/s/${PUBLIC_ID}`]}>
-        <Routes>
-          <Route path="/" element={<p data-testid="calendar">Calendar</p>} />
-          <Route path="/s/:publicId" element={<SpacePage />} />
-        </Routes>
-      </MemoryRouter>
-    </AuthConfigContext>,
+    <AuthModeContext value={mode}>
+      <SessionContext value={sessionState(status)}>
+        <MemoryRouter initialEntries={[`/s/${PUBLIC_ID}`]}>
+          <Routes>
+            <Route path="/" element={<p data-testid="calendar">Calendar</p>} />
+            <Route path="/s/:publicId" element={<SpacePage />} />
+          </Routes>
+        </MemoryRouter>
+      </SessionContext>
+    </AuthModeContext>,
   )
 }
 
@@ -115,7 +104,6 @@ async function renderWithStatus(status: PreviewStatus) {
 }
 
 beforeEach(() => {
-  auth0State({})
   vi.mocked(previewSpace).mockResolvedValue(ok(makePreview()))
   vi.mocked(requestAccess).mockResolvedValue(ok(CREATED_REQUEST))
 })
@@ -126,31 +114,25 @@ afterEach(() => {
 })
 
 describe('before there is a session', () => {
-  it('renders the config notice without ever calling useAuth0', () => {
-    // The load-bearing assertion is the second one. With `VITE_AUTH0_*` unset
-    // there is no `Auth0Provider` in the tree, so the hook does not merely
-    // return nothing useful — it throws, taking down the app's only public
-    // entry point. This route is not behind `ProtectedRoute`, so the split that
-    // keeps the hook out of this state has to be its own.
-    renderRoute(CONFIG_MISSING)
+  it('renders the unconfigured notice rather than reading a session that does not exist', () => {
+    // With neither Auth0 nor sandbox mode configured there is no session
+    // provider in the tree, so reading one would crash. This route is not
+    // behind `ProtectedRoute`, so the split that keeps the session read out of
+    // this state has to be its own — see `SpacePage`'s two-component split.
+    renderRoute(MODE_UNCONFIGURED, 'loading')
 
     expect(screen.getByTestId('auth-config-missing')).toBeTruthy()
-    expect(vi.mocked(useAuth0)).not.toHaveBeenCalled()
   })
 
-  it('waits for the SDK rather than flashing the sign-in card at a member', () => {
-    auth0State({ isLoading: true })
-
-    renderRoute()
+  it('waits for the session rather than flashing the sign-in card at a member', () => {
+    renderRoute(MODE_CONFIGURED, 'loading')
 
     expect(screen.getByTestId('space-auth-loading')).toBeTruthy()
     expect(screen.queryByTestId('space-sign-in')).toBeNull()
   })
 
   it('offers a signed-out visitor a way in, and fetches nothing', () => {
-    auth0State({ isAuthenticated: false })
-
-    renderRoute()
+    renderRoute(MODE_CONFIGURED, 'unauthenticated')
 
     expect(screen.getByTestId('space-sign-in')).toBeTruthy()
     // `GET /preview` is authenticated, so calling it here would produce a 401
@@ -162,21 +144,18 @@ describe('before there is a session', () => {
     // Not a copy detail: the preview is behind `get_current_user`, so there is
     // nothing to render here even if we wanted to. A card that claimed to
     // describe the Space would be inventing it.
-    auth0State({ isAuthenticated: false })
-
-    renderRoute()
+    renderRoute(MODE_CONFIGURED, 'unauthenticated')
 
     expect(screen.queryByText('Tennis Court')).toBeNull()
   })
 
   it('sends the visitor back to this exact URL after login', () => {
-    auth0State({ isAuthenticated: false })
-    renderRoute()
+    renderRoute(MODE_CONFIGURED, 'unauthenticated')
 
     fireEvent.click(screen.getByTestId('login-email'))
 
-    expect(loginWithRedirect).toHaveBeenCalledWith(
-      expect.objectContaining({ appState: { returnTo: `/s/${PUBLIC_ID}` } }),
+    expect(login).toHaveBeenCalledWith(
+      expect.objectContaining({ returnTo: `/s/${PUBLIC_ID}` }),
     )
   })
 })

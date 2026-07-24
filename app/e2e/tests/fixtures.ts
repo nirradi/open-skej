@@ -34,7 +34,7 @@ import { test as base, expect, type APIRequestContext, type Page } from '@playwr
 import { slotStartMinutes, slotsPerDay } from '../../frontend/src/config'
 import { slotTestId } from '../../frontend/src/calendar/week'
 
-const BACKEND_URL = 'http://localhost:8000'
+export const BACKEND_URL = 'http://localhost:8000'
 
 /**
  * `src/auth/sandboxToken.ts`'s `SANDBOX_SUB_STORAGE_KEY`, mirrored as a
@@ -45,6 +45,16 @@ const BACKEND_URL = 'http://localhost:8000'
  * copies must change together if the storage key ever does.
  */
 const SANDBOX_SUB_STORAGE_KEY = 'skej.sandbox.sub'
+
+/**
+ * `src/auth/SandboxAuthProvider.tsx`'s `SANDBOX_SIGNED_IN_STORAGE_KEY`,
+ * mirrored as a literal for the same reason as `SANDBOX_SUB_STORAGE_KEY`
+ * above. Distinct on purpose: this key is "has an identity been committed",
+ * separate from "which identity would a mint use" — see that module's
+ * docstring for why the deep-link-survival spec needs the two to vary
+ * independently.
+ */
+const SANDBOX_SIGNED_IN_STORAGE_KEY = 'skej.sandbox.signedIn'
 
 /** A window wide enough to sweep up anything a test could have created. */
 const SWEEP_YEARS = 1
@@ -159,25 +169,52 @@ export async function mintSandboxToken(api: APIRequestContext, sub: string): Pro
 }
 
 /**
- * Pins the sandbox identity a page authenticates as, before its first
- * navigation.
+ * Pins which seeded identity a page *would* authenticate as, without signing
+ * in — the sandbox counterpart of a visitor who already has a Google account
+ * but has not yet pressed the login button.
  *
- * `SandboxAuthProvider` (`src/auth/sandboxToken.ts`) reads the sub to mint a
- * token for out of `localStorage`, so it has to be there *before* the app's
- * own script runs — setting it after `page.goto` would race the app's first
- * read and land the wrong identity or none at all. `addInitScript` runs
- * before every script on every subsequent navigation in this `page`, which is
- * what makes this reliable ahead of a `goto` the caller has not made yet.
+ * For a spec whose subject is the sign-in step itself: the deep-link-survival
+ * spec needs a page that opens showing the sign-in card, not one already past
+ * it, so it selects an identity with this rather than `signInAsSandbox` below
+ * and then drives the login control the same way a real visitor would.
  *
- * Defaults to the seeded owner, the same default `SandboxAuthProvider` falls
- * back to when nothing has chosen a sub — a spec that never calls this at all
- * still authenticates as somebody, exactly as unmodified `page.goto('/')` did
- * before this task.
+ * Must run *before* the page's first navigation, same reasoning as
+ * `signInAsSandbox`: `addInitScript` runs before every script on every
+ * subsequent navigation in this `page`, which is what makes the value visible
+ * to the app's very first read.
  */
-export async function signInAsSandbox(page: Page, sub: string = SANDBOX_OWNER_SUB): Promise<void> {
+export async function selectSandboxIdentity(page: Page, sub: string): Promise<void> {
   await page.addInitScript(
     ({ key, value }: { key: string; value: string }) => window.localStorage.setItem(key, value),
     { key: SANDBOX_SUB_STORAGE_KEY, value: sub },
+  )
+}
+
+/**
+ * Pins the sandbox identity a page authenticates as, **and** commits it, so
+ * the page opens already signed in — before its first navigation.
+ *
+ * `SandboxAuthProvider` (`src/auth/SandboxAuthProvider.tsx`) reads
+ * `SANDBOX_SIGNED_IN_STORAGE_KEY` to decide whether `useSession().status` is
+ * `authenticated`, separately from `sandboxToken.ts` reading
+ * `SANDBOX_SUB_STORAGE_KEY` to decide which identity a mint is for — both
+ * have to be there *before* the app's own script runs, or the first render
+ * would see a signed-out session (or the wrong identity) and a re-render is
+ * not guaranteed to fix it. `addInitScript` runs before every script on every
+ * subsequent navigation in this `page`, which is what makes this reliable
+ * ahead of a `goto` the caller has not made yet.
+ *
+ * Defaults to the seeded owner — a spec that never calls this at all still
+ * authenticates as somebody, exactly as unmodified `page.goto('/')` did
+ * before login became the front door.
+ */
+export async function signInAsSandbox(page: Page, sub: string = SANDBOX_OWNER_SUB): Promise<void> {
+  await page.addInitScript(
+    ({ subKey, sub, signedInKey }: { subKey: string; sub: string; signedInKey: string }) => {
+      window.localStorage.setItem(subKey, sub)
+      window.localStorage.setItem(signedInKey, 'true')
+    },
+    { subKey: SANDBOX_SUB_STORAGE_KEY, sub, signedInKey: SANDBOX_SIGNED_IN_STORAGE_KEY },
   )
 }
 
@@ -232,16 +269,22 @@ export function slotInstant(key: string, index: number): Date {
 }
 
 /**
- * Loads the app and pages forward one week, returning that week's date keys.
+ * Signs in as the seeded owner and pages forward one week, returning that
+ * week's date keys.
  *
  * Every booking test needs slots that are unambiguously in the future: the
  * backend denies anything starting before `now`, and within the *current* week
  * which slots are still bookable depends on the time of day the suite runs —
  * run it at 23:30 and the whole of today is refused. The next week is entirely
  * future and entirely inside the 60-day horizon, whenever the suite runs.
+ *
+ * The calendar lives at `/calendar`, behind the same auth gate as the rest of
+ * the app now that login is the front door — `signInAsSandbox` is what lets
+ * this navigation land there instead of the sign-in card.
  */
 export async function gotoNextWeek(page: Page): Promise<string[]> {
-  await page.goto('/')
+  await signInAsSandbox(page)
+  await page.goto('/calendar')
   await expect(page.getByTestId('calendar-grid')).toBeVisible()
 
   const next = page.getByTestId('calendar-next-week')

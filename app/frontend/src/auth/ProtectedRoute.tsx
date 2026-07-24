@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
-import { useAuth0 } from '@auth0/auth0-react'
 
 import { LoginControls } from './LoginControls'
 import { MissingConfigNotice } from './MissingConfigNotice'
-import { useAuthConfig } from './authConfigContext'
+import { useAuthMode } from './authConfigContext'
+import { useSession } from './session'
 
 /**
  * Gates its children on being signed in.
@@ -16,48 +16,42 @@ import { useAuthConfig } from './authConfigContext'
  * served. What it *is* for is not rendering a members-only screen that would
  * immediately fill with 401s, which is a usability job, not a safety one.
  *
- * ## Three states, not two
+ * ## Two checks, not one
  *
- * `isLoading` is the state that gets forgotten, and skipping it produces a
- * specific, reproducible bug: on every page load the SDK starts out
- * unauthenticated while it checks for an existing session, so treating
- * `!isAuthenticated` as "signed out" flashes the login screen at an already
- * signed-in user for a few hundred milliseconds before swapping it for the real
- * page. Worse, if the unauthenticated branch redirected to Auth0 automatically,
- * that flash would become a redirect loop.
+ * `useAuthMode()` answers "is there any way to sign in at all" — `auth0`,
+ * `sandbox`, or genuinely `unconfigured` — and only the last of those shows
+ * `MissingConfigNotice`. `sandbox` used to read as `unconfigured` too, back
+ * when this only checked an Auth0-specific config status; that took `/`,
+ * `/account` and `/admin` down for every sandbox build, including the whole
+ * Playwright suite, which is exactly the bug this split exists to not
+ * reintroduce. `useSession()` then answers the second, independent question —
+ * "is *this visitor* signed in" — the same three-state shape regardless of
+ * which mode is running underneath.
  *
  * ## Why it renders login rather than redirecting
  *
- * An automatic `loginWithRedirect` would send a user who followed a link
- * straight off the site before they had read a word of it, and there is nowhere
- * to show *why* they were bounced. Rendering the controls in place keeps the URL
- * intact — which is what lets `LoginControls` return the user to this exact
- * route afterwards.
- *
- * ## Why the config check is a separate component
- *
- * With Auth0 unconfigured there is no `Auth0Provider` in the tree at all — see
- * `AuthProvider`, which deliberately keeps rendering the app rather than taking
- * the unauthenticated calendar down with it. `useAuth0()` therefore must not be
- * called in that state, and a hook cannot be called conditionally. Splitting
- * the check into this outer component and the hook into `SignedInGate` below
- * keeps both rules satisfied without a conditional hook.
+ * An automatic redirect (Auth0's `loginWithRedirect`, called through
+ * `session.login()`) would send a user who followed a link straight off the
+ * site before they had read a word of it, and there is nowhere to show *why*
+ * they were bounced. Rendering the controls in place keeps the URL intact —
+ * which is what lets `LoginControls` return the user to this exact route
+ * afterwards.
  */
 export function ProtectedRoute({ children }: { children: ReactNode }) {
-  const config = useAuthConfig()
+  const mode = useAuthMode()
 
-  if (config.status === 'missing') {
-    return <MissingConfigNotice missing={config.missing} />
+  if (mode.kind === 'unconfigured') {
+    return <MissingConfigNotice missing={mode.missing} />
   }
 
   return <SignedInGate>{children}</SignedInGate>
 }
 
-/** The actual gate. Only ever rendered inside a configured `Auth0Provider`. */
+/** The actual gate. Only ever rendered once some session provider is mounted. */
 function SignedInGate({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading } = useAuth0()
+  const { status } = useSession()
 
-  if (isLoading) {
+  if (status === 'loading') {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-8">
         <p className="text-sm text-slate-600" data-testid="auth-loading" role="status">
@@ -67,7 +61,7 @@ function SignedInGate({ children }: { children: ReactNode }) {
     )
   }
 
-  if (!isAuthenticated) {
+  if (status === 'unauthenticated') {
     return (
       <main className="flex min-h-screen items-center justify-center bg-slate-50 p-8">
         <div
