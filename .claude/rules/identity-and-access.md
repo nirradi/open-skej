@@ -90,14 +90,17 @@ is a `str` enum, so comparing two roles compares their strings — under which `
 "owner"`, putting member above admin and granting every member admin authority. Declaration order is
 no safer: invisible at the comparison site and one reordered line from the same bug.
 
-## A Space is a venue; a Resource is the calendar
+## A Space is the unit of configuration; a Resource is capacity
 
 A Space is not itself the thing booked. It is a **venue** — a club, a lab — that holds many
-**Resources**, and a Resource is the bookable calendar: `bookings.resource_id` is a foreign key onto
-`resources`, and the overlap constraint is keyed on it, so two courts booked at the same hour do not
-collide while the same court twice does. Creating a Space **auto-creates its first Resource**, so a
-fresh venue is never a dead end and no primary flow meets an empty state; the schema can represent a
-Space with no Resource, but nothing in the product produces one.
+**Resources**, and a Resource is one of N **indistinguishable courts**: a unit of bookable capacity
+carrying **no configuration of its own**. `bookings.resource_id` is a foreign key onto `resources`
+and the overlap constraint is keyed on it, so two courts booked at the same hour do not collide while
+the same court twice does — and that overlap constraint is the *only* thing that still distinguishes
+two Resources in a Space. Everything else — operating hours, slot interval, every rule limit — lives
+on the Space, and every court in it shares that one configuration. Creating a Space **auto-creates
+its first Resource**, so a fresh venue is never a dead end and no primary flow meets an empty state;
+the schema can represent a Space with no Resource, but nothing in the product produces one.
 
 **Membership and roles stay at the Space, never the Resource.** You are admitted to the venue, not to
 one court, and a member may book any Resource in the Space. This is deliberate and load-bearing: the
@@ -109,18 +112,23 @@ Space and nowhere else, through `require_space_role` on the parent — which ext
 oracle-free **404, never 403** rule to a Resource id belonging to another tenant, resolved in one
 query so the timing does not leak either.
 
-**Timezone lives on the Space, not the Resource.** A venue is in one physical place, and the zone
-(an IANA name like `Europe/Berlin`, never a fixed offset that is right in July and wrong in January)
-exists only to resolve a Resource's *operating hours* — local wall-clock config — to a UTC instant
-per date at the boundary. That is the one place a zone is a property of the data; stored instants
-carry none. Operating hours (`opens_at`, `closes_at`, `slot_minutes`) are per-Resource columns.
+**All configuration lives on the Space.** A venue is in one physical place, so its timezone (an IANA
+name like `Europe/Berlin`, never a fixed offset that is right in July and wrong in January), its
+operating hours and slot interval (`opens_at`, `closes_at`, `slot_minutes`), and its rule-engine
+parameters (`max_duration_minutes`, `booking_horizon_days`, `max_bookings_per_week`,
+`max_bookings_per_month`) are all **per-Space columns**. Operating hours are *local wall-clock*
+config, resolved against the Space's `timezone` to a UTC instant per date at the boundary — that is
+the one place a zone is a property of the data; stored instants carry none. The rule params are
+nullable: unset means the corresponding rule is not enforced. Because a frequency cap belongs to the
+Space, it counts every booking the user holds anywhere in the venue, across all its courts, never per
+court.
 
-The zone and the operating hours are **admin-editable**: `PATCH /spaces/{public_id}` sets the Space's
-`timezone` and `PATCH /spaces/{public_id}/resources/{resource_id}` sets a Resource's hours and slot
-interval, both admin+. `SpaceRead` carries `timezone` so the config UI reads it without a second
-call. A `timezone` is validated as a real IANA name at the boundary — an unknown name or a fixed
-offset (`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
-operating-hours resolution far from where it was set.
+The whole schedule is **admin-editable** via `PATCH /spaces/{public_id}` (admin+), and `SpaceRead`
+carries all of it so the config UI reads it without a second call. A `timezone` is validated as a real
+IANA name at the boundary — an unknown name or a fixed offset (`+02:00`) is rejected, never stored —
+because a bad zone would only surface later as a broken operating-hours resolution far from where it
+was set. A Resource has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}`
+renames it and nothing more.
 
 **No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
 reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a
