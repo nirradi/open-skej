@@ -2,14 +2,18 @@
 /**
  * Tests for the booking confirm panel.
  *
- * The panel's job is to keep four failure modes visually and semantically
+ * The panel's job is to keep several failure modes visually and semantically
  * distinct, so most of these tests assert on *which* state rendered, not merely
  * that something did. The pairs matter most:
  *
  * - a rule denial and an overlap conflict share nothing but "we didn't book it",
  *   and only the conflict refreshes the calendar;
+ * - `space_archived` is terminal — unlike `overlap`, there is no slot to try
+ *   instead, so the confirm control is hidden rather than offered again;
  * - an `invalid_request` must never leak its `detail` into the DOM, because that
- *   is Pydantic's text, not copy for a user.
+ *   is Pydantic's text, not copy for a user;
+ * - the access floor (`unauthenticated` / `forbidden` / `not_found`) renders as
+ *   generic copy, not as a rule denial.
  */
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -21,6 +25,9 @@ import * as api from '../api'
 import type { Booking } from '../api'
 import type { SelectedInterval } from '../calendar'
 
+const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
+const RESOURCE_ID = 3
+
 const selection: SelectedInterval = {
   start: new Date(2026, 6, 24, 8, 0),
   end: new Date(2026, 6, 24, 9, 30),
@@ -28,7 +35,7 @@ const selection: SelectedInterval = {
 
 const created: Booking = {
   id: 1,
-  resource_id: 1,
+  resource_id: RESOURCE_ID,
   user_id: 1,
   start_at: '2026-07-24T05:00:00Z',
   end_at: '2026-07-24T06:30:00Z',
@@ -37,11 +44,11 @@ const created: Booking = {
   cancelled_at: null,
 }
 
-let createBooking: MockInstance<typeof api.createBooking>
+let createResourceBooking: MockInstance<typeof api.createResourceBooking>
 let onCalendarChanged: Mock<() => void>
 
 beforeEach(() => {
-  createBooking = vi.spyOn(api, 'createBooking')
+  createResourceBooking = vi.spyOn(api, 'createResourceBooking')
   onCalendarChanged = vi.fn()
 })
 
@@ -51,7 +58,14 @@ afterEach(() => {
 })
 
 function renderPanel(sel: SelectedInterval | null = selection) {
-  return render(<BookingPanel selection={sel} onCalendarChanged={onCalendarChanged} />)
+  return render(
+    <BookingPanel
+      publicId={PUBLIC_ID}
+      resourceId={RESOURCE_ID}
+      selection={sel}
+      onCalendarChanged={onCalendarChanged}
+    />,
+  )
 }
 
 function book() {
@@ -77,7 +91,7 @@ describe('the summary shown before committing', () => {
 
 describe('success', () => {
   it('confirms and asks the calendar to refresh', async () => {
-    createBooking.mockResolvedValue({ outcome: 'ok', data: created })
+    createResourceBooking.mockResolvedValue({ outcome: 'ok', data: created })
     renderPanel()
     book()
 
@@ -88,12 +102,19 @@ describe('success', () => {
     expect(screen.queryByTestId('booking-conflict')).toBeNull()
   })
 
-  it('submits the selected interval', async () => {
-    createBooking.mockResolvedValue({ outcome: 'ok', data: created })
+  it('submits the selected interval, scoped to the Space and Resource', async () => {
+    createResourceBooking.mockResolvedValue({ outcome: 'ok', data: created })
     renderPanel()
     book()
 
-    await waitFor(() => expect(createBooking).toHaveBeenCalledWith(selection.start, selection.end))
+    await waitFor(() =>
+      expect(createResourceBooking).toHaveBeenCalledWith(
+        PUBLIC_ID,
+        RESOURCE_ID,
+        selection.start,
+        selection.end,
+      ),
+    )
   })
 })
 
@@ -101,7 +122,7 @@ describe('rule_denied', () => {
   const message = 'Bookings can be at most 2 hours long, and this one is 3 hours.'
 
   it("renders the rule engine's copy verbatim", async () => {
-    createBooking.mockResolvedValue({ outcome: 'rule_denied', message })
+    createResourceBooking.mockResolvedValue({ outcome: 'rule_denied', message })
     renderPanel()
     book()
 
@@ -112,7 +133,7 @@ describe('rule_denied', () => {
   })
 
   it('is not shown as a conflict, and does not refresh the calendar', async () => {
-    createBooking.mockResolvedValue({ outcome: 'rule_denied', message })
+    createResourceBooking.mockResolvedValue({ outcome: 'rule_denied', message })
     renderPanel()
     book()
 
@@ -127,7 +148,7 @@ describe('overlap', () => {
   const message = 'That time has just been taken by another booking.'
 
   it('renders a conflict distinct from a denial', async () => {
-    createBooking.mockResolvedValue({ outcome: 'overlap', message })
+    createResourceBooking.mockResolvedValue({ outcome: 'overlap', message })
     renderPanel()
     book()
 
@@ -137,7 +158,7 @@ describe('overlap', () => {
   })
 
   it('refreshes the calendar, because the week on screen is stale', async () => {
-    createBooking.mockResolvedValue({ outcome: 'overlap', message })
+    createResourceBooking.mockResolvedValue({ outcome: 'overlap', message })
     renderPanel()
     book()
 
@@ -148,12 +169,64 @@ describe('overlap', () => {
   })
 })
 
+describe('space_archived', () => {
+  const message = 'This Space is archived and is no longer taking new bookings.'
+
+  it('renders as terminal, distinct from overlap', async () => {
+    createResourceBooking.mockResolvedValue({ outcome: 'space_archived', message })
+    renderPanel()
+    book()
+
+    const archived = await screen.findByTestId('booking-archived')
+    expect(archived.textContent).toBe(message)
+    expect(screen.queryByTestId('booking-conflict')).toBeNull()
+    expect(screen.queryByTestId('booking-denied')).toBeNull()
+  })
+
+  it('hides the confirm control rather than inviting a retry', async () => {
+    createResourceBooking.mockResolvedValue({ outcome: 'space_archived', message })
+    renderPanel()
+    book()
+
+    await screen.findByTestId('booking-archived')
+    // Unlike `overlap`, there is no slot to try instead — every future create
+    // against this Resource refuses the same way.
+    expect(screen.queryByTestId('booking-confirm')).toBeNull()
+  })
+
+  it('does not refresh the calendar — nothing about the window changed', async () => {
+    createResourceBooking.mockResolvedValue({ outcome: 'space_archived', message })
+    renderPanel()
+    book()
+
+    await screen.findByTestId('booking-archived')
+    expect(onCalendarChanged).not.toHaveBeenCalled()
+  })
+})
+
+describe('the access floor', () => {
+  it.each(['unauthenticated', 'forbidden', 'not_found'] as const)(
+    'renders %s as generic copy, not as a rule denial',
+    async (outcome) => {
+      const message = 'Access refused.'
+      createResourceBooking.mockResolvedValue({ outcome, message })
+      renderPanel()
+      book()
+
+      const error = await screen.findByTestId('booking-error')
+      expect(error.textContent).toBe(message)
+      expect(screen.queryByTestId('booking-denied')).toBeNull()
+      expect(onCalendarChanged).not.toHaveBeenCalled()
+    },
+  )
+})
+
 describe('invalid_request', () => {
   const detail = 'body.start_at: Input should be a valid datetime'
 
   it('never renders the diagnostic detail', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    createBooking.mockResolvedValue({
+    createResourceBooking.mockResolvedValue({
       outcome: 'invalid_request',
       detail,
       raw: { detail: [{ msg: 'Input should be a valid datetime' }] },
@@ -172,7 +245,7 @@ describe('invalid_request', () => {
 
   it('is not mistaken for a rule denial', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    createBooking.mockResolvedValue({ outcome: 'invalid_request', detail, raw: null })
+    createResourceBooking.mockResolvedValue({ outcome: 'invalid_request', detail, raw: null })
     renderPanel()
     book()
 
@@ -185,7 +258,7 @@ describe('invalid_request', () => {
 describe('failed', () => {
   it('shows generic copy', async () => {
     const message = "We couldn't reach the server. Check your connection and try again."
-    createBooking.mockResolvedValue({ outcome: 'failed', message })
+    createResourceBooking.mockResolvedValue({ outcome: 'failed', message })
     renderPanel()
     book()
 
@@ -198,7 +271,7 @@ describe('failed', () => {
 describe('while a request is in flight', () => {
   it('disables the confirm control and cannot be double-submitted', async () => {
     let release: (value: { outcome: 'ok'; data: Booking }) => void = () => {}
-    createBooking.mockReturnValue(
+    createResourceBooking.mockReturnValue(
       new Promise((resolve) => {
         release = resolve
       }),
@@ -212,7 +285,7 @@ describe('while a request is in flight', () => {
 
     // A second click while in flight would otherwise create a duplicate booking.
     fireEvent.click(confirm)
-    expect(createBooking).toHaveBeenCalledTimes(1)
+    expect(createResourceBooking).toHaveBeenCalledTimes(1)
 
     release({ outcome: 'ok', data: created })
     await waitFor(() => expect(screen.getByTestId('booking-success')).toBeTruthy())
@@ -221,13 +294,15 @@ describe('while a request is in flight', () => {
 
 describe('when the selection moves', () => {
   it('drops a stale result so it cannot describe the new range', async () => {
-    createBooking.mockResolvedValue({ outcome: 'rule_denied', message: 'Too long.' })
+    createResourceBooking.mockResolvedValue({ outcome: 'rule_denied', message: 'Too long.' })
     const { rerender } = renderPanel()
     book()
     await screen.findByTestId('booking-denied')
 
     rerender(
       <BookingPanel
+        publicId={PUBLIC_ID}
+        resourceId={RESOURCE_ID}
         selection={{ start: new Date(2026, 6, 25, 8, 0), end: new Date(2026, 6, 25, 9, 0) }}
         onCalendarChanged={onCalendarChanged}
       />,

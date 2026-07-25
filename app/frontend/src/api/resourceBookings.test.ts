@@ -2,13 +2,15 @@
  * Tests for the resource-scoped booking client — `listResourceBookings`,
  * `createResourceBooking`, `cancelResourceBooking`.
  *
- * `client.test.ts` already proves the shared classification machinery (the
- * `overlap`/`already_cancelled` and `rule_denied`/validation-error pairs), so
- * this file's job is narrower: prove the URL these functions build, prove the
- * two *new* discriminated outcomes (`space_archived`, `already_started`) land
- * on their own variants rather than being absorbed by a neighbour, and prove
- * that — unlike the unscoped routes — `unauthenticated` / `forbidden` /
- * `not_found` are first-class outcomes here rather than folded into `failed`.
+ * These are the only booking routes the client has: task 4.11 deleted the
+ * unscoped, single-user Stream 1 endpoints and their call sites. So this
+ * file's job covers both the shared classification machinery (the
+ * `overlap`/`already_cancelled` and `rule_denied`/validation-error pairs, and
+ * the promise that no expected outcome is delivered by a thrown exception)
+ * and what is specific to these routes: the URL they build, the two
+ * discriminated outcomes with no unscoped counterpart (`space_archived`,
+ * `already_started`), and that `unauthenticated` / `forbidden` / `not_found`
+ * are first-class outcomes here rather than folded into `failed`.
  *
  * `fetch` is mocked throughout — nothing here touches a real server.
  */
@@ -388,5 +390,98 @@ describe('cancelResourceBooking', () => {
     const result = await cancelResourceBooking(PUBLIC_ID, RESOURCE_ID, 42)
 
     expect(result.outcome).toBe('failed')
+  })
+})
+
+describe('the no-exceptions promise', () => {
+  const start = new Date('2026-07-20T10:00:00Z')
+  const end = new Date('2026-07-20T11:00:00Z')
+
+  /**
+   * Every way a call can go wrong, paired with the outcome it must resolve to.
+   *
+   * A caller doing the right thing — `switch (result.outcome)`, no try/catch —
+   * must never get an unhandled rejection instead of a branch, so these are run
+   * through a wrapper that fails the test if the promise rejects at all.
+   */
+  const failureModes: { name: string; call: () => Promise<{ outcome: string }> }[] = [
+    {
+      name: 'network down',
+      call: () => {
+        fetchMock.mockRejectedValue(new TypeError('Failed to fetch'))
+        return createResourceBooking(PUBLIC_ID, RESOURCE_ID, start, end)
+      },
+    },
+    {
+      name: 'fetch throwing synchronously',
+      call: () => {
+        fetchMock.mockImplementation(() => {
+          throw new TypeError('Failed to fetch')
+        })
+        return createResourceBooking(PUBLIC_ID, RESOURCE_ID, start, end)
+      },
+    },
+    {
+      name: 'unmodelled 500',
+      call: () => {
+        fetchMock.mockResolvedValue(jsonResponse(500, { detail: 'boom' }))
+        return createResourceBooking(PUBLIC_ID, RESOURCE_ID, start, end)
+      },
+    },
+    {
+      name: 'unrecognised discriminator',
+      call: () => {
+        fetchMock.mockResolvedValue(jsonResponse(409, { error: 'something_new', message: 'x' }))
+        return cancelResourceBooking(PUBLIC_ID, RESOURCE_ID, 7)
+      },
+    },
+    {
+      name: 'invalid Date on create',
+      call: () => createResourceBooking(PUBLIC_ID, RESOURCE_ID, new Date('nonsense'), end),
+    },
+    {
+      name: 'invalid Date on list',
+      call: () => listResourceBookings(PUBLIC_ID, RESOURCE_ID, start, new Date('nonsense')),
+    },
+    {
+      name: 'null body on an error status',
+      call: () => {
+        fetchMock.mockResolvedValue(jsonResponse(422, null))
+        return createResourceBooking(PUBLIC_ID, RESOURCE_ID, start, end)
+      },
+    },
+    {
+      name: 'a discriminated error with no message',
+      call: () => {
+        fetchMock.mockResolvedValue(jsonResponse(422, { error: 'rule_denied' }))
+        return createResourceBooking(PUBLIC_ID, RESOURCE_ID, start, end)
+      },
+    },
+  ]
+
+  it.each(failureModes)('resolves rather than throwing: $name', async ({ call }) => {
+    // Not `expect(...).resolves` — that would still pass if the *call itself*
+    // threw synchronously before returning a promise.
+    let threw: unknown = null
+    let outcome: string | undefined
+    try {
+      outcome = (await call()).outcome
+    } catch (error) {
+      threw = error
+    }
+
+    expect(threw).toBeNull()
+    expect(typeof outcome).toBe('string')
+  })
+
+  it('reports a discriminated error with no message as generic copy, not undefined', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(422, { error: 'rule_denied' }))
+
+    const result = await createResourceBooking(PUBLIC_ID, RESOURCE_ID, start, end)
+
+    if (result.outcome !== 'rule_denied') throw new Error('unreachable')
+    // A UI renders this verbatim; `undefined` would reach the screen as "undefined".
+    expect(typeof result.message).toBe('string')
+    expect(result.message.length).toBeGreaterThan(0)
   })
 })

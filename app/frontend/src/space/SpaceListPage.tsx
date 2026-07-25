@@ -12,13 +12,10 @@ const PAGE_CLASS = 'min-h-screen bg-slate-50 p-8 text-slate-800'
  * `/` for a signed-in visitor — the post-login destination `ProtectedRoute`
  * lands them on instead of a generic calendar.
  *
- * Deliberately minimal: this task's job is making login the front door and
- * making the Space list *exist* as that destination, not building the Space
- * or Resource navigation that reads it. The next task builds the full Space
- * page, a Resource picker, and the per-Resource calendar this list currently
- * has nothing to hand off to — a member clicking through today lands on
- * `SpacePage`, which itself redirects back here for a member since it has
- * nowhere else to send them yet.
+ * A member clicking through lands on `SpacePage`, which renders that Space —
+ * its name, description, and a picker onto its Resources — rather than
+ * bouncing back here; this list is where you start, not where every link
+ * inside a Space returns you to.
  *
  * `listSpaces()` is memberships, not a directory — see its own docstring. A
  * Space this user has no relationship with is not filtered out of the

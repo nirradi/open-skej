@@ -2,29 +2,21 @@
  * Tests for the api client's auth seam: the injected token and the three access
  * outcomes.
  *
- * Kept in its own file rather than appended to `client.test.ts` so that Stream
- * 1's suite stays exactly as it was — and, more usefully, so that *that* file
- * keeps proving the unauthenticated path by construction. `client.test.ts`
- * never installs a token provider, so if a future change made one mandatory, it
+ * Kept in its own file rather than appended to `spaces.test.ts` or
+ * `resourceBookings.test.ts` so that neither has to install a token provider
+ * to make its own assertions — if a future change made one mandatory, it
  * would fail there rather than here.
  *
- * The pairs matter for the same reason they do in `client.test.ts`: proving
- * each of 401/403/404 lands *somewhere* is much weaker than proving they land
- * somewhere *different*, since collapsing all three back into `failed` — which
- * is what the client did before this task — would satisfy the first claim.
+ * The pairs matter: proving each of 401/403/404 lands *somewhere* is much
+ * weaker than proving they land somewhere *different*, since collapsing all
+ * three back into `failed` — which is what the client did before Stream 2 —
+ * would satisfy the first claim.
  *
  * `fetch` is mocked throughout; nothing here reaches Auth0 or a server.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import {
-  API_BASE_URL,
-  authenticatedRequest,
-  cancelBooking,
-  getCurrentUser,
-  listBookings,
-  setAccessTokenProvider,
-} from './client'
+import { API_BASE_URL, authenticatedRequest, getCurrentUser, setAccessTokenProvider } from './client'
 
 /** Minimal stand-in for `Response`; the client only reads `ok`, `status`, `json`. */
 function jsonResponse(status: number, body: unknown): Response {
@@ -85,12 +77,11 @@ describe('the injected token provider', () => {
   it('sends no Authorization header when no provider is installed', async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, []))
 
-    await listBookings(new Date('2026-07-20T00:00:00Z'), new Date('2026-07-27T00:00:00Z'))
+    await authenticatedRequest('/spaces')
 
-    // The state Stream 1's booking endpoints run in today, and the state the
-    // app is in before the Auth0 SDK has finished initialising. Not an error,
-    // and specifically not `Bearer undefined` or `Bearer null`, either of which
-    // the backend would try to parse as a token.
+    // The state the app is in before the Auth0 SDK has finished initialising.
+    // Not an error, and specifically not `Bearer undefined` or `Bearer null`,
+    // either of which the backend would try to parse as a token.
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(sentHeaders()).not.toHaveProperty('Authorization')
     expect(JSON.stringify(sentHeaders())).not.toContain('Bearer')
@@ -301,43 +292,5 @@ describe('401 / 403 / 404 are distinguishable', () => {
     fetchMock.mockResolvedValue(jsonResponse(422, { detail: [{ loc: ['body'], msg: 'required' }] }))
 
     expect((await authenticatedRequest('/spaces')).outcome).toBe('invalid_request')
-  })
-})
-
-describe('the booking endpoints are unchanged by all this', () => {
-  it("keeps cancelBooking's discriminated 404 as not_found, not the status-derived one", async () => {
-    // Both are 404 and both end up as `outcome: 'not_found'` — but they must
-    // arrive by different routes, because the discriminated one carries the
-    // server's own friendly copy and the status-derived one deliberately does
-    // not. If the status check ever ran first, this message would be replaced.
-    const message = 'That booking no longer exists.'
-    fetchMock.mockResolvedValue(jsonResponse(404, { error: 'not_found', message }))
-
-    const result = await cancelBooking(999)
-
-    expect(result).toEqual({ outcome: 'not_found', message })
-  })
-
-  it('reports a bare 401 on a booking route as failed, exactly as before', async () => {
-    // The booking endpoints are still Stream 1's single-user contract, so their
-    // unions model no auth outcomes. A 401 from one means the deployment is
-    // wrong, not that the user's session lapsed — and `failed` is what it
-    // resolved to before this task, so nothing downstream changed.
-    fetchMock.mockResolvedValue(jsonResponse(401, detail('Missing bearer token')))
-
-    const result = await listBookings(new Date('2026-07-20Z'), new Date('2026-07-27Z'))
-
-    expect(result.outcome).toBe('failed')
-    if (result.outcome !== 'failed') throw new Error('unreachable')
-    expect(String(result.cause)).toContain('unauthenticated')
-  })
-
-  it('carries the token on booking calls too, so Stream 4 needs no client change', async () => {
-    setAccessTokenProvider(async () => 'a-jwt')
-    fetchMock.mockResolvedValue(jsonResponse(200, []))
-
-    await listBookings(new Date('2026-07-20Z'), new Date('2026-07-27Z'))
-
-    expect(sentHeaders().Authorization).toBe('Bearer a-jwt')
   })
 })

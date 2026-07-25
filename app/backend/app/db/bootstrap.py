@@ -1,18 +1,22 @@
-"""Seed the transitional default booking target.
+"""Seed the former default booking target.
 
-The booking routes are still unauthenticated and still book against a fixed
-default Resource and user (``app.db.constants``). Now that ``bookings.resource_id``
-and ``bookings.user_id`` are real foreign keys, that default has to be a real row:
-a default user, a default Space to hold it, and a default Resource inside that
-Space. This module plants those three rows.
+Task 4.4 through 4.10 booked the unscoped ``POST /bookings`` route against a
+fixed default Resource and user (``app.db.constants``), so ``bookings.resource_id``
+/ ``bookings.user_id`` — real foreign keys since 4.2 — needed a real row to point
+at: a default user, a default Space to hold it, and a default Resource inside
+that Space. This module plants those three rows.
+
+Task 4.11 deleted that route, so nothing books against these rows any more. The
+plant stays anyway: the backend ``driver`` test fixture and the sandbox seed both
+still call it, and removing it would mean reworking their id-sequence handling
+(``app.sandbox_seed._sync_sequence_past_explicit_defaults``) for no behavioural
+gain — an inert row with a stable id is cheaper to keep than to unwind.
 
 It is **deliberately not a migration.** A data seed in the schema history would
 reach every database the migrations are ever run against, including a real one,
 and plant a phantom Space and user there. Instead the seed lives here and is run
-only where the unscoped routes run against a disposable database — the backend
-``driver`` test fixture and the sandbox's setup — so nothing outside a throwaway
-database ever grows the default rows. The whole apparatus is removed with the
-unscoped routes.
+only against a disposable database — the backend ``driver`` test fixture and the
+sandbox's setup — so nothing outside a throwaway database ever grows these rows.
 
 The rows are inserted with an **explicit primary key of 1** so the ids in
 ``app.db.constants`` are stable without a lookup, and the insert is idempotent:

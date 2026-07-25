@@ -15,13 +15,14 @@
  * 3. **Cancelling every booking through the public API** — what this does.
  *
  * Option 3 wins because it is *sufficient* here, not merely convenient. Cancels
- * are soft deletes, so rows survive — but nothing Stream 1 exposes can see them:
- * `GET /bookings` excludes cancelled rows by default, and the driver's overlap
- * check considers only `status = 'confirmed'`, so a cancelled booking frees its
- * interval for rebooking. The observable state a test can reach is therefore
- * identical to an empty database. It also needs no test-only endpoint on the
- * backend, which is the real cost of the alternatives: a `POST /test/reset`
- * would be production surface area existing solely for this suite.
+ * are soft deletes, so rows survive — but nothing the API exposes can see them:
+ * `GET .../bookings` excludes cancelled rows by default, and the driver's
+ * overlap check considers only `status = 'confirmed'`, so a cancelled booking
+ * frees its interval for rebooking. The observable state a test can reach is
+ * therefore identical to an empty database. It also needs no test-only
+ * endpoint on the backend, which is the real cost of the alternatives: a
+ * `POST /test/reset` would be production surface area existing solely for
+ * this suite.
  *
  * The one thing it does not give is a clean *row count*, which matters to
  * exactly one future consumer — Stream 3's history-counting rules. When those
@@ -59,6 +60,14 @@ const SANDBOX_SIGNED_IN_STORAGE_KEY = 'skej.sandbox.signedIn'
 /** A window wide enough to sweep up anything a test could have created. */
 const SWEEP_YEARS = 1
 
+/**
+ * `app/backend/app/sandbox_seed.py`'s `SPACE_A_NAME`, mirrored as a literal
+ * for the same reason as the storage keys above: that module is Python, this
+ * is TypeScript, and the two must change together if the seed's name ever
+ * does. `06-deep-link-login.spec.ts` mirrors the same string independently.
+ */
+const SANDBOX_SPACE_A_NAME = 'Sandbox Space A (Berlin)'
+
 export interface Booking {
   id: number
   resource_id: number
@@ -70,17 +79,78 @@ export interface Booking {
   cancelled_at: string | null
 }
 
-/** Every confirmed booking the backend currently holds. */
+interface SpaceAResource {
+  publicId: string
+  resourceId: number
+  headers: { Authorization: string }
+}
+
+/**
+ * Discovers Space A's `public_id` and one of its Resources, the way a member
+ * would after signing in and picking a Resource from the picker on
+ * `/s/{public_id}` — read through the API at runtime rather than hardcoded,
+ * since `public_id` is an opaque token generated on each fresh seed run.
+ *
+ * Authenticates as the seeded **member** (`SANDBOX_MEMBER_SUB`): every
+ * booking fixture below acts as this identity, so a booking one fixture
+ * creates is visible to the others reading it back. `resources[0]` is a
+ * deterministic pick — Space A's two Resources are seeded in a fixed order —
+ * and every fixture in this file goes through this one function, so all of
+ * them agree on which Resource that is.
+ *
+ * Cached per `APIRequestContext`: several fixtures in one test each need the
+ * result, and re-discovering it per call would triple the round trips for no
+ * reason — the ids and the token are good for the lifetime of that context.
+ */
+const discoveryCache = new WeakMap<APIRequestContext, Promise<SpaceAResource>>()
+
+function discoverSpaceAResource(api: APIRequestContext): Promise<SpaceAResource> {
+  let cached = discoveryCache.get(api)
+  if (!cached) {
+    cached = (async (): Promise<SpaceAResource> => {
+      const token = await mintSandboxToken(api, SANDBOX_MEMBER_SUB)
+      const headers = { Authorization: `Bearer ${token}` }
+
+      const spacesResponse = await api.get(`${BACKEND_URL}/spaces`, { headers })
+      expect(spacesResponse.ok(), `GET /spaces failed: ${spacesResponse.status()}`).toBeTruthy()
+      const spaces = (await spacesResponse.json()) as { public_id: string; name: string }[]
+      const spaceA = spaces.find((space) => space.name === SANDBOX_SPACE_A_NAME)
+      expect(spaceA, `${SANDBOX_SPACE_A_NAME} not found in the seeded data`).toBeTruthy()
+
+      const resourcesResponse = await api.get(
+        `${BACKEND_URL}/spaces/${spaceA!.public_id}/resources`,
+        { headers },
+      )
+      expect(
+        resourcesResponse.ok(),
+        `GET .../resources failed: ${resourcesResponse.status()}`,
+      ).toBeTruthy()
+      const resources = (await resourcesResponse.json()) as { id: number }[]
+      expect(resources.length, `${SANDBOX_SPACE_A_NAME} has no Resources`).toBeGreaterThan(0)
+
+      return { publicId: spaceA!.public_id, resourceId: resources[0].id, headers }
+    })()
+    discoveryCache.set(api, cached)
+  }
+  return cached
+}
+
+/** Every confirmed booking the backend currently holds on Space A's discovered Resource. */
 export async function listAllBookings(api: APIRequestContext): Promise<Booking[]> {
+  const { publicId, resourceId, headers } = await discoverSpaceAResource(api)
   const now = Date.now()
   const year = SWEEP_YEARS * 365 * 24 * 60 * 60 * 1000
-  const response = await api.get(`${BACKEND_URL}/bookings`, {
-    params: {
-      from: new Date(now - year).toISOString(),
-      to: new Date(now + year).toISOString(),
+  const response = await api.get(
+    `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings`,
+    {
+      headers,
+      params: {
+        from: new Date(now - year).toISOString(),
+        to: new Date(now + year).toISOString(),
+      },
     },
-  })
-  expect(response.ok(), `GET /bookings failed: ${response.status()}`).toBeTruthy()
+  )
+  expect(response.ok(), `GET .../bookings failed: ${response.status()}`).toBeTruthy()
   return (await response.json()) as Booking[]
 }
 
@@ -96,23 +166,29 @@ export async function createBookingViaApi(
   startAt: Date,
   endAt: Date,
 ): Promise<Booking> {
-  const response = await api.post(`${BACKEND_URL}/bookings`, {
-    data: { start_at: startAt.toISOString(), end_at: endAt.toISOString() },
-  })
+  const { publicId, resourceId, headers } = await discoverSpaceAResource(api)
+  const response = await api.post(
+    `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings`,
+    { headers, data: { start_at: startAt.toISOString(), end_at: endAt.toISOString() } },
+  )
   expect(
     response.status(),
-    `POST /bookings failed: ${response.status()} ${await response.text()}`,
+    `POST .../bookings failed: ${response.status()} ${await response.text()}`,
   ).toBe(201)
   return (await response.json()) as Booking
 }
 
 /** Cancels every confirmed booking, returning the calendar to "nothing booked". */
 async function resetBookings(api: APIRequestContext): Promise<void> {
+  const { publicId, resourceId, headers } = await discoverSpaceAResource(api)
   for (const booking of await listAllBookings(api)) {
-    const response = await api.delete(`${BACKEND_URL}/bookings/${booking.id}`)
+    const response = await api.delete(
+      `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings/${booking.id}`,
+      { headers },
+    )
     expect(
       response.ok(),
-      `DELETE /bookings/${booking.id} failed: ${response.status()}`,
+      `DELETE .../bookings/${booking.id} failed: ${response.status()}`,
     ).toBeTruthy()
   }
 }
@@ -269,23 +345,39 @@ export function slotInstant(key: string, index: number): Date {
 }
 
 /**
- * Signs in as the seeded owner and pages forward one week, returning that
- * week's date keys.
+ * Signs in as the seeded **member** and navigates to Space A's calendar for
+ * the same Resource every other fixture in this file discovers — a member
+ * clicking through from `/s/{public_id}` lands here, so this is the UI-driven
+ * counterpart of `discoverSpaceAResource`'s API-driven one.
+ *
+ * `page.request` (not the `api` fixture) does the discovery: this helper only
+ * takes a `page`, matching every existing call site, and `page.request` is an
+ * `APIRequestContext` in its own right — it just happens to be bound to this
+ * page's browser context rather than a bare one.
+ */
+export async function gotoResourceCalendar(
+  page: Page,
+): Promise<{ publicId: string; resourceId: number }> {
+  const { publicId, resourceId } = await discoverSpaceAResource(page.request)
+
+  await signInAsSandbox(page, SANDBOX_MEMBER_SUB)
+  await page.goto(`/s/${publicId}/resources/${resourceId}`)
+  await expect(page.getByTestId('calendar-grid')).toBeVisible()
+
+  return { publicId, resourceId }
+}
+
+/**
+ * Pages the calendar forward one week, returning that week's date keys.
  *
  * Every booking test needs slots that are unambiguously in the future: the
  * backend denies anything starting before `now`, and within the *current* week
  * which slots are still bookable depends on the time of day the suite runs —
  * run it at 23:30 and the whole of today is refused. The next week is entirely
  * future and entirely inside the 60-day horizon, whenever the suite runs.
- *
- * The calendar lives at `/calendar`, behind the same auth gate as the rest of
- * the app now that login is the front door — `signInAsSandbox` is what lets
- * this navigation land there instead of the sign-in card.
  */
 export async function gotoNextWeek(page: Page): Promise<string[]> {
-  await signInAsSandbox(page)
-  await page.goto('/calendar')
-  await expect(page.getByTestId('calendar-grid')).toBeVisible()
+  await gotoResourceCalendar(page)
 
   const next = page.getByTestId('calendar-next-week')
   await expect(next).toBeEnabled()

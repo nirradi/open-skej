@@ -33,20 +33,19 @@ app/backend/app/
   identity/      Users, Spaces, memberships, access requests, invitations
                    authz.py — require_space_role, the per-Space authorization dependency
   db/            Declarative Base, session, UtcDateTime, driver abstraction
-  routers/       Booking endpoints, in two modules. `resource_bookings.py` is Space-scoped and
-                   authenticated: a booking is made against a Resource inside a Space the caller
-                   belongs to, resolved through `require_space_role`. `bookings.py` is unauthenticated
-                   and books against one fixed default Resource and user; it backs the Stream 1
-                   calendar view (now behind the login guard at `/calendar`) and carries no Space or
-                   Resource of its own
+  routers/       Booking endpoints. `resource_bookings.py` is Space-scoped and authenticated: a
+                   booking is made against a Resource inside a Space the caller belongs to, resolved
+                   through `require_space_role`. It is the only booking router — there is no unscoped
+                   route and no default Resource or user for one to carry
   rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
                    builds the engine Context. Name is historical; it holds no rule logic
 app/frontend/    React SPA
   src/auth/      Auth0 and sandbox wiring behind one `useSession()` seam, and the route guard
                    built on it — `ProtectedRoute` is what makes `/` the front door: login rendered
                    in place for a signed-out visitor, the api client's token bridge
-  src/space/     The Space list at `/`, and `/s/{public_id}` — the cold link-holder preview and
-                   access request
+  src/space/     The Space list at `/`; `/s/{public_id}` — the cold link-holder preview and access
+                   request for a non-member, and for a member the Space itself with a picker onto its
+                   Resources; and `/s/{public_id}/resources/{id}` — the calendar for one Resource
   src/admin/     Space creation, members, invitations, the access-request queue
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/

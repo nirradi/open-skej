@@ -14,19 +14,17 @@ import type {
   ApiInvalidRequest,
   AuthenticatedResult,
   Booking,
-  CancelBookingResult,
   CancelResourceBookingResult,
-  CreateBookingResult,
   CreateResourceBookingResult,
   CurrentUser,
   GetCurrentUserResult,
   Invitation,
   InvitationStatus,
-  ListBookingsResult,
   ListResourceBookingsResult,
   Member,
   MembershipRole,
   MutatingResult,
+  Resource,
   Space,
   SpacePreview,
 } from './types'
@@ -119,10 +117,9 @@ export type AccessTokenProvider = () => Promise<string>
  * ## Unset is a supported state, not a bug
  *
  * With no provider installed, requests simply carry no `Authorization` header.
- * That is what Stream 1's still-unauthenticated booking endpoints want, it is
- * what the existing tests exercise, and it is the honest behaviour before the
- * Auth0 SDK has finished initialising. The alternative — throwing, or blocking
- * until a provider appears — would turn "not signed in" into a crash.
+ * That is the honest behaviour before the Auth0 SDK has finished initialising,
+ * and the existing tests exercise it directly. The alternative — throwing, or
+ * blocking until a provider appears — would turn "not signed in" into a crash.
  */
 let accessTokenProvider: AccessTokenProvider | null = null
 
@@ -203,11 +200,11 @@ function formatDetail(detail: unknown): string {
  * no discriminator, where it is all there is.
  *
  * That ordering is also what keeps the new access kinds from stealing an
- * existing outcome. `cancelBooking`'s `not_found` arrives as a 404 carrying
- * `error: "not_found"`, so it is claimed by the discriminator branch and never
- * reaches the status check below — a Space's bare 404 and a booking's
- * discriminated one stay separately routed despite sharing a status, which is
- * the same property the two 409s have.
+ * existing outcome. `cancelResourceBooking`'s `not_found` arrives as a 404
+ * carrying `error: "not_found"`, so it is claimed by the discriminator branch
+ * and never reaches the status check below — a Space's bare 404 and a
+ * booking's discriminated one stay separately routed despite sharing a
+ * status, which is the same property the two 409s have.
  */
 async function request(path: string, init?: RequestInit): Promise<Envelope> {
   const authorization = await authorizationHeader()
@@ -324,41 +321,6 @@ function classifyByStatus(status: number): Envelope | null {
 }
 
 /**
- * Folds an outcome into `failed` for an endpoint that does not model it.
- *
- * The booking endpoints are the only callers: they predate auth and none of
- * them is behind `get_current_user` yet, so a 401 or 403 from one of them is
- * not a session problem but a sign that the deployment is misconfigured or that
- * Stream 4's space-scoping landed without these unions being widened to match.
- * Reporting that as `failed` with the specifics in `cause` says exactly that,
- * and — importantly — keeps their behaviour bit-for-bit what it was before this
- * task, since all of these previously fell through to `failed` anyway.
- *
- * `conflict` joins the list for the same reason and with the same guarantee. An
- * undiscriminated 409 on a booking route was already `failed` before this task,
- * because the two booking conflicts both carry an `error` key and are claimed by
- * the discriminator branch. Routing it here rather than widening
- * `CreateBookingResult` is what keeps that promise: `BookingPanel` and
- * `CancelPanel` switch exhaustively with no `default`, so a new variant in their
- * unions would force edits to Stream 1 components — the boundary violation that
- * task 2.8 declined for the access outcomes and that this task declines again.
- * Widening those unions belongs to Stream 4.
- */
-function unmodelledAccessOutcome(
-  kind: 'unauthenticated' | 'forbidden' | 'not_found' | 'conflict',
-): {
-  outcome: 'failed'
-  message: string
-  cause: unknown
-} {
-  return {
-    outcome: 'failed',
-    message: UNEXPECTED_FAILURE_MESSAGE,
-    cause: `unmodelled outcome from an unauthenticated endpoint: "${kind}"`,
-  }
-}
-
-/**
  * Turns an unrecognised discriminator into a failure.
  *
  * Reached when the server returns an `error` value an endpoint does not model —
@@ -428,131 +390,6 @@ function rejectInvalidDates(dates: Record<string, Date>): ApiInvalidRequest | nu
   }
 }
 
-/**
- * `GET /bookings?from=&to=`
- *
- * The window is half-open, `[from, to)`, and the server returns every booking
- * that *overlaps* it — a booking straddling the edge of the displayed week is
- * included, so its slot does not render as free.
- *
- * `Date`s are serialised with `toISOString()`, which always carries the `Z`
- * offset. The backend rejects a naive datetime rather than assuming UTC, so
- * going through `Date` rather than accepting caller-formatted strings makes that
- * failure unreachable.
- */
-export async function listBookings(
-  from: Date,
-  to: Date,
-  options: { includeCancelled?: boolean } = {},
-): Promise<ListBookingsResult> {
-  const invalid = rejectInvalidDates({ from, to })
-  if (invalid) return invalid
-
-  const query = new URLSearchParams({
-    from: from.toISOString(),
-    to: to.toISOString(),
-  })
-  if (options.includeCancelled) {
-    query.set('include_cancelled', 'true')
-  }
-
-  const envelope = await request(`/bookings?${query}`)
-  switch (envelope.kind) {
-    case 'ok':
-      return { outcome: 'ok', data: envelope.body as Booking[] }
-    case 'invalid_request':
-      return { outcome: 'invalid_request', detail: envelope.detail, raw: envelope.raw }
-    case 'discriminated':
-      return unexpectedDiscriminator(envelope.error)
-    case 'unauthenticated':
-    case 'forbidden':
-    case 'not_found':
-    case 'conflict':
-      return unmodelledAccessOutcome(envelope.kind)
-    case 'failed':
-      return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
-  }
-}
-
-/**
- * `POST /bookings`
- *
- * Resolves to `rule_denied` when the rule engine refused (nothing was written,
- * and `message` is friendly copy meant to be rendered verbatim) or `overlap`
- * when the interval is already taken (the calendar on screen is stale).
- */
-export async function createBooking(startAt: Date, endAt: Date): Promise<CreateBookingResult> {
-  const invalid = rejectInvalidDates({ start_at: startAt, end_at: endAt })
-  if (invalid) return invalid
-
-  const envelope = await request('/bookings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ start_at: startAt.toISOString(), end_at: endAt.toISOString() }),
-  })
-
-  switch (envelope.kind) {
-    case 'ok':
-      return { outcome: 'ok', data: envelope.body as Booking }
-    case 'invalid_request':
-      return { outcome: 'invalid_request', detail: envelope.detail, raw: envelope.raw }
-    case 'discriminated':
-      switch (envelope.error) {
-        case 'rule_denied':
-          return { outcome: 'rule_denied', message: envelope.message }
-        case 'overlap':
-          return { outcome: 'overlap', message: envelope.message }
-        default:
-          return unexpectedDiscriminator(envelope.error)
-      }
-    case 'unauthenticated':
-    case 'forbidden':
-    case 'not_found':
-    case 'conflict':
-      return unmodelledAccessOutcome(envelope.kind)
-    case 'failed':
-      return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
-  }
-}
-
-/**
- * `DELETE /bookings/{id}`
- *
- * Returns 200 with the cancelled booking, not 204, so `data` carries the
- * authoritative `status` and `cancelled_at` for patching a calendar already on
- * screen — no refetch needed.
- *
- * `already_cancelled` is a distinct outcome from `not_found` and from `overlap`
- * despite sharing 409 with the latter. It means the user's own cancel already
- * landed, so the UI should treat it as success.
- */
-export async function cancelBooking(bookingId: number): Promise<CancelBookingResult> {
-  const envelope = await request(`/bookings/${bookingId}`, { method: 'DELETE' })
-
-  switch (envelope.kind) {
-    case 'ok':
-      return { outcome: 'ok', data: envelope.body as Booking }
-    case 'invalid_request':
-      return { outcome: 'invalid_request', detail: envelope.detail, raw: envelope.raw }
-    case 'discriminated':
-      switch (envelope.error) {
-        case 'not_found':
-          return { outcome: 'not_found', message: envelope.message }
-        case 'already_cancelled':
-          return { outcome: 'already_cancelled', message: envelope.message }
-        default:
-          return unexpectedDiscriminator(envelope.error)
-      }
-    case 'unauthenticated':
-    case 'forbidden':
-    case 'not_found':
-    case 'conflict':
-      return unmodelledAccessOutcome(envelope.kind)
-    case 'failed':
-      return { outcome: 'failed', message: envelope.message, cause: envelope.cause }
-  }
-}
-
 /** The URL prefix every resource-scoped booking route sits under. */
 function resourceBookingsPath(publicId: string, resourceId: number): string {
   return `/spaces/${encodeURIComponent(publicId)}/resources/${resourceId}/bookings`
@@ -561,12 +398,13 @@ function resourceBookingsPath(publicId: string, resourceId: number): string {
 /**
  * `GET /spaces/{public_id}/resources/{resource_id}/bookings?from=&to=`
  *
- * The scoped counterpart of `listBookings`: same half-open `[from, to)` window
- * and overlap semantics, but authenticated and authorized through
- * `require_space_role`, so `unauthenticated` / `forbidden` / `not_found` are
- * reachable here in a way the unscoped route cannot produce — see
- * `ListResourceBookingsResult`. A read has no domain refusal to add on top, so
- * this is a thin wrapper over `authenticatedRequest`.
+ * The window is half-open, `[from, to)`, and the server returns every booking
+ * that *overlaps* it — a booking straddling the edge of the displayed week is
+ * included, so its slot does not render as free. Authenticated and authorized
+ * through `require_space_role`, so `unauthenticated` / `forbidden` /
+ * `not_found` are all reachable — see `ListResourceBookingsResult`. A read has
+ * no domain refusal to add on top, so this is a thin wrapper over
+ * `authenticatedRequest`.
  */
 export async function listResourceBookings(
   publicId: string,
@@ -592,11 +430,14 @@ export async function listResourceBookings(
 /**
  * `POST /spaces/{public_id}/resources/{resource_id}/bookings`
  *
- * The scoped counterpart of `createBooking`, widened with the access floor and
- * one more domain refusal: `space_archived`, for a create against a Resource
- * whose Space has been archived. Distinct from `overlap` even though both are
- * 409 — see `ApiSpaceArchived` — so the UI can tell "someone beat you to this
- * slot, try another" from "this venue is closed, stop offering the form".
+ * Resolves to `rule_denied` when the rule engine refused (nothing was
+ * written, and `message` is friendly copy meant to be rendered verbatim),
+ * `overlap` when the interval is already taken (the calendar on screen is
+ * stale), or `space_archived` when the Resource's Space has been archived and
+ * takes no new bookings. `space_archived` is distinct from `overlap` even
+ * though both are 409 — see `ApiSpaceArchived` — so the UI can tell "someone
+ * beat you to this slot, try another" from "this venue is closed, stop
+ * offering the form".
  */
 export async function createResourceBooking(
   publicId: string,
@@ -645,9 +486,12 @@ export async function createResourceBooking(
 /**
  * `DELETE /spaces/{public_id}/resources/{resource_id}/bookings/{booking_id}`
  *
- * The scoped counterpart of `cancelBooking`, widened with the access floor and
- * one more domain refusal: `already_started`, for a cancel against a booking
- * whose start time has already passed. Unlike `already_cancelled`, there is no
+ * Returns 200 with the cancelled booking, not 204, so `data` carries the
+ * authoritative `status` and `cancelled_at` for patching a calendar already on
+ * screen — no refetch needed. Authenticated and authorized through
+ * `require_space_role`, and widened with one more domain refusal beyond
+ * `already_cancelled`: `already_started`, for a cancel against a booking whose
+ * start time has already passed. Unlike `already_cancelled`, there is no
  * remedy — the interval is under way — so the UI should not offer a retry.
  *
  * `not_found` here covers three things the server keeps indistinguishable on
@@ -833,6 +677,26 @@ export async function listSpaces(
  */
 export async function getSpace(publicId: string): Promise<AuthenticatedResult<Space>> {
   return authenticatedRequest<Space>(`/spaces/${encodeURIComponent(publicId)}`)
+}
+
+/**
+ * `GET /spaces/{public_id}/resources` — the Resources a member may pick a
+ * calendar from.
+ *
+ * Members and up only; an outsider never reaches this because
+ * `require_space_role` on the parent Space already answered 404. Archived
+ * Resources are excluded unless asked for, matching `listSpaces`' treatment
+ * of an archived Space — the common case is choosing a calendar to book
+ * against, and an archived Resource takes no new bookings.
+ */
+export async function listResources(
+  publicId: string,
+  options: { includeArchived?: boolean } = {},
+): Promise<AuthenticatedResult<Resource[]>> {
+  const query = options.includeArchived ? '?include_archived=true' : ''
+  return authenticatedRequest<Resource[]>(
+    `/spaces/${encodeURIComponent(publicId)}/resources${query}`,
+  )
 }
 
 /**

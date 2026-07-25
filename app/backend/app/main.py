@@ -6,7 +6,7 @@ from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthError
 from app.identity.models import User
 from app.identity.router import router as spaces_router
-from app.routers import bookings, resource_bookings
+from app.routers import resource_bookings
 from app.settings import get_settings
 
 # The Vite dev server. Stream 2 owns the real deployed origins; until then this
@@ -24,7 +24,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(bookings.router)
 app.include_router(resource_bookings.router)
 app.include_router(spaces_router)
 

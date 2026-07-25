@@ -189,9 +189,10 @@ Postgres is the only target. `postgresql_where` predicates are not a portability
 **Login is the front door.** `/` is authenticated: a signed-out visitor sees a sign-in card rendered
 in place, and the destination once signed in is the Space list — the user's memberships, not a
 generic calendar. There is no anonymous view of anything, `/s/{public_id}` included; every route
-requires a session before it shows a person anything about a Space. The Stream 1 calendar still
-works exactly as it did, behind the same guard, at its own route — it is not this domain's concern
-beyond that it, too, now requires a session to reach.
+requires a session before it shows a person anything about a Space. The calendar is not a route of
+its own: it exists only per-Resource, at `/s/{public_id}/resources/{id}`, reached by a member who
+lands in a Space and picks one of its Resources. It is behind the same guard as everything else and
+is not this domain's concern beyond that it, too, requires a session to reach.
 
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of
@@ -209,11 +210,14 @@ session.
 An admin dashboard for Space creation, share links, and member management. Role menus offer only
 roles at or below the actor's own, which is a convenience — the server's 403 is the boundary.
 
-`/s/{public_id}` renders the cold-link preview and the access request. It is **the only route
-outside `ProtectedRoute`** — everything it exists to serve is a person who is not yet a member, so
-`ProtectedRoute`'s "you need an account to see this page" copy would be wrong here — but it still
-requires a session, checked by its own gate rather than that shared one. Four properties follow from
-that and are load-bearing:
+`/s/{public_id}` serves both sides of the door. A non-member sees the cold-link preview and the
+access request; a member lands **in the Space** — its name, description, and a picker onto its
+Resources, each linking to that Resource's calendar at `/s/{public_id}/resources/{id}` — rather than
+being bounced to the generic Space list, which would cost them a click back to the very link they
+just opened. It is **the only route outside `ProtectedRoute`**, because it must still serve the
+person who is not yet a member, for whom `ProtectedRoute`'s "you need an account to see this page"
+copy would be wrong — so it requires a session by its own gate rather than that shared one. Four
+properties follow from that and are load-bearing:
 
 * **It checks its own auth mode before any session hook runs.** With neither Auth0 nor sandbox mode
   configured there is no session provider in the tree at all, and reading one in that state throws.

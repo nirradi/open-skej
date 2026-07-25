@@ -9,12 +9,12 @@
  * The second is the **409 story**. Every domain refusal in the Space API is a
  * bare `HTTPException` — no `error` discriminator, just a status and prose — so
  * the client has to read the status to find them, which is exactly the thing
- * `client.test.ts` says the client refuses to do for the booking endpoints. The
- * two are reconciled by ordering: the discriminator is checked first, so a
- * booking's `overlap` (409 *with* an `error` key) is claimed before the status
- * check can see it. `keeps a booking conflict away from the Space conflict`
- * below pins that, because it is the assertion that fails if someone
- * "simplifies" the classification by moving the status check earlier.
+ * `resourceBookings.test.ts` says the client refuses to do for the booking
+ * routes. The two are reconciled by ordering: the discriminator is checked
+ * first, so a booking's `overlap` (409 *with* an `error` key) is claimed
+ * before the status check can see it. `keeps a booking conflict away from the
+ * Space conflict` below pins that, because it is the assertion that fails if
+ * someone "simplifies" the classification by moving the status check earlier.
  *
  * `fetch` is mocked throughout — nothing here touches a real server.
  */
@@ -25,6 +25,7 @@ import {
   approveAccessRequest,
   archiveSpace,
   createInvitation,
+  createResourceBooking,
   createSpace,
   denyAccessRequest,
   getSpace,
@@ -38,7 +39,6 @@ import {
   revokeInvitation,
   updateMemberRole,
 } from './client'
-import { createBooking } from './client'
 import type { AccessRequest, Invitation, Member, Space, SpacePreview } from './types'
 
 const space: Space = {
@@ -532,6 +532,9 @@ describe('requestAccess', () => {
 })
 
 describe('the two kinds of 409 stay apart', () => {
+  const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
+  const RESOURCE_ID = 1
+
   it('keeps a booking conflict away from the Space conflict', async () => {
     // `overlap` is a 409 *with* an `error` key. The discriminator is read before
     // the status, so it is claimed as `overlap` and never reaches the bare-409
@@ -543,19 +546,29 @@ describe('the two kinds of 409 stay apart', () => {
       jsonResponse(409, { error: 'overlap', message: 'That slot is taken.' }),
     )
 
-    const result = await createBooking(new Date('2026-07-20T09:00:00Z'), new Date('2026-07-20T10:00:00Z'))
+    const result = await createResourceBooking(
+      PUBLIC_ID,
+      RESOURCE_ID,
+      new Date('2026-07-20T09:00:00Z'),
+      new Date('2026-07-20T10:00:00Z'),
+    )
 
     expect(result).toEqual({ outcome: 'overlap', message: 'That slot is taken.' })
   })
 
   it('leaves an undiscriminated 409 on a booking route as failed', async () => {
-    // The booking result unions were deliberately not widened — `BookingPanel`
-    // and `CancelPanel` switch exhaustively with no `default`, so a new variant
-    // there would force edits to Stream 1 components. A bare 409 on a booking
-    // route was `failed` before this task and stays `failed` after it.
+    // The booking result unions have no bare-`conflict` variant — `BookingPanel`
+    // and `CancelPanel` switch exhaustively with no `default`, so an added
+    // variant there would force edits to those components. A bare 409 on a
+    // booking route is `failed`, not a Space-style `conflict`.
     fetchMock.mockResolvedValue(jsonResponse(409, { detail: 'Some future rule.' }))
 
-    const result = await createBooking(new Date('2026-07-20T09:00:00Z'), new Date('2026-07-20T10:00:00Z'))
+    const result = await createResourceBooking(
+      PUBLIC_ID,
+      RESOURCE_ID,
+      new Date('2026-07-20T09:00:00Z'),
+      new Date('2026-07-20T10:00:00Z'),
+    )
 
     expect(result.outcome).toBe('failed')
   })
