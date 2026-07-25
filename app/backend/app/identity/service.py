@@ -47,6 +47,13 @@ from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceUpdate
 # Resource even though it could.
 FIRST_RESOURCE_NAME = "Main"
 
+# The default operating hours and slot interval a freshly created Space gets, so
+# it is immediately bookable rather than requiring an admin to visit the config
+# UI before anyone can book.
+_DEFAULT_OPENS_AT = time(9, 0)
+_DEFAULT_CLOSES_AT = time(17, 0)
+_DEFAULT_SLOT_MINUTES = 60
+
 
 class SpaceArchivedError(Exception):
     """A mutation was attempted on a Space that has been archived."""
@@ -219,8 +226,21 @@ def create_space(
     bookable calendar is a dead end, and creating it here means the product never
     produces an empty Space even though the schema could represent one. If any
     write fails, none of them survives.
+
+    The Space gets default operating hours and a default slot interval, so it is
+    bookable immediately rather than requiring an admin visit to the config UI
+    first — the auto-created Resource itself carries none, since a Resource is
+    config-free by design and every court in a Space shares the Space's one
+    schedule. The four rule parameters are left unset.
     """
-    space = Space(name=name, description=description, created_by_user_id=creator.id)
+    space = Space(
+        name=name,
+        description=description,
+        created_by_user_id=creator.id,
+        opens_at=_DEFAULT_OPENS_AT,
+        closes_at=_DEFAULT_CLOSES_AT,
+        slot_minutes=_DEFAULT_SLOT_MINUTES,
+    )
     session.add(space)
     session.flush()
 
@@ -253,7 +273,14 @@ def list_spaces_for_user(
 
 
 def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
-    """Apply a partial update. Omitted fields are left alone."""
+    """Apply a partial update. Omitted fields are left alone.
+
+    ``opens_at`` / ``closes_at`` / ``slot_minutes`` and the four rule parameters
+    follow the same explicit-null-clears / omitted-leaves-alone rule as
+    ``description``: the schema only rejects a null ``name`` and a null
+    ``timezone``, so every other field here may be cleared back to "no
+    restriction" / "rule not enforced" by sending it explicitly as ``null``.
+    """
     _require_active(space)
 
     fields = payload.model_fields_set
@@ -266,6 +293,20 @@ def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
         space.description = payload.description
     if "timezone" in fields and payload.timezone is not None:
         space.timezone = payload.timezone
+    if "opens_at" in fields:
+        space.opens_at = payload.opens_at
+    if "closes_at" in fields:
+        space.closes_at = payload.closes_at
+    if "slot_minutes" in fields:
+        space.slot_minutes = payload.slot_minutes
+    if "max_duration_minutes" in fields:
+        space.max_duration_minutes = payload.max_duration_minutes
+    if "booking_horizon_days" in fields:
+        space.booking_horizon_days = payload.booking_horizon_days
+    if "max_bookings_per_week" in fields:
+        space.max_bookings_per_week = payload.max_bookings_per_week
+    if "max_bookings_per_month" in fields:
+        space.max_bookings_per_month = payload.max_bookings_per_month
 
     session.commit()
     return space
@@ -323,31 +364,17 @@ def get_resource(session: Session, space: Space, resource_id: int) -> Resource:
     return resource
 
 
-def create_resource(
-    session: Session,
-    space: Space,
-    *,
-    name: str,
-    opens_at: Optional[time] = None,
-    closes_at: Optional[time] = None,
-    slot_minutes: Optional[int] = None,
-) -> Resource:
+def create_resource(session: Session, space: Space, *, name: str) -> Resource:
     """Add a bookable calendar to this Space.
 
     Refused on an archived Space: a finished venue takes no new calendars, the
-    same rule every other mutation here follows. The operating-hours columns are
-    stored as given — local wall-clock values with no zone resolution, which is a
-    boundary concern and not this function's.
+    same rule every other mutation here follows. A Resource carries no
+    configuration of its own — operating hours, slot interval and every rule
+    limit live on the Space, so this takes nothing beyond a name.
     """
     _require_active(space)
 
-    resource = Resource(
-        space_id=space.id,
-        name=name,
-        opens_at=opens_at,
-        closes_at=closes_at,
-        slot_minutes=slot_minutes,
-    )
+    resource = Resource(space_id=space.id, name=name)
     session.add(resource)
     session.commit()
     return resource
@@ -356,11 +383,7 @@ def create_resource(
 def update_resource(
     session: Session, space: Space, *, resource_id: int, payload: ResourceUpdate
 ) -> Resource:
-    """Apply a partial update to a Resource. Omitted fields are left alone.
-
-    An explicit null clears an operating-hours column back to "no restriction";
-    absence leaves it untouched, which is why this reads ``model_fields_set``
-    rather than the values. Refused on an archived Space (409) and on an archived
+    """Rename a Resource. Refused on an archived Space (409) and on an archived
     Resource (409) — a retired calendar is history, not something to reconfigure.
     """
     _require_active(space)
@@ -371,12 +394,6 @@ def update_resource(
     fields = payload.model_fields_set
     if "name" in fields and payload.name is not None:
         resource.name = payload.name
-    if "opens_at" in fields:
-        resource.opens_at = payload.opens_at
-    if "closes_at" in fields:
-        resource.closes_at = payload.closes_at
-    if "slot_minutes" in fields:
-        resource.slot_minutes = payload.slot_minutes
 
     session.commit()
     return resource

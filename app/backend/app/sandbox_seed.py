@@ -1,8 +1,8 @@
 """Deterministic sandbox seed: the INTERESTING states, not a lone happy user.
 
 Playwright (task 4.9) and manual QA both need a sandbox that exercises the
-things a single "owner books a slot" flow never touches: another Space the
-caller is *not* in, a Resource with different hours than its sibling, a
+things a single "owner books a slot" flow never touches: another Space
+configured differently from the first, a Space the caller is *not* in, a
 pending access request and a pending invitation sitting in an admin's queue,
 and a Space that is already finished. This module plants exactly that,
 built through ``app.identity.service`` wherever a service function exists so
@@ -30,16 +30,24 @@ run time:
 
 ## The two Spaces
 
+Configuration — operating hours, slot interval, timezone — lives on the
+**Space** now (task 4.13a), not on its Resources: a Resource is one of N
+indistinguishable courts and carries no config of its own. So the two Spaces
+below differ from each other in their schedule, and each Space's own
+Resources are deliberately identical siblings.
+
 * ``SPACE_A_NAME`` — zone ``SPACE_A_TIMEZONE`` (``Europe/Berlin``, chosen
   because it is not UTC: Playwright pins the browser clock to UTC, which is
   exactly the setting that would hide a timezone bug if every Space in the
-  sandbox were UTC too). Owner + admin + member. Two Resources with
-  different ``opens_at``/``closes_at``/``slot_minutes`` — the canon is still
-  module-level literals until 4.13, so the two differ in hours and slot
-  length only, never in rule parameters.
-* ``SPACE_B_NAME`` — zone ``SPACE_B_TIMEZONE`` (UTC), one Resource, and
-  neither the member nor the stranger has a membership row in it. A member
-  of Space A must get 404 here, never 403.
+  sandbox were UTC too). Owner + admin + member. Two identical Resources
+  (courts) sharing the one Space-level schedule.
+* ``SPACE_B_NAME`` — zone ``SPACE_B_TIMEZONE`` (UTC), its own distinct
+  schedule, one Resource, and neither the member nor the stranger has a
+  membership row in it. A member of Space A must get 404 here, never 403.
+
+The rule-parameter columns (max duration, booking horizon, weekly/monthly
+caps) are deliberately left unset here — the canon is still module-level
+literals until 4.13b, so nothing in the backend reads them yet.
 
 ## Reset, not accumulate
 
@@ -103,27 +111,26 @@ STRANGER_EMAIL = "stranger@sandbox.open-skej.local"
 # yet, and giving this one a login identity would collapse that distinction.
 PENDING_INVITEE_EMAIL = "invitee@sandbox.open-skej.local"
 
-# --- Space A: non-UTC, two differently configured Resources ------------------
+# --- Space A: non-UTC, two identical Resources sharing one schedule ----------
 
 SPACE_A_NAME = "Sandbox Space A (Berlin)"
-SPACE_A_DESCRIPTION = "Owner + admin + member; two Resources with different hours."
+SPACE_A_DESCRIPTION = "Owner + admin + member; two identical courts on one schedule."
 SPACE_A_TIMEZONE = "Europe/Berlin"
+SPACE_A_OPENS_AT = time(6, 0)
+SPACE_A_CLOSES_AT = time(22, 0)
+SPACE_A_SLOT_MINUTES = 60
 
-RESOURCE_A1_NAME = "Court 1 (long hours)"
-RESOURCE_A1_OPENS_AT = time(6, 0)
-RESOURCE_A1_CLOSES_AT = time(22, 0)
-RESOURCE_A1_SLOT_MINUTES = 60
-
-RESOURCE_A2_NAME = "Court 2 (business hours)"
-RESOURCE_A2_OPENS_AT = time(9, 0)
-RESOURCE_A2_CLOSES_AT = time(17, 0)
-RESOURCE_A2_SLOT_MINUTES = 30
+RESOURCE_A1_NAME = "Court 1"
+RESOURCE_A2_NAME = "Court 2"
 
 # --- Space B: a different tenant, unreachable by the member or the stranger --
 
 SPACE_B_NAME = "Sandbox Space B (UTC)"
 SPACE_B_DESCRIPTION = "Owned by the same owner as Space A; nobody else is in it."
 SPACE_B_TIMEZONE = "UTC"
+SPACE_B_OPENS_AT = time(9, 0)
+SPACE_B_CLOSES_AT = time(17, 0)
+SPACE_B_SLOT_MINUTES = 30
 # Its one Resource is the auto-created first Resource `create_space` always
 # gives a fresh Space (`service.FIRST_RESOURCE_NAME`) — Space B needs nothing
 # more than that to demonstrate cross-tenant isolation, so nothing here adds a
@@ -217,8 +224,8 @@ def _seed_future_bookings(session: Session, resource: Resource, member: User) ->
     Anchored on "tomorrow" and "the day after" rather than a fixed date so the
     seed stays useful indefinitely; computed in Space A's zone and converted
     to UTC at the boundary like everything else here, so both actually land
-    inside ``RESOURCE_A1_OPENS_AT``/``CLOSES_AT`` however DST falls on the day
-    the seed happens to run.
+    inside ``SPACE_A_OPENS_AT``/``CLOSES_AT`` however DST falls on the day the
+    seed happens to run.
     """
     tz = ZoneInfo(SPACE_A_TIMEZONE)
     today = datetime.now(tz).date()
@@ -264,48 +271,45 @@ def run(session: Session) -> None:
     )
     session.commit()
 
-    # Space A: non-UTC, owner + admin + member, two differently configured
-    # Resources. `create_space` takes no timezone argument (the config UI is
-    # task 4.12), so the zone is set directly on the row it returns.
+    # Space A: non-UTC, owner + admin + member, one schedule shared by two
+    # identical Resources. `create_space` takes no timezone or hours argument
+    # (the config UI is task 4.12/4.13a), so both are set directly on the row
+    # it returns, overriding the defaults it was created with.
     space_a = service.create_space(
         session, owner, name=SPACE_A_NAME, description=SPACE_A_DESCRIPTION
     )
     space_a.timezone = SPACE_A_TIMEZONE
+    space_a.opens_at = SPACE_A_OPENS_AT
+    space_a.closes_at = SPACE_A_CLOSES_AT
+    space_a.slot_minutes = SPACE_A_SLOT_MINUTES
     session.commit()
 
     _add_membership(session, space_a, admin, MembershipRole.ADMIN)
     _add_membership(session, space_a, member, MembershipRole.MEMBER)
 
-    # `create_space` auto-creates one Resource ("Main"); configure it as A1
-    # rather than leaving it unconfigured, so both of Space A's Resources
-    # carry hours and the difference between them is visible.
+    # `create_space` auto-creates one Resource ("Main"); rename it to A1 and
+    # add an identical sibling A2 — both share Space A's one schedule, since a
+    # Resource carries no configuration of its own.
     (resource_a1,) = service.list_resources(session, space_a, include_archived=False)
     service.update_resource(
         session,
         space_a,
         resource_id=resource_a1.id,
-        payload=ResourceUpdate(
-            name=RESOURCE_A1_NAME,
-            opens_at=RESOURCE_A1_OPENS_AT,
-            closes_at=RESOURCE_A1_CLOSES_AT,
-            slot_minutes=RESOURCE_A1_SLOT_MINUTES,
-        ),
+        payload=ResourceUpdate(name=RESOURCE_A1_NAME),
     )
-    service.create_resource(
-        session,
-        space_a,
-        name=RESOURCE_A2_NAME,
-        opens_at=RESOURCE_A2_OPENS_AT,
-        closes_at=RESOURCE_A2_CLOSES_AT,
-        slot_minutes=RESOURCE_A2_SLOT_MINUTES,
-    )
+    service.create_resource(session, space_a, name=RESOURCE_A2_NAME)
 
     # Space B: a second tenant the member and stranger have no row in at all,
-    # so a 404 (never 403) on any of its routes is observable from either.
+    # so a 404 (never 403) on any of its routes is observable from either. Its
+    # own schedule, distinct from Space A's, keeps "two Spaces configured
+    # differently" observable now that configuration lives on the Space.
     space_b = service.create_space(
         session, owner, name=SPACE_B_NAME, description=SPACE_B_DESCRIPTION
     )
     space_b.timezone = SPACE_B_TIMEZONE
+    space_b.opens_at = SPACE_B_OPENS_AT
+    space_b.closes_at = SPACE_B_CLOSES_AT
+    space_b.slot_minutes = SPACE_B_SLOT_MINUTES
     session.commit()
 
     # A pending access request: the stranger asks to get into Space A.

@@ -33,13 +33,10 @@ from app.sandbox_seed import (
     OWNER_AUTH0_SUB,
     OWNER_EMAIL,
     PENDING_INVITEE_EMAIL,
-    RESOURCE_A1_CLOSES_AT,
-    RESOURCE_A1_OPENS_AT,
-    RESOURCE_A1_SLOT_MINUTES,
-    RESOURCE_A2_CLOSES_AT,
-    RESOURCE_A2_OPENS_AT,
-    RESOURCE_A2_SLOT_MINUTES,
+    SPACE_A_CLOSES_AT,
     SPACE_A_NAME,
+    SPACE_A_OPENS_AT,
+    SPACE_A_SLOT_MINUTES,
     SPACE_A_TIMEZONE,
     SPACE_B_NAME,
     SPACE_B_TIMEZONE,
@@ -93,6 +90,9 @@ def test_seed_produces_every_interesting_state(session):
     # Space A: non-UTC, and carries all three roles.
     space_a = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
     assert space_a.timezone == SPACE_A_TIMEZONE
+    assert space_a.opens_at == SPACE_A_OPENS_AT
+    assert space_a.closes_at == SPACE_A_CLOSES_AT
+    assert space_a.slot_minutes == SPACE_A_SLOT_MINUTES
     assert space_a.archived_at is None
 
     roles_in_a = dict(
@@ -107,7 +107,8 @@ def test_seed_produces_every_interesting_state(session):
     assert roles_in_a[member.id] == MembershipRole.MEMBER
     assert stranger.id not in roles_in_a
 
-    # Space A's two Resources are configured differently from one another.
+    # Space A's two Resources are identical courts sharing the Space's one
+    # schedule — a Resource carries no configuration of its own.
     resources_a = (
         session.execute(
             select(Resource).where(Resource.space_id == space_a.id).order_by(Resource.id)
@@ -116,16 +117,19 @@ def test_seed_produces_every_interesting_state(session):
         .all()
     )
     assert len(resources_a) == 2
-    configs = {(r.opens_at, r.closes_at, r.slot_minutes) for r in resources_a}
-    assert configs == {
-        (RESOURCE_A1_OPENS_AT, RESOURCE_A1_CLOSES_AT, RESOURCE_A1_SLOT_MINUTES),
-        (RESOURCE_A2_OPENS_AT, RESOURCE_A2_CLOSES_AT, RESOURCE_A2_SLOT_MINUTES),
-    }
+    assert {r.name for r in resources_a} == {"Court 1", "Court 2"}
 
     # Space B: a different tenant, in a different zone, that neither the
     # member nor the stranger belongs to — the cross-tenant isolation fixture.
     space_b = session.execute(select(Space).where(Space.name == SPACE_B_NAME)).scalar_one()
     assert space_b.timezone == SPACE_B_TIMEZONE
+    # Configured differently from Space A — the two Spaces, not their
+    # Resources, are what differ now that configuration lives on the Space.
+    assert (space_b.opens_at, space_b.closes_at, space_b.slot_minutes) != (
+        space_a.opens_at,
+        space_a.closes_at,
+        space_a.slot_minutes,
+    )
     member_ids_in_b = set(
         session.execute(
             select(SpaceMembership.user_id).where(SpaceMembership.space_id == space_b.id)

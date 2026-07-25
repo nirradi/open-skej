@@ -867,6 +867,110 @@ def test_a_member_gets_403_setting_the_space_timezone(
     assert response.status_code == 403
 
 
+# --- Space schedule and rule parameters. -------------------------------------
+#
+# Operating hours, slot interval, and every rule limit live on the Space now
+# (task 4.13a) — a Resource carries no configuration of its own. A fresh Space
+# gets sensible default hours so it is immediately bookable; the four rule
+# parameters default to unset.
+
+
+def test_a_new_space_has_default_operating_hours(api: Api, alice: User, space_a: Space) -> None:
+    body = api.as_user(alice).get(f"/spaces/{space_a.public_id}").json()
+
+    assert body["opens_at"] == "09:00:00"
+    assert body["closes_at"] == "17:00:00"
+    assert body["slot_minutes"] == 60
+    assert body["max_duration_minutes"] is None
+    assert body["booking_horizon_days"] is None
+    assert body["max_bookings_per_week"] is None
+    assert body["max_bookings_per_month"] is None
+
+
+def test_an_admin_sets_the_space_schedule_and_rule_parameters(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    response = api.as_user(alice).patch(
+        f"/spaces/{space_a.public_id}",
+        json={
+            "opens_at": "07:00",
+            "closes_at": "22:00",
+            "slot_minutes": 30,
+            "max_duration_minutes": 120,
+            "booking_horizon_days": 60,
+            "max_bookings_per_week": 3,
+            "max_bookings_per_month": 10,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["opens_at"] == "07:00:00"
+    assert body["closes_at"] == "22:00:00"
+    assert body["slot_minutes"] == 30
+    assert body["max_duration_minutes"] == 120
+    assert body["booking_horizon_days"] == 60
+    assert body["max_bookings_per_week"] == 3
+    assert body["max_bookings_per_month"] == 10
+
+
+def test_an_explicit_null_clears_space_schedule_and_rule_parameters(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """An explicit null clears a schedule/rule-parameter column back to "no
+    restriction"; an omitted field is left alone — the same convention
+    ``description`` and ``timezone`` already follow.
+    """
+    client = api.as_user(alice)
+    url = f"/spaces/{space_a.public_id}"
+
+    client.patch(url, json={"opens_at": "07:00", "max_duration_minutes": 120})
+
+    cleared = client.patch(url, json={"opens_at": None, "max_duration_minutes": None})
+    assert cleared.status_code == 200, cleared.text
+    body = cleared.json()
+    assert body["opens_at"] is None
+    assert body["max_duration_minutes"] is None
+    # closes_at, not mentioned in either call, is untouched.
+    assert body["closes_at"] == "17:00:00"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "slot_minutes",
+        "max_duration_minutes",
+        "booking_horizon_days",
+        "max_bookings_per_week",
+        "max_bookings_per_month",
+    ],
+)
+def test_space_schedule_and_rule_parameters_must_be_positive(
+    api: Api, alice: User, space_a: Space, field: str
+) -> None:
+    client = api.as_user(alice)
+    url = f"/spaces/{space_a.public_id}"
+
+    assert client.patch(url, json={field: 0}).status_code == 422
+    assert client.patch(url, json={field: -5}).status_code == 422
+
+
+def test_slot_minutes_cannot_exceed_a_day(api: Api, alice: User, space_a: Space) -> None:
+    response = api.as_user(alice).patch(f"/spaces/{space_a.public_id}", json={"slot_minutes": 1441})
+
+    assert response.status_code == 422
+
+
+def test_a_member_gets_403_setting_the_space_schedule(
+    api: Api, session: Session, alice: User, carol: User, space_a: Space
+) -> None:
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+
+    response = api.as_user(carol).patch(f"/spaces/{space_a.public_id}", json={"opens_at": "07:00"})
+
+    assert response.status_code == 403
+
+
 def test_archiving_stamps_archived_at(api: Api, alice: User, space_a: Space) -> None:
     response = api.as_user(alice).post(f"/spaces/{space_a.public_id}/archive")
 
@@ -1854,47 +1958,19 @@ def test_a_new_space_lists_its_auto_created_resource(api: Api, alice: User, spac
 
 
 def test_an_admin_creates_a_resource(api: Api, alice: User, space_a: Space) -> None:
+    """A Resource is name-only — no configuration of its own. Operating hours,
+    slot interval, and every rule limit live on the Space.
+    """
     response = api.as_user(alice).post(
-        f"/spaces/{space_a.public_id}/resources",
-        json={"name": "Court 2", "opens_at": "07:00", "closes_at": "22:00", "slot_minutes": 60},
+        f"/spaces/{space_a.public_id}/resources", json={"name": "Court 2"}
     )
 
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["name"] == "Court 2"
-    assert body["opens_at"] == "07:00:00"
-    assert body["closes_at"] == "22:00:00"
-    assert body["slot_minutes"] == 60
     assert body["archived_at"] is None
     assert isinstance(body["id"], int)
-
-
-def test_a_resource_created_with_no_hours_carries_no_restriction(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    """The operating-hours columns are optional — a Resource with none set simply
-    has no hours restriction yet.
-    """
-    response = api.as_user(alice).post(
-        f"/spaces/{space_a.public_id}/resources", json={"name": "Bare"}
-    )
-
-    assert response.status_code == 201, response.text
-    body = response.json()
-    assert body["opens_at"] is None
-    assert body["closes_at"] is None
-    assert body["slot_minutes"] is None
-
-
-def test_slot_minutes_must_be_positive_and_within_a_day(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    client = api.as_user(alice)
-    base = f"/spaces/{space_a.public_id}/resources"
-
-    assert client.post(base, json={"name": "Zero", "slot_minutes": 0}).status_code == 422
-    assert client.post(base, json={"name": "Neg", "slot_minutes": -5}).status_code == 422
-    assert client.post(base, json={"name": "TooLong", "slot_minutes": 1441}).status_code == 422
+    assert set(body.keys()) == {"id", "name", "created_at", "archived_at"}
 
 
 def test_a_member_can_list_and_read_but_not_create_a_resource(
@@ -1967,28 +2043,15 @@ def test_a_resource_of_another_space_is_a_404_identical_to_a_missing_one(
     assert foreign.json() == missing.json()
 
 
-def test_updating_a_resource_renames_and_clears_hours(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    """An explicit null clears an hours column; an omitted field is left alone."""
+def test_updating_a_resource_only_renames(api: Api, alice: User, space_a: Space) -> None:
+    """A Resource update is name-only — there is no configuration to clear."""
     client = api.as_user(alice)
-    created = client.post(
-        f"/spaces/{space_a.public_id}/resources",
-        json={"name": "Court 2", "opens_at": "07:00", "closes_at": "22:00", "slot_minutes": 60},
-    ).json()
+    created = client.post(f"/spaces/{space_a.public_id}/resources", json={"name": "Court 2"}).json()
     url = f"/spaces/{space_a.public_id}/resources/{created['id']}"
 
     renamed = client.patch(url, json={"name": "Centre Court"})
     assert renamed.status_code == 200, renamed.text
-    # Name changed; the omitted hours are untouched.
     assert renamed.json()["name"] == "Centre Court"
-    assert renamed.json()["opens_at"] == "07:00:00"
-
-    cleared = client.patch(url, json={"opens_at": None})
-    assert cleared.status_code == 200, cleared.text
-    assert cleared.json()["opens_at"] is None
-    # closes_at, not mentioned, survives the clear of opens_at.
-    assert cleared.json()["closes_at"] == "22:00:00"
 
 
 def test_a_null_name_is_rejected_rather_than_stored(api: Api, alice: User, space_a: Space) -> None:
