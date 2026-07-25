@@ -142,8 +142,19 @@ def member(session: Session) -> User:
 
 @pytest.fixture
 def space(session: Session, owner: User) -> Space:
-    """A Space with its auto-created first Resource, owned by ``owner``."""
-    return service.create_space(session, owner, name="Court Club", description="A club")
+    """A Space with its auto-created first Resource, owned by ``owner``.
+
+    ``max_duration_minutes`` is set explicitly (``create_space`` otherwise
+    leaves every rule parameter unset) so the canon this module's tests
+    exercise actually includes a duration cap — the per-Space canon assembled
+    for a Space with no configuration would enforce nothing but
+    ``NotInThePastRule``, and ``test_rule_denial_returns_422_and_persists_
+    nothing`` needs a real rule to trip.
+    """
+    space = service.create_space(session, owner, name="Court Club", description="A club")
+    space.max_duration_minutes = 120
+    session.commit()
+    return space
 
 
 @pytest.fixture

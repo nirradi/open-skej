@@ -2,45 +2,63 @@
 
 The name is historical: this module began as a stub standing in for the engine
 before it existed. It is now a thin **adapter** — it owns no rule logic. Every
-verdict comes from ``rules.evaluate_request`` running ``DEFAULT_CANON``.
+verdict comes from ``rules.evaluate_request`` running a canon **assembled per
+Space**, from that Space's own configuration (``.claude/rules/identity-and-
+access.md``, "A Space is the unit of configuration; a Resource is capacity").
 
-Callers are unchanged by that swap and must stay that way: they build a
-``BookingRequest``, optionally a ``Context``, and read ``RuleResult.allowed`` /
-``RuleResult.message``. Those three pydantic models are this module's public
-surface, deliberately distinct from the engine's frozen dataclasses of the same
-names — the API boundary validates untrusted input from the wire, the engine
-boundary enforces UTC and the history window. This module is where the two meet.
+Callers build a ``BookingRequest``, a ``SpaceRuleConfig`` describing the Space
+the booking is against, and (when the Space counts bookings) that user's prior
+bookings across the Space, then read ``RuleResult.allowed`` / ``.message``.
+Those three pydantic models are this module's public surface, deliberately
+distinct from the engine's frozen dataclasses of the same names — the API
+boundary validates untrusted input from the wire, the engine boundary
+enforces UTC and the history window. This module is where the two meet, and
+it stays **ORM-free**: it receives ``SpaceRuleConfig`` and history already
+extracted by the router, it does not query for either.
 
-Three translations happen here and nowhere else:
+Translations that happen here and nowhere else:
 
-* **Timezone.** The engine rejects a non-zero UTC offset outright; this boundary
-  accepts any aware datetime and converts. See ``_to_utc``.
+* **Timezone.** The engine rejects a non-zero UTC offset outright; this
+  boundary converts every datetime to UTC before it reaches the engine. See
+  ``_to_utc``. Availability hours are a second, distinct timezone translation:
+  a Space's ``opens_at``/``closes_at`` are *local* wall-clock hours, resolved
+  to a UTC window for the booking's own date via ``app.operating_hours``
+  before ``AvailabilityHoursRule`` — which only ever speaks UTC — is built.
+  See ``_local_date`` and ``_build_canon``.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
-* **History.** See ``_engine_context``.
-
-``message`` is shown verbatim to an end user, so it must stay friendly and
-human-readable — never an error code or an exception repr. The engine's copy is
-already written to that standard; this module does not reword it.
+* **Canon assembly.** ``_build_canon`` turns a ``SpaceRuleConfig`` into the
+  ordered tuple of rules the controller runs — see its docstring for the
+  order and why a null column omits a rule rather than passing a vacuous one.
 """
 
-from datetime import datetime, time, timedelta, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 from rules import (
     DEFAULT_CANON,
+    RULE_ERROR_MESSAGE,
     AvailabilityHoursRule,
+    BaseRule,
     BookingHorizonRule,
     CalendarContext,
     HistoryContext,
+    MaxBookingsPerMonthRule,
+    MaxBookingsPerWeekRule,
     MaxDurationRule,
+    NotInThePastRule,
     UserContext,
     Weekday,
     evaluate_request,
 )
+from rules import BookingRecord as EngineBookingRecord
 from rules import BookingRequest as EngineBookingRequest
 from rules import Context as EngineContext
+
+from app.operating_hours import MidnightWrapError, resolve_operating_hours
 
 ALLOWED_MESSAGE = "Looks good — this slot is available."
 
@@ -54,20 +72,21 @@ _DEFAULT_RESOURCE_ID = "default-resource"
 
 #: The week convention handed to ``CalendarContext``, which requires one.
 #:
-#: No rule in ``DEFAULT_CANON`` reads it — the rules that do (``MaxBookingsPerWeekRule``)
-#: are deliberately not in the default canon. It is stated rather than defaulted because
-#: the day a counting rule joins the canon, the value it counts against must already be a
-#: decision somebody made, not whatever the constructor happened to pick.
+#: Stated rather than defaulted because the value a weekly cap counts against
+#: must already be a decision somebody made, not whatever the constructor
+#: happened to pick — and it is now read for real, by ``MaxBookingsPerWeekRule``,
+#: whenever a Space's ``max_bookings_per_week`` is set.
 WEEK_STARTS_ON = Weekday.MONDAY
 
 
 def _canon_rule(rule_type: type):
-    """Return the single instance of ``rule_type`` in ``DEFAULT_CANON``.
+    """Return the single instance of ``rule_type`` in ``rules.DEFAULT_CANON``.
 
-    The constants below are read off the canon rather than restated as literals. The
-    canon owns these numbers; a second copy here would be one nobody updates, and this
-    module's values are mirrored by ``app/e2e/tests/03-sad-path.spec.ts`` and asserted by
-    the backend suite — so a drift would show up as a passing test against a wrong number.
+    ``DEFAULT_CANON`` is no longer what the API runs — see the module
+    docstring — but it remains the *reference* canon: the hand-written values
+    the generation loop is measured against, and the ones the constants below
+    mirror for callers (tests, the E2E copy-contract assertions) that want the
+    values in force absent any per-Space override.
     """
     for rule in DEFAULT_CANON:
         if isinstance(rule, rule_type):
@@ -75,6 +94,9 @@ def _canon_rule(rule_type: type):
     raise RuntimeError(f"DEFAULT_CANON no longer contains a {rule_type.__name__}")
 
 
+#: Reference defaults, mirrored by ``app/e2e/tests/03-sad-path.spec.ts`` and the
+#: backend suite. The canon actually run against a booking is assembled from
+#: that booking's own Space's configuration by ``_build_canon``, not from these.
 MAX_BOOKING_DURATION: timedelta = _canon_rule(MaxDurationRule).max_duration
 AVAILABILITY_OPEN: time = _canon_rule(AvailabilityHoursRule).opens_at
 AVAILABILITY_CLOSE: time = _canon_rule(AvailabilityHoursRule).closes_at
@@ -82,11 +104,13 @@ BOOKING_HORIZON_DAYS: int = _canon_rule(BookingHorizonRule).days
 
 
 class BookingRequest(BaseModel):
-    """The booking a user is asking for. Times are timezone-aware.
+    """A booking, at this boundary. Times are timezone-aware.
 
-    Any aware datetime is accepted, at any offset. The engine's own
-    ``BookingRequest`` accepts UTC only; ``_to_utc`` converts at the call, so a
-    client that sends ``+02:00`` is served rather than rejected.
+    Used both for the booking under evaluation and, shaped identically, for
+    each entry in a caller's history — a past booking and a requested one share
+    exactly these four fields. Any aware datetime is accepted, at any offset;
+    the engine's own types accept UTC only, and ``_to_utc`` converts at the
+    call, so a client that sends ``+02:00`` is served rather than rejected.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -109,31 +133,40 @@ class BookingRequest(BaseModel):
         return self.end_at - self.start_at
 
 
-class Context(BaseModel):
-    """Everything a rule may consult beyond the request itself.
+@dataclass(frozen=True)
+class SpaceRuleConfig:
+    """The rule-relevant slice of one Space's configuration.
 
-    ``now`` is the clock the time-relative rules judge against. It lives here
-    rather than being read inline with ``datetime.now()`` for two reasons: rules
-    stay pure functions of ``(request, context)``, and tests can pin it instead
-    of racing the wall clock. It defaults to the current UTC instant, so no
-    existing caller has to pass it.
+    Built by the router from ``context.space_context.space``, never queried by
+    this module — see the module docstring on why ``rules_stub`` stays
+    ORM-free. ``timezone`` is the Space's IANA zone name, needed to resolve
+    ``opens_at``/``closes_at`` (local wall-clock) to a UTC window per date.
 
-    ``history`` is the requesting user's prior bookings. **No rule in the canon
-    in force today reads it**, and it is not forwarded to the engine — see
-    ``_engine_context``. The field is kept because the parameter is part of this
-    module's published shape and callers already pass it.
+    Every field but ``timezone`` is nullable, mirroring the ``spaces`` columns:
+    null means the corresponding rule is not enforced for this Space
+    (``.claude/rules/identity-and-access.md``). ``NotInThePastRule`` has no
+    field here because it is never optional — you can never book the past,
+    Space configuration or not.
     """
 
-    model_config = ConfigDict(frozen=True)
+    timezone: str
+    opens_at: time | None = None
+    closes_at: time | None = None
+    max_duration_minutes: int | None = None
+    booking_horizon_days: int | None = None
+    max_bookings_per_week: int | None = None
+    max_bookings_per_month: int | None = None
 
-    history: tuple[BookingRequest, ...] = Field(default=())
-    now: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    @property
+    def counts_history(self) -> bool:
+        """Whether this Space's canon includes a rule that reads booking history.
 
-    @model_validator(mode="after")
-    def _check_now_is_aware(self) -> "Context":
-        if self.now.tzinfo is None:
-            raise ValueError("now must be timezone-aware")
-        return self
+        The router uses this to decide whether to run the Space-wide history
+        query at all: no counting rule configured means no query, preserving
+        the "no wasted round trip" property this adapter has always documented
+        for the case where nothing would read the result.
+        """
+        return self.max_bookings_per_week is not None or self.max_bookings_per_month is not None
 
 
 class RuleResult(BaseModel):
@@ -158,8 +191,29 @@ def _to_utc(value: datetime) -> datetime:
     being evaluated. Conversion is also the *correct* reading: availability hours
     are UTC clock times, so a booking must be judged on its UTC wall clock and not
     on whichever local one the client happened to serialise.
+
+    A naive ``value`` is rejected rather than converted: ``datetime.astimezone``
+    silently treats a naive input as the *system's* local time, which is exactly
+    the silently-assumed timezone this codebase's UTC-everywhere invariant
+    forbids (``CLAUDE.md``). ``BookingRequest`` already rejects a naive
+    ``start_at``/``end_at`` at construction; this is what gives ``evaluate``'s
+    own ``now`` argument the same guarantee, since it arrives as a bare
+    ``datetime`` with no model validating it first.
     """
+    if value.tzinfo is None:
+        raise ValueError(f"value must be timezone-aware; got naive datetime {value!r}")
     return value.astimezone(timezone.utc)
+
+
+def _local_date(instant: datetime, tz_name: str) -> date:
+    """The calendar date ``instant`` (any aware datetime) falls on in ``tz_name``.
+
+    Used to pick which date's operating hours to resolve — "conversion happens
+    at the boundary, per date" (``CLAUDE.md``) means the date has to be the
+    Space's own local one, not the UTC date the instant happens to also fall
+    on, which can differ by a day near midnight in either direction.
+    """
+    return instant.astimezone(ZoneInfo(tz_name)).date()
 
 
 def _engine_request(booking: BookingRequest) -> EngineBookingRequest:
@@ -171,51 +225,114 @@ def _engine_request(booking: BookingRequest) -> EngineBookingRequest:
     )
 
 
-def _engine_context(booking: BookingRequest, context: Context) -> EngineContext:
-    """Build the engine's ``Context``, with **empty history**.
+def _engine_record(booking: BookingRequest) -> EngineBookingRecord:
+    return EngineBookingRecord(
+        user_id=booking.user_id,
+        resource_id=booking.resource_id,
+        start_at=_to_utc(booking.start_at),
+        end_at=_to_utc(booking.end_at),
+    )
 
-    That emptiness is a decision, not an omission. ``DEFAULT_CANON`` holds the four
-    request-local rules only; the rules that count history — ``MaxBookingsPerWeekRule``,
-    ``MaxBookingsPerMonthRule`` — are deliberately excluded from it. So there is no
-    history to fetch and no query to run, and issuing one would cost a round trip per
-    booking attempt to build an argument nothing reads.
 
-    When a counting rule joins the canon, this is the function that changes: it must
-    load the user's bookings for this resource, capped to ``rules.history_window(now)``,
-    and pass them as ``BookingRecord``s. The engine re-asserts that cap, so a query that
-    reaches too far fails loudly here rather than silently widening what a rule may know.
+def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]:
+    """Assemble one Space's canon, in the order that arbitrates denial copy.
 
-    ``Context.history`` on this module's own model is dropped for the same reason. It is
-    populated by callers written against the old stub and is not silently *misused* — it
-    reaches no rule at all.
+    ``evaluate_request`` is fail-fast, so the first rule to deny decides the
+    single message a user sees when a request breaks several of the Space's
+    rules at once. The order mirrors ``rules.canon.default_canon``'s own
+    rationale, with the two counting rules appended after it:
+
+    1. ``NotInThePastRule`` — always present; you can never book the past.
+    2. ``BookingHorizonRule`` — a date rule, so it runs before any remedy the
+       user could apply *within* an otherwise-bookable date.
+    3. ``MaxDurationRule`` — a remedy (shorten it) for a date that is fine.
+    4. ``AvailabilityHoursRule`` — the other within-date remedy (pick another
+       time), so it follows duration for the same reason duration follows the
+       date rules.
+    5. ``MaxBookingsPerWeekRule`` / 6. ``MaxBookingsPerMonthRule`` — appended
+       last: unlike the four above, a denial here is not something changing
+       *this* request can fix at all — no shorter, earlier, or later booking
+       clears a frequency cap — so it is the least actionable reason to lead
+       with, and every rule that names a fixable problem gets first refusal.
+
+    Each rule is included only when its Space column is set; null means "not
+    enforced" (``.claude/rules/identity-and-access.md``). Availability needs
+    *both* ``opens_at`` and ``closes_at`` before it is built at all.
+
+    ``on_date`` is passed to ``resolve_operating_hours`` unchanged; it is the
+    booking's start date in the Space's own local zone (``_local_date``), not
+    the UTC date, so the correct day's DST offset resolves the window.
     """
-    return EngineContext(
+    canon: list[BaseRule] = [NotInThePastRule()]
+
+    if config.booking_horizon_days is not None:
+        canon.append(BookingHorizonRule(days=config.booking_horizon_days))
+
+    if config.max_duration_minutes is not None:
+        canon.append(MaxDurationRule(max_duration=timedelta(minutes=config.max_duration_minutes)))
+
+    if config.opens_at is not None and config.closes_at is not None:
+        utc_open, utc_close = resolve_operating_hours(
+            config.opens_at, config.closes_at, config.timezone, on_date
+        )
+        canon.append(AvailabilityHoursRule(opens_at=utc_open, closes_at=utc_close))
+
+    if config.max_bookings_per_week is not None:
+        canon.append(MaxBookingsPerWeekRule(max_bookings=config.max_bookings_per_week))
+
+    if config.max_bookings_per_month is not None:
+        canon.append(MaxBookingsPerMonthRule(max_bookings=config.max_bookings_per_month))
+
+    return tuple(canon)
+
+
+def evaluate(
+    booking: BookingRequest,
+    config: SpaceRuleConfig,
+    history: tuple[BookingRequest, ...] = (),
+    *,
+    now: datetime | None = None,
+) -> RuleResult:
+    """Run ``booking``'s Space's own canon against it and return the verdict.
+
+    ``history`` is this user's prior confirmed bookings **across every
+    Resource in the Space** — the router loads it, capped to
+    ``rules.history_window``, only when ``config.counts_history`` is true, and
+    passes it empty otherwise. Every entry counts; nothing here filters it
+    further (``.claude/rules/rule-engine.md``, "everything in it counts").
+
+    ``now`` defaults to the live UTC clock; tests pin it explicitly instead of
+    racing the wall clock.
+
+    A ``MidnightWrapError`` from resolving this Space's operating hours (a
+    zone far enough from UTC that an ordinary local window wraps past
+    midnight — see ``app.operating_hours``) is contained here as a denial
+    carrying the engine's own generic "couldn't check this" copy: fail closed
+    on a broken configuration rather than 500 the endpoint or silently let the
+    booking through unchecked.
+
+    ``ContextMismatchError`` is not caught. The request and the context are
+    both built here from ``booking`` and ``history``, so a mismatch cannot be
+    a client error — it would be a bug in this adapter, and the engine raises
+    precisely so that it reaches the error tracker instead of being served as
+    a polite refusal. Every other failure inside a rule is already contained
+    by the controller and arrives as an ordinary denial.
+    """
+    utc_now = _to_utc(now) if now is not None else datetime.now(timezone.utc)
+    engine_request = _engine_request(booking)
+
+    try:
+        canon = _build_canon(config, _local_date(engine_request.start_at, config.timezone))
+    except MidnightWrapError:
+        return RuleResult(allowed=False, message=RULE_ERROR_MESSAGE)
+
+    engine_context = EngineContext(
         user=UserContext(user_id=booking.user_id),
-        calendar=CalendarContext(week_starts_on=WEEK_STARTS_ON, now=_to_utc(context.now)),
-        history=HistoryContext(),
+        calendar=CalendarContext(week_starts_on=WEEK_STARTS_ON, now=utc_now),
+        history=HistoryContext(bookings=tuple(_engine_record(entry) for entry in history)),
     )
 
-
-def evaluate(booking: BookingRequest, context: Context | None = None) -> RuleResult:
-    """Run the canon against the request and return the first denial.
-
-    ``context`` defaults to an empty one reading the live clock, so a caller with
-    nothing to supply still gets a valid result.
-
-    ``ContextMismatchError`` is not caught. Both the request and the context are
-    built here from the same ``booking``, so a mismatch cannot be a client error —
-    it would be a bug in this adapter, and the engine raises precisely so that it
-    reaches the error tracker instead of being served as a polite refusal. Every
-    other failure inside a rule is already contained by the controller and arrives
-    as an ordinary denial.
-    """
-    context = context if context is not None else Context()
-
-    result = evaluate_request(
-        _engine_request(booking),
-        _engine_context(booking, context),
-        DEFAULT_CANON,
-    )
+    result = evaluate_request(engine_request, engine_context, canon)
 
     if result.passed:
         # The engine drops the message on the allow path (``passed=True`` implies

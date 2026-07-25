@@ -24,16 +24,21 @@ The mapping of outcomes to status codes:
 * **404 / 409 ``error: "not_found"`` / ``"already_cancelled"``** — the cancel
   targets a missing or already-cancelled booking.
 
-**The rule-engine call keeps its Stream 3 shape**: ``evaluate(request)`` read as
+**The rule-engine call's shape changes here, by design (task 4.13b).** It was
+``evaluate(request)`` against the module-level ``DEFAULT_CANON``; it is now
+``evaluate(request, config, history)`` against a canon assembled from the
+Space's own configuration — see ``_space_rule_config`` and
+``_load_space_history`` below. The verdict is still read the same way:
 ``verdict.allowed`` / ``verdict.message``.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
+from rules import history_window
 from sqlalchemy.orm import Session
 
 from app.db import (
@@ -46,9 +51,9 @@ from app.db.models import utcnow
 from app.dependencies import get_driver
 from app.identity import service
 from app.identity.authz import SpaceContext, require_space_role
-from app.identity.models import MembershipRole, Resource, User
+from app.identity.models import MembershipRole, Resource, Space, User
 from app.db.session import get_session
-from app.rules_stub import evaluate
+from app.rules_stub import BookingRequest, SpaceRuleConfig, evaluate
 from app.schemas import (
     BookingAlreadyCancelled,
     BookingAlreadyStarted,
@@ -119,6 +124,49 @@ def resolve_resource(
 ResourceCtx = Annotated[ResourceBookingContext, Depends(resolve_resource)]
 
 
+def _space_rule_config(space: Space) -> SpaceRuleConfig:
+    """Build this Space's rule configuration for the engine adapter.
+
+    A straight field-for-field copy off the ORM row — ``rules_stub`` stays
+    ORM-free (its own module docstring), so this is the one place a ``Space``
+    row and ``SpaceRuleConfig`` meet.
+    """
+    return SpaceRuleConfig(
+        timezone=space.timezone,
+        opens_at=space.opens_at,
+        closes_at=space.closes_at,
+        max_duration_minutes=space.max_duration_minutes,
+        booking_horizon_days=space.booking_horizon_days,
+        max_bookings_per_week=space.max_bookings_per_week,
+        max_bookings_per_month=space.max_bookings_per_month,
+    )
+
+
+def _load_space_history(
+    session: Session, space: Space, user_id: int, *, now: datetime
+) -> tuple[BookingRequest, ...]:
+    """This user's confirmed bookings across every Resource in ``space``, capped
+    to ``rules.history_window(now)``.
+
+    Only called when the Space's canon actually includes a counting rule — see
+    the call site — so a Space with neither cap set costs no query at all, the
+    same "no wasted round trip" property the adapter has always documented.
+    """
+    lower, upper = history_window(now)
+    bookings = service.list_user_bookings_in_space(
+        session, space, user_id, lower=lower, upper=upper
+    )
+    return tuple(
+        BookingRequest(
+            user_id=str(user_id),
+            resource_id=str(booking.resource_id),
+            start_at=booking.start_at,
+            end_at=booking.end_at,
+        )
+        for booking in bookings
+    )
+
+
 def _require_aware(name: str, value: datetime) -> datetime:
     if value.tzinfo is None:
         raise HTTPException(
@@ -167,7 +215,7 @@ def list_resource_bookings(
     },
 )
 def create_resource_booking(
-    payload: BookingCreate, context: ResourceCtx, driver: DriverDep
+    payload: BookingCreate, context: ResourceCtx, driver: DriverDep, session: SessionDep
 ) -> BookingRead | JSONResponse:
     """Book this Resource for the authenticated caller.
 
@@ -182,10 +230,25 @@ def create_resource_booking(
             content=BookingSpaceArchived(message=SPACE_ARCHIVED_MESSAGE).model_dump(),
         )
 
-    # The rule-engine call keeps its Stream 3 shape; only the ids passed change,
-    # from the unscoped defaults to the real caller and Resource.
+    space = context.space_context.space
+    config = _space_rule_config(space)
+
+    # One instant, shared by the history query and the engine's own clock, so a
+    # request straddling a window boundary cannot see one "now" build the
+    # history and a slightly later one judge it — which could otherwise reject
+    # a just-loaded booking as outside the engine's own history window.
+    now = datetime.now(timezone.utc)
+    history = (
+        _load_space_history(session, space, context.user.id, now=now)
+        if config.counts_history
+        else ()
+    )
+
     verdict = evaluate(
-        payload.to_rule_request(user_id=context.user.id, resource_id=context.resource_id)
+        payload.to_rule_request(user_id=context.user.id, resource_id=context.resource_id),
+        config,
+        history,
+        now=now,
     )
     if not verdict.allowed:
         return JSONResponse(
