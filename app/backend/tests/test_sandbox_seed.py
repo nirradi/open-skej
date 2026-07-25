@@ -33,11 +33,15 @@ from app.sandbox_seed import (
     OWNER_AUTH0_SUB,
     OWNER_EMAIL,
     PENDING_INVITEE_EMAIL,
+    SPACE_A_BOOKING_HORIZON_DAYS,
     SPACE_A_CLOSES_AT,
+    SPACE_A_MAX_DURATION_MINUTES,
     SPACE_A_NAME,
     SPACE_A_OPENS_AT,
     SPACE_A_SLOT_MINUTES,
     SPACE_A_TIMEZONE,
+    SPACE_B_MAX_BOOKINGS_PER_WEEK,
+    SPACE_B_MAX_DURATION_MINUTES,
     SPACE_B_NAME,
     SPACE_B_TIMEZONE,
     STRANGER_AUTH0_SUB,
@@ -87,12 +91,18 @@ def test_seed_produces_every_interesting_state(session):
     assert member.email == MEMBER_EMAIL
     assert stranger.email == STRANGER_EMAIL
 
-    # Space A: non-UTC, and carries all three roles.
+    # Space A: non-UTC, and carries all three roles. No availability window
+    # and no frequency cap — its canon is kept to exactly what the E2E suite
+    # exercises (see the module docstring).
     space_a = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
     assert space_a.timezone == SPACE_A_TIMEZONE
     assert space_a.opens_at == SPACE_A_OPENS_AT
     assert space_a.closes_at == SPACE_A_CLOSES_AT
     assert space_a.slot_minutes == SPACE_A_SLOT_MINUTES
+    assert space_a.max_duration_minutes == SPACE_A_MAX_DURATION_MINUTES
+    assert space_a.booking_horizon_days == SPACE_A_BOOKING_HORIZON_DAYS
+    assert space_a.max_bookings_per_week is None
+    assert space_a.max_bookings_per_month is None
     assert space_a.archived_at is None
 
     roles_in_a = dict(
@@ -123,6 +133,7 @@ def test_seed_produces_every_interesting_state(session):
     # member nor the stranger belongs to — the cross-tenant isolation fixture.
     space_b = session.execute(select(Space).where(Space.name == SPACE_B_NAME)).scalar_one()
     assert space_b.timezone == SPACE_B_TIMEZONE
+    assert space_b.timezone != space_a.timezone
     # Configured differently from Space A — the two Spaces, not their
     # Resources, are what differ now that configuration lives on the Space.
     assert (space_b.opens_at, space_b.closes_at, space_b.slot_minutes) != (
@@ -130,6 +141,12 @@ def test_seed_produces_every_interesting_state(session):
         space_a.closes_at,
         space_a.slot_minutes,
     )
+    # Space B is where the new per-Space rule capabilities are observable:
+    # real availability hours to resolve per date, and a weekly cap.
+    assert space_b.opens_at is not None
+    assert space_b.closes_at is not None
+    assert space_b.max_duration_minutes == SPACE_B_MAX_DURATION_MINUTES
+    assert space_b.max_bookings_per_week == SPACE_B_MAX_BOOKINGS_PER_WEEK
     member_ids_in_b = set(
         session.execute(
             select(SpaceMembership.user_id).where(SpaceMembership.space_id == space_b.id)
