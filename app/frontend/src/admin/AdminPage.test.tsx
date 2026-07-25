@@ -27,13 +27,14 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { listAccessRequests, listInvitations, listMembers, listSpaces } from '../api'
+import { listAccessRequests, listInvitations, listMembers, listResources, listSpaces } from '../api'
 import { AdminPage } from './AdminPage'
-import { failed, makeMember, makeSpace, ok } from './fixtures'
+import { failed, makeMember, makeResource, makeSpace, ok } from './fixtures'
 
 vi.mock('../api', () => ({
   listSpaces: vi.fn(),
   createSpace: vi.fn(),
+  updateSpace: vi.fn(),
   listMembers: vi.fn(),
   updateMemberRole: vi.fn(),
   removeMember: vi.fn(),
@@ -44,6 +45,8 @@ vi.mock('../api', () => ({
   createInvitation: vi.fn(),
   revokeInvitation: vi.fn(),
   archiveSpace: vi.fn(),
+  listResources: vi.fn(),
+  updateResource: vi.fn(),
 }))
 
 /**
@@ -61,6 +64,7 @@ beforeEach(() => {
   vi.mocked(listMembers).mockResolvedValue(ok([makeMember()]))
   vi.mocked(listAccessRequests).mockResolvedValue(ok([]))
   vi.mocked(listInvitations).mockResolvedValue(ok([]))
+  vi.mocked(listResources).mockResolvedValue(ok([makeResource()]))
 })
 
 afterEach(() => {
@@ -122,6 +126,7 @@ describe('AdminPage', () => {
     expect(await screen.findByTestId('requests-panel')).toBeTruthy()
     expect(await screen.findByTestId('members-panel')).toBeTruthy()
     expect(await screen.findByTestId('invitations-panel')).toBeTruthy()
+    expect(await screen.findByTestId('resource-config-panel')).toBeTruthy()
     expect(await screen.findByTestId('archive-panel')).toBeTruthy()
   })
 
@@ -137,6 +142,7 @@ describe('AdminPage', () => {
     expect(screen.queryByTestId('members-panel')).toBeNull()
     expect(screen.queryByTestId('requests-panel')).toBeNull()
     expect(screen.queryByTestId('invitations-panel')).toBeNull()
+    expect(screen.queryByTestId('resource-config-panel')).toBeNull()
     expect(screen.queryByTestId('archive-panel')).toBeNull()
   })
 
@@ -151,6 +157,7 @@ describe('AdminPage', () => {
     expect(vi.mocked(listMembers)).not.toHaveBeenCalled()
     expect(vi.mocked(listAccessRequests)).not.toHaveBeenCalled()
     expect(vi.mocked(listInvitations)).not.toHaveBeenCalled()
+    expect(vi.mocked(listResources)).not.toHaveBeenCalled()
   })
 
   it('does not offer archiving to an admin who is not the owner', async () => {
