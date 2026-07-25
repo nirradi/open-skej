@@ -28,13 +28,13 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 
-import { previewSpace, requestAccess } from '../api'
-import type { AccessRequest, ApiOk, PreviewStatus, SpacePreview } from '../api'
+import { listResources, previewSpace, requestAccess } from '../api'
+import type { AccessRequest, ApiOk, PreviewStatus, Resource, SpacePreview } from '../api'
 import { AuthModeContext, SessionContext } from '../auth'
 import type { AuthMode, Session, SessionStatus } from '../auth'
 import { SpacePage } from './SpacePage'
 
-vi.mock('../api', () => ({ previewSpace: vi.fn(), requestAccess: vi.fn() }))
+vi.mock('../api', () => ({ previewSpace: vi.fn(), requestAccess: vi.fn(), listResources: vi.fn() }))
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 
@@ -74,20 +74,24 @@ const CREATED_REQUEST: AccessRequest = {
   decided_by_user_id: null,
 }
 
-/**
- * Renders the route at `/s/{PUBLIC_ID}`.
- *
- * `/` is mounted too, and with a marker rather than the real calendar, so that
- * the member redirect can be asserted as *arriving somewhere* instead of merely
- * as the preview disappearing.
- */
+const RESOURCE: Resource = {
+  id: 7,
+  name: 'Court 1',
+  opens_at: null,
+  closes_at: null,
+  slot_minutes: null,
+  created_at: '2026-07-01T00:00:00Z',
+  archived_at: null,
+}
+
+/** Renders the route at `/s/{PUBLIC_ID}`. */
 function renderRoute(mode: AuthMode = MODE_CONFIGURED, status: SessionStatus = 'authenticated') {
   return render(
     <AuthModeContext value={mode}>
       <SessionContext value={sessionState(status)}>
         <MemoryRouter initialEntries={[`/s/${PUBLIC_ID}`]}>
           <Routes>
-            <Route path="/" element={<p data-testid="calendar">Calendar</p>} />
+            <Route path="/" element={<p data-testid="space-list">Your Spaces</p>} />
             <Route path="/s/:publicId" element={<SpacePage />} />
           </Routes>
         </MemoryRouter>
@@ -100,12 +104,13 @@ function renderRoute(mode: AuthMode = MODE_CONFIGURED, status: SessionStatus = '
 async function renderWithStatus(status: PreviewStatus) {
   vi.mocked(previewSpace).mockResolvedValue(ok(makePreview({ status })))
   renderRoute()
-  return screen.findByTestId(status === 'member' ? 'calendar' : 'space-preview')
+  return screen.findByTestId(status === 'member' ? 'resource-list' : 'space-preview')
 }
 
 beforeEach(() => {
   vi.mocked(previewSpace).mockResolvedValue(ok(makePreview()))
   vi.mocked(requestAccess).mockResolvedValue(ok(CREATED_REQUEST))
+  vi.mocked(listResources).mockResolvedValue(ok([RESOURCE]))
 })
 
 afterEach(() => {
@@ -197,11 +202,45 @@ describe('the four statuses', () => {
     expect(screen.getByTestId('request-access').textContent).toContain('Ask again')
   })
 
-  it('redirects a member into the Space instead of showing them the door', async () => {
+  it('lands a member in the Space instead of showing them the door', async () => {
     await renderWithStatus('member')
 
-    expect(screen.getByTestId('calendar')).toBeTruthy()
+    // Arrives at the Space member view — never the generic Space list `/`
+    // redirects to for every other post-login destination.
+    expect(screen.getByTestId('space-name').textContent).toBe('Tennis Court')
     expect(screen.queryByTestId('space-preview')).toBeNull()
+    expect(screen.queryByTestId('space-list')).toBeNull()
+  })
+
+  it('offers a Resource picker onto the Space', async () => {
+    await renderWithStatus('member')
+
+    const link = screen.getByTestId(`resource-list-item-${RESOURCE.id}`)
+    expect(link.textContent).toBe('Court 1')
+    expect(link.getAttribute('href')).toBe(`/s/${PUBLIC_ID}/resources/${RESOURCE.id}`)
+  })
+
+  it('renders a sane empty state for a Space with no Resources', async () => {
+    // Representable in the schema but never produced by the product — creating
+    // a Space auto-creates its first Resource — so this is a defensive
+    // rendering, not a reachable one.
+    vi.mocked(listResources).mockResolvedValue(ok([]))
+    vi.mocked(previewSpace).mockResolvedValue(ok(makePreview({ status: 'member' })))
+    renderRoute()
+
+    expect(await screen.findByTestId('resource-list-empty')).toBeTruthy()
+  })
+
+  it('reports a failed Resource fetch rather than an empty picker', async () => {
+    vi.mocked(listResources).mockResolvedValue({
+      outcome: 'failed',
+      message: 'The network went away.',
+    })
+    vi.mocked(previewSpace).mockResolvedValue(ok(makePreview({ status: 'member' })))
+    renderRoute()
+
+    const error = await screen.findByTestId('resource-list-error')
+    expect(error.textContent).toContain('The network went away.')
   })
 
   it('renders a Space with no description without an empty paragraph', async () => {

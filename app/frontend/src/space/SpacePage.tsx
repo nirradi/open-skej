@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
-import { Navigate, useParams } from 'react-router-dom'
+import { Link, useParams } from 'react-router-dom'
 
-import { previewSpace, requestAccess, type SpacePreview } from '../api'
+import { listResources, previewSpace, requestAccess, type Resource, type SpacePreview } from '../api'
 import { LoginControls, MissingConfigNotice, useAuthMode, useSession } from '../auth'
 import { messageFor } from '../ui/messages'
 
@@ -216,13 +216,12 @@ function SpacePreviewCard({ publicId }: { publicId: string }) {
   const { preview } = load
 
   // A member is already inside; the preview is the outside of the door and has
-  // nothing to tell them. `/` is the Space list rather than a generic landing
-  // page, so that is where "into the Space" leads for now — a member landing
-  // *in* this specific Space, rather than a list containing it, is the next
-  // task's refinement. `replace` so the back button returns to wherever the
-  // link was opened from rather than bouncing through this redirect again.
+  // nothing to tell them. They land in *this* Space — its name, description,
+  // and a Resource picker — rather than being sent to the generic Space list,
+  // which would cost them a second click back to the very link they just
+  // opened.
   if (preview.status === 'member') {
-    return <Navigate to="/" replace />
+    return <SpaceMemberView publicId={publicId} preview={preview} />
   }
 
   return (
@@ -245,11 +244,100 @@ function SpacePreviewCard({ publicId }: { publicId: string }) {
   )
 }
 
+type ResourceLoad =
+  | { kind: 'ok'; resources: Resource[] }
+  | { kind: 'error'; message: string }
+  | null
+
+/**
+ * What a member sees at `/s/{public_id}`: the Space itself, and a picker onto
+ * one of its Resources — the calendars a member may book against.
+ *
+ * A Space with no Resource is representable in the schema but never produced
+ * by the product (creating a Space auto-creates one), so the empty state
+ * below is a defensive rendering, not a reachable one.
+ */
+function SpaceMemberView({ publicId, preview }: { publicId: string; preview: SpacePreview }) {
+  const [load, setLoad] = useState<ResourceLoad>(null)
+
+  useEffect(() => {
+    let cancelled = false
+
+    void listResources(publicId).then((result) => {
+      if (cancelled) return
+
+      if (result.outcome === 'ok') {
+        setLoad({ kind: 'ok', resources: result.data })
+      } else {
+        setLoad({ kind: 'error', message: messageFor(result) })
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [publicId])
+
+  return (
+    <main className={PAGE_CLASS}>
+      <div className="w-full max-w-md">
+        <h1 className="text-2xl font-semibold text-slate-900" data-testid="space-name">
+          {preview.name}
+        </h1>
+        {preview.description ? (
+          <p className="mt-2 text-sm text-slate-600" data-testid="space-description">
+            {preview.description}
+          </p>
+        ) : null}
+
+        <div className="mt-6">
+          {load === null && (
+            <p className="text-sm text-slate-600" data-testid="resource-list-loading" role="status">
+              Loading its Resources…
+            </p>
+          )}
+
+          {load?.kind === 'error' && (
+            <p className="text-sm text-red-700" data-testid="resource-list-error" role="alert">
+              {load.message}
+            </p>
+          )}
+
+          {load?.kind === 'ok' && load.resources.length === 0 && (
+            <p className="text-sm text-slate-600" data-testid="resource-list-empty">
+              This Space has no Resources yet. Ask an admin to add one.
+            </p>
+          )}
+
+          {load?.kind === 'ok' && load.resources.length > 0 && (
+            <ul className="space-y-2" data-testid="resource-list">
+              {load.resources.map((resource) => (
+                <li
+                  key={resource.id}
+                  className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm"
+                >
+                  <Link
+                    to={`/s/${publicId}/resources/${resource.id}`}
+                    className="font-medium text-slate-900 hover:underline"
+                    data-testid={`resource-list-item-${resource.id}`}
+                  >
+                    {resource.name}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </main>
+  )
+}
+
 /**
  * The three states a non-member can be in, and what each one offers.
  *
- * `member` never reaches here — it redirects a level up — so this switch covers
- * the states in which the user is still outside.
+ * `member` never reaches here — `SpaceMemberView` takes over a level up — so
+ * this switch covers the states in which the user is still outside.
  */
 function StatusSection({
   publicId,

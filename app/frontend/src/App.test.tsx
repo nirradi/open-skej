@@ -26,6 +26,9 @@ import { bookingTestId, slotTestId, startOfWeek } from './calendar'
 
 const NOW = new Date(2026, 6, 20, 9, 0)
 
+const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
+const RESOURCE_ID = 3
+
 const AUTHENTICATED_SESSION: Session = {
   status: 'authenticated',
   login: () => {},
@@ -33,7 +36,7 @@ const AUTHENTICATED_SESSION: Session = {
 }
 
 /**
- * Renders the app at `/calendar`, signed in.
+ * Renders the app at the per-Resource calendar route, signed in.
  *
  * `App` no longer renders the calendar at `/` unauthenticated — this file
  * predates that change and its subject is the grid and the booking panel
@@ -42,9 +45,38 @@ const AUTHENTICATED_SESSION: Session = {
  * rather than a prop: `App` mounts its own `BrowserRouter`, which reads
  * `window.location` at creation, so this is what puts it at the right route
  * before that happens.
+ *
+ * `getSpace` / `listResources` back `ResourceCalendarPage`'s header context
+ * only — display, not access control — so they are stubbed to resolve
+ * quickly rather than left to reach a real (and here, absent) server.
  */
 function renderApp() {
-  window.history.pushState({}, '', '/calendar')
+  window.history.pushState({}, '', `/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+  vi.spyOn(api, 'getSpace').mockResolvedValue({
+    outcome: 'ok',
+    data: {
+      public_id: PUBLIC_ID,
+      name: 'Tennis Court',
+      description: null,
+      created_at: '2026-07-01T00:00:00Z',
+      archived_at: null,
+      my_role: 'member',
+    },
+  })
+  vi.spyOn(api, 'listResources').mockResolvedValue({
+    outcome: 'ok',
+    data: [
+      {
+        id: RESOURCE_ID,
+        name: 'Court 1',
+        opens_at: null,
+        closes_at: null,
+        slot_minutes: null,
+        created_at: '2026-07-01T00:00:00Z',
+        archived_at: null,
+      },
+    ],
+  })
   return render(
     <AuthModeContext value={{ kind: 'sandbox' }}>
       <SessionContext value={AUTHENTICATED_SESSION}>
@@ -101,10 +133,10 @@ describe('booking end to end through the app shell', () => {
   it('keeps the success message visible after the selection is cleared', async () => {
     // The regression this file exists for.
     const created = bookingAt(2, 10, 10.5)
-    vi.spyOn(api, 'listBookings')
+    vi.spyOn(api, 'listResourceBookings')
       .mockResolvedValueOnce({ outcome: 'ok', data: [] })
       .mockResolvedValue({ outcome: 'ok', data: [created] })
-    vi.spyOn(api, 'createBooking').mockResolvedValue({ outcome: 'ok', data: created })
+    vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
     renderApp()
     await screen.findByTestId('calendar')
@@ -123,10 +155,10 @@ describe('booking end to end through the app shell', () => {
 
   it('draws the new booking on the grid without a page reload', async () => {
     const created = bookingAt(2, 10, 11)
-    vi.spyOn(api, 'listBookings')
+    vi.spyOn(api, 'listResourceBookings')
       .mockResolvedValueOnce({ outcome: 'ok', data: [] })
       .mockResolvedValue({ outcome: 'ok', data: [created] })
-    vi.spyOn(api, 'createBooking').mockResolvedValue({ outcome: 'ok', data: created })
+    vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
     renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
@@ -135,14 +167,14 @@ describe('booking end to end through the app shell', () => {
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     // The refetch is what puts it on screen; nothing reloads the document.
-    await waitFor(() => expect(api.listBookings).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(api.listResourceBookings).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.getByTestId(bookingTestId(created.id))).toBeTruthy())
   })
 
   it('keeps a rule denial visible with the selection intact so it can be adjusted', async () => {
     const message = 'Bookings can be at most 2 hours long, and this one is 3 hours.'
-    vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [] })
-    vi.spyOn(api, 'createBooking').mockResolvedValue({ outcome: 'rule_denied', message })
+    vi.spyOn(api, 'listResourceBookings').mockResolvedValue({ outcome: 'ok', data: [] })
+    vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'rule_denied', message })
 
     renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
@@ -158,7 +190,7 @@ describe('booking end to end through the app shell', () => {
   })
 
   it('does not open the cancel panel for a range selection', async () => {
-    vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [] })
+    vi.spyOn(api, 'listResourceBookings').mockResolvedValue({ outcome: 'ok', data: [] })
     renderApp()
     await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
 
@@ -170,10 +202,10 @@ describe('booking end to end through the app shell', () => {
 
   it('refetches on an overlap so the slot that beat the user becomes visible', async () => {
     const theirs = bookingAt(2, 10, 11)
-    vi.spyOn(api, 'listBookings')
+    vi.spyOn(api, 'listResourceBookings')
       .mockResolvedValueOnce({ outcome: 'ok', data: [] })
       .mockResolvedValue({ outcome: 'ok', data: [theirs] })
-    vi.spyOn(api, 'createBooking').mockResolvedValue({
+    vi.spyOn(api, 'createResourceBooking').mockResolvedValue({
       outcome: 'overlap',
       message: 'That time has just been taken by another booking.',
     })
@@ -185,7 +217,7 @@ describe('booking end to end through the app shell', () => {
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     await screen.findByTestId('booking-conflict')
-    await waitFor(() => expect(api.listBookings).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(api.listResourceBookings).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(screen.getByTestId(bookingTestId(theirs.id))).toBeTruthy())
   })
 })
@@ -197,7 +229,7 @@ describe('cancelling end to end through the app shell', () => {
    */
   function withCancellableBooking(): Booking {
     const existing = bookingAt(2, 10, 11)
-    vi.spyOn(api, 'listBookings')
+    vi.spyOn(api, 'listResourceBookings')
       .mockResolvedValueOnce({ outcome: 'ok', data: [existing] })
       .mockResolvedValue({ outcome: 'ok', data: [] })
     return existing
@@ -214,7 +246,7 @@ describe('cancelling end to end through the app shell', () => {
     // The claim task 1.8 is actually making, and the one no component test can
     // reach: the block goes away *and* the slots it held become selectable.
     const existing = withCancellableBooking()
-    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+    vi.spyOn(api, 'cancelResourceBooking').mockResolvedValue({
       outcome: 'ok',
       data: { ...existing, status: 'cancelled', cancelled_at: NOW.toISOString() },
     })
@@ -240,7 +272,7 @@ describe('cancelling end to end through the app shell', () => {
     // grid's selected booking, which unmounts the summary; if the panel treated
     // that as "the user moved on", the cancellation would land silently.
     const existing = withCancellableBooking()
-    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+    vi.spyOn(api, 'cancelResourceBooking').mockResolvedValue({
       outcome: 'ok',
       data: { ...existing, status: 'cancelled', cancelled_at: NOW.toISOString() },
     })
@@ -260,7 +292,7 @@ describe('cancelling end to end through the app shell', () => {
     // has already done the work; the 409 it answers with shares a status code
     // with `overlap` and means the opposite thing.
     const existing = withCancellableBooking()
-    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+    vi.spyOn(api, 'cancelResourceBooking').mockResolvedValue({
       outcome: 'already_cancelled',
       message: 'That booking has already been cancelled.',
     })
@@ -279,7 +311,7 @@ describe('cancelling end to end through the app shell', () => {
 
   it('clears a stale block on not_found without alarming the user', async () => {
     const existing = withCancellableBooking()
-    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+    vi.spyOn(api, 'cancelResourceBooking').mockResolvedValue({
       outcome: 'not_found',
       message: 'No booking with that id.',
     })
@@ -295,7 +327,7 @@ describe('cancelling end to end through the app shell', () => {
 
   it('leaves the booking on the grid when the cancel fails', async () => {
     const existing = withCancellableBooking()
-    vi.spyOn(api, 'cancelBooking').mockResolvedValue({
+    vi.spyOn(api, 'cancelResourceBooking').mockResolvedValue({
       outcome: 'failed',
       message: "We couldn't reach the server.",
     })
@@ -309,14 +341,14 @@ describe('cancelling end to end through the app shell', () => {
     // mistake to the one `already_cancelled` invites.
     expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy()
     expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(true)
-    expect(api.listBookings).toHaveBeenCalledTimes(1)
+    expect(api.listResourceBookings).toHaveBeenCalledTimes(1)
   })
 
   it('still allows dragging a free range after a booking has been clicked', async () => {
     // Regression guard at the shell level: making blocks clickable must not
     // have cost the grid its drag-to-select.
     const existing = bookingAt(2, 10, 11)
-    vi.spyOn(api, 'listBookings').mockResolvedValue({ outcome: 'ok', data: [existing] })
+    vi.spyOn(api, 'listResourceBookings').mockResolvedValue({ outcome: 'ok', data: [existing] })
 
     renderApp()
     fireEvent.click(await screen.findByTestId(bookingTestId(existing.id)))

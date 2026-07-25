@@ -16,19 +16,21 @@
  * cancelled by the first test's fixture.
  *
  * After migrating it seeds the **default booking target**: `bookings.resource_id`
- * and `bookings.user_id` are now foreign keys, so the still-unauthenticated
- * `POST /bookings` needs a real default Resource and user to point at. The seed
- * is idempotent, so re-running against a database from a previous run is a no-op
- * rather than an error.
+ * and `bookings.user_id` are foreign keys, and `app.db.bootstrap` plants the
+ * explicit-id-1 Resource and user row they once pointed at. Task 4.11 deleted
+ * the unscoped `POST /bookings` that used to book against them, so nothing
+ * writes through this row any more, but replanting it stays harmless and the
+ * seed is idempotent, so re-running against a database from a previous run is
+ * a no-op rather than an error.
  *
  * It then plants the **deterministic sandbox seed** (`app.sandbox_seed`, task
  * 4.8): the owner, admin, member and stranger identities `fixtures.ts` signs
  * in as, plus the Spaces, Resources, and pending access-request/invitation
- * rows the suite (task 4.9 onward) authenticates against instead of relying
- * on the unauthenticated calendar alone. Like the booking-default seed, it is
- * idempotent — it resets its own rows before replanting them, so re-running
- * against a database from a previous run yields the same fixtures rather
- * than duplicates.
+ * rows the suite (task 4.9 onward) authenticates against — the resource-scoped
+ * routes this suite drives since task 4.11, not the deleted unscoped ones.
+ * Like the booking-default seed, it is idempotent — it resets its own rows
+ * before replanting them, so re-running against a database from a previous
+ * run yields the same fixtures rather than duplicates.
  *
  * The interpreter is resolved the same way `playwright.config.ts` resolves it:
  * the checked-out venv locally, or the `setup-python` interpreter on PATH in CI.

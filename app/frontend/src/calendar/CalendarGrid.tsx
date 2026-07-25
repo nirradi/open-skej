@@ -41,7 +41,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
-import { listBookings } from '../api'
+import { listResourceBookings } from '../api'
 import type { Booking } from '../api'
 import {
   calendarConfig,
@@ -91,6 +91,10 @@ export interface SelectedInterval {
 }
 
 export interface CalendarGridProps {
+  /** The Space this calendar's Resource belongs to. */
+  publicId: string
+  /** The Resource whose bookings this grid renders. */
+  resourceId: number
   /**
    * The current time. Injectable so tests can sit at a fixed point relative to
    * the horizon; production passes nothing and gets a clock read once on mount.
@@ -152,6 +156,8 @@ const weekLabelFormat = new Intl.DateTimeFormat(undefined, {
 })
 
 export function CalendarGrid({
+  publicId,
+  resourceId,
   now: nowProp,
   config,
   onSelectionChange,
@@ -195,7 +201,7 @@ export function CalendarGrid({
     const from = weekStart
     const to = addDays(weekStart, DAYS_PER_WEEK)
 
-    void listBookings(from, to).then((result) => {
+    void listResourceBookings(publicId, resourceId, from, to).then((result) => {
       // A response for a week the user has already navigated away from would
       // otherwise overwrite the newer one if it happened to land second.
       if (cancelled) return
@@ -204,12 +210,22 @@ export function CalendarGrid({
           setSettled({ status: 'ok', key: requestKey, bookings: result.data })
           break
         case 'failed':
+        case 'unauthenticated':
+        case 'forbidden':
+        case 'not_found':
+          // Every one of these leaves the grid without a trustworthy answer
+          // about what is already booked, so all four are the same "error"
+          // state to the grid — fail-closed, exactly as a network failure is.
           setSettled({ status: 'error', key: requestKey, message: result.message })
           break
         case 'invalid_request':
           // A client bug, not something the user did — `detail` is diagnostic
           // text, so it is logged rather than shown as friendly copy.
-          console.error('listBookings rejected the calendar window', result.detail, result.raw)
+          console.error(
+            'listResourceBookings rejected the calendar window',
+            result.detail,
+            result.raw,
+          )
           setSettled({ status: 'error', key: requestKey, message: LOAD_ERROR_FALLBACK })
           break
       }
@@ -218,7 +234,7 @@ export function CalendarGrid({
     return () => {
       cancelled = true
     }
-  }, [requestKey, weekStart])
+  }, [publicId, requestKey, resourceId, weekStart])
 
   /**
    * The bookings shown, per day.

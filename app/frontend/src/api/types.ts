@@ -233,17 +233,6 @@ export interface ApiFailure {
   cause?: unknown
 }
 
-/** `GET /bookings` — nothing user-facing can go wrong, only client or infra bugs. */
-export type ListBookingsResult = ApiOk<Booking[]> | ApiInvalidRequest | ApiFailure
-
-/** `POST /bookings` — both flavours of "no" are distinct variants. */
-export type CreateBookingResult =
-  ApiOk<Booking> | ApiRuleDenied | ApiOverlap | ApiInvalidRequest | ApiFailure
-
-/** `DELETE /bookings/{id}` — note `already_cancelled` is separate from `not_found`. */
-export type CancelBookingResult =
-  ApiOk<Booking> | ApiNotFound | ApiAlreadyCancelled | ApiInvalidRequest | ApiFailure
-
 /**
  * The outcomes any **authenticated** endpoint can produce.
  *
@@ -251,21 +240,12 @@ export type CancelBookingResult =
  * outcomes are reachable on all of them and there is nothing to gain from
  * hand-writing the same five-member union per endpoint. An endpoint that adds a
  * genuine domain outcome (a discriminated `error`) declares its own union
- * instead, the way `CreateBookingResult` does — this alias is the floor, not a
- * ceiling.
+ * instead, the way `CreateResourceBookingResult` does — this alias is the
+ * floor, not a ceiling.
  *
- * The *unscoped* booking endpoints (`listBookings`, `createBooking`,
- * `cancelBooking`) deliberately do **not** use it and never will: they are the
- * single-user Stream 1 contract, unauthenticated, and task 4.11 deletes them.
- * Folding `unauthenticated` into `ListBookingsResult` would add a branch the
- * server cannot produce and a component (`BookingPanel`, `CancelPanel`) would
- * have to be edited to ignore.
- *
- * The *resource-scoped* routes below (`listResourceBookings` and friends) are
- * the ones Stream 4 actually authenticates, and this is the floor they build
- * on — `ListResourceBookingsResult` is exactly this alias, and
+ * `ListResourceBookingsResult` below is exactly this alias, and
  * `CreateResourceBookingResult` / `CancelResourceBookingResult` widen it with
- * their own domain discriminators the same way `CreateBookingResult` does.
+ * their own domain discriminators.
  */
 export type AuthenticatedResult<T> =
   ApiOk<T> | ApiUnauthenticated | ApiForbidden | ApiNotFound | ApiInvalidRequest | ApiFailure
@@ -435,11 +415,10 @@ export type GetCurrentUserResult = AuthenticatedResult<CurrentUser>
 /**
  * The resource-scoped booking routes — `/spaces/{public_id}/resources/{id}/bookings`.
  *
- * Mirrors `app/backend/app/routers/resource_bookings.py`. Where the unscoped
- * `ListBookingsResult` / `CreateBookingResult` / `CancelBookingResult` above are
- * frozen at the single-user Stream 1 contract, these are authenticated behind
- * `require_space_role` and so carry the full access floor — `unauthenticated`,
- * `forbidden`, `not_found` — on top of each route's own domain outcomes.
+ * Mirrors `app/backend/app/routers/resource_bookings.py`. Authenticated behind
+ * `require_space_role`, so these carry the full access floor —
+ * `unauthenticated`, `forbidden`, `not_found` — on top of each route's own
+ * domain outcomes.
  *
  * `not_found` here is doubly collapsed, the same way `ApiNotFound` already
  * documents for the Space API: it is the *Resource's* parent Space not being
@@ -473,8 +452,8 @@ export type CreateResourceBookingResult =
 /**
  * `DELETE .../bookings/{id}` — the access floor plus the three ways a cancel is
  * refused. `already_cancelled` is benign (the desired end state already
- * holds); `already_started` has no remedy at all, unlike the unscoped routes,
- * which have no such check.
+ * holds); `already_started` has no remedy at all — the interval is under way
+ * and cannot be released.
  */
 export type CancelResourceBookingResult =
   | ApiOk<Booking>

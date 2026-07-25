@@ -10,8 +10,8 @@
  *
  * ## Why each outcome maps where it does
  *
- * `cancelBooking` returns five outcomes, and — unlike booking — **three of them
- * mean the user got what they asked for**:
+ * `cancelResourceBooking` returns several outcomes, and — unlike booking —
+ * most of them mean the user got what they asked for:
  *
  * - **`ok`** — the cancel landed. Refresh: the refetch is what frees the slot
  *   for rebooking without a page reload.
@@ -23,9 +23,19 @@
  *   as a conflict would invent a problem out of the desired outcome. The copy is
  *   deliberately the same as `ok`'s: the booking is cancelled either way, and
  *   the distinction is ours, not theirs.
- * - **`not_found`** — the booking is gone. Also not a failure worth alarming
- *   anyone about: the block on screen was stale, so this refreshes to make it
- *   disappear and says so plainly, in a neutral notice rather than an error.
+ * - **`not_found`** — the booking is gone (or the Space/Resource is not the
+ *   caller's — the two are indistinguishable on purpose, see
+ *   `ListResourceBookingsResult`'s docstring). Also not a failure worth
+ *   alarming anyone about: the block on screen was stale, so this refreshes to
+ *   make it disappear and says so plainly, in a neutral notice rather than an
+ *   error.
+ * - **`already_started`** — the interval is already under way, so there is no
+ *   remedy at all: retrying will refuse the same way every time. Rendered as a
+ *   plain, terminal statement, and the confirm control is hidden rather than
+ *   inviting a retry — unlike `failed`, where trying again might work.
+ * - **`unauthenticated` / `forbidden`** — the access floor every authenticated
+ *   route carries. Neither is a rule about *this* cancellation, so both render
+ *   as the same generic failure `failed` does.
  * - **`invalid_request`** — our bug. `detail` is Pydantic's diagnostics, logged
  *   and never rendered, exactly as in `BookingPanel`.
  * - **`failed`** — network or server. Generic copy, nothing to act on.
@@ -37,7 +47,7 @@
 import { useCallback, useRef, useState } from 'react'
 
 import type { Booking } from '../api'
-import { cancelBooking } from '../api'
+import { cancelResourceBooking } from '../api'
 import { summariseInterval } from './summary'
 
 /** What the panel is currently showing below its controls. */
@@ -48,7 +58,9 @@ export type CancelResult =
   | { kind: 'success'; message: string }
   /** Nothing to do, and nothing wrong: neutral, not alarming. */
   | { kind: 'notice'; message: string }
-  /** Our bug or an unactionable failure: generic copy only. */
+  /** The interval is already under way: terminal, no retry offered. */
+  | { kind: 'started'; message: string }
+  /** Our bug, the access floor, or an unactionable failure: generic copy only. */
   | { kind: 'error'; message: string }
 
 const SUCCESS_MESSAGE = 'Cancelled. The slot is free again.'
@@ -60,13 +72,17 @@ const CLIENT_BUG_MESSAGE =
   "Something went wrong preparing that cancellation, so it wasn't sent. Please try again."
 
 export interface CancelPanelProps {
+  /** The Space the Resource belongs to. */
+  publicId: string
+  /** The Resource the booking belongs to. */
+  resourceId: number
   /** The booking to cancel, or `null` when none is selected. */
   booking: Booking | null
   /** Called after a change the calendar must reflect (any settled cancellation). */
   onCalendarChanged: () => void
 }
 
-export function CancelPanel({ booking, onCalendarChanged }: CancelPanelProps) {
+export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }: CancelPanelProps) {
   const [result, setResult] = useState<CancelResult>({ kind: 'idle' })
   const [confirming, setConfirming] = useState(false)
 
@@ -99,7 +115,7 @@ export function CancelPanel({ booking, onCalendarChanged }: CancelPanelProps) {
     setResult({ kind: 'cancelling' })
 
     try {
-      const outcome = await cancelBooking(booking.id)
+      const outcome = await cancelResourceBooking(publicId, resourceId, booking.id)
 
       switch (outcome.outcome) {
         case 'ok':
@@ -117,11 +133,19 @@ export function CancelPanel({ booking, onCalendarChanged }: CancelPanelProps) {
           // The block on screen is stale; refreshing is what removes it.
           onCalendarChanged()
           break
+        case 'already_started':
+          // No remedy: the interval is under way and retrying refuses the
+          // same way every time, so the confirm control is hidden rather than
+          // offered again.
+          setResult({ kind: 'started', message: outcome.message })
+          break
         case 'invalid_request':
           // `detail` is diagnostics, not copy. Logged, never rendered.
-          console.error('cancelBooking rejected the request', outcome.detail, outcome.raw)
+          console.error('cancelResourceBooking rejected the request', outcome.detail, outcome.raw)
           setResult({ kind: 'error', message: CLIENT_BUG_MESSAGE })
           break
+        case 'unauthenticated':
+        case 'forbidden':
         case 'failed':
           setResult({ kind: 'error', message: outcome.message })
           break
@@ -130,7 +154,7 @@ export function CancelPanel({ booking, onCalendarChanged }: CancelPanelProps) {
       inFlight.current = false
       setConfirming(false)
     }
-  }, [booking, onCalendarChanged])
+  }, [booking, onCalendarChanged, publicId, resourceId])
 
   /** The outcome banner, rendered whether or not a booking survives it. */
   const banner = (
@@ -150,6 +174,16 @@ export function CancelPanel({ booking, onCalendarChanged }: CancelPanelProps) {
           role="status"
           data-testid="cancel-notice"
           className="rounded border border-sky-200 bg-sky-50 p-3 text-sky-900"
+        >
+          {result.message}
+        </p>
+      )}
+
+      {result.kind === 'started' && (
+        <p
+          role="alert"
+          data-testid="cancel-started"
+          className="rounded border border-slate-300 bg-slate-100 p-3 text-slate-700"
         >
           {result.message}
         </p>
@@ -207,7 +241,7 @@ export function CancelPanel({ booking, onCalendarChanged }: CancelPanelProps) {
         <dd data-testid="cancel-duration">{summary.duration}</dd>
       </dl>
 
-      {!confirming && !cancelling && (
+      {!confirming && !cancelling && result.kind !== 'started' && (
         <button
           type="button"
           data-testid="cancel-start"

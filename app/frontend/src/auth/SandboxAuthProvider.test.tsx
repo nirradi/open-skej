@@ -12,7 +12,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { listBookings, setAccessTokenProvider } from '../api'
+import { listResourceBookings, setAccessTokenProvider } from '../api'
 import { SANDBOX_SIGNED_IN_STORAGE_KEY, SandboxAuthProvider } from './SandboxAuthProvider'
 import { SANDBOX_SUB_STORAGE_KEY } from './sandboxToken'
 import { useSession } from './session'
@@ -119,10 +119,10 @@ describe('SandboxAuthProvider', () => {
       </SandboxAuthProvider>,
     )
 
-    const result = await listBookings(new Date(), new Date())
+    const result = await listResourceBookings('aBcDeFgHiJkLmNoPqRsTuV', 1, new Date(), new Date())
 
     expect(fetchMock).not.toHaveBeenCalled()
-    expect(result.outcome).toBe('failed')
+    expect(result.outcome).toBe('unauthenticated')
   })
 
   it('installs a token provider the api client uses once signed in', async () => {
@@ -141,7 +141,7 @@ describe('SandboxAuthProvider', () => {
       </SandboxAuthProvider>,
     )
 
-    await listBookings(new Date(), new Date())
+    await listResourceBookings('aBcDeFgHiJkLmNoPqRsTuV', 1, new Date(), new Date())
 
     const bookingsCall = fetchMock.mock.calls.find(([url]) => String(url).includes('/bookings?'))
     expect(bookingsCall).toBeDefined()

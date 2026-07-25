@@ -9,13 +9,12 @@
  * turn keeping that promise into a test failure, which is precisely backwards.
  */
 
-import { expect, renderedDateKeys, signInAsSandbox, slotId, slotsPerDay, test } from './fixtures'
+import { expect, gotoResourceCalendar, renderedDateKeys, slotId, slotsPerDay, test } from './fixtures'
 import { calendarConfig, formatSlotLabel } from '../../frontend/src/config'
 import { DAYS_PER_WEEK } from '../../frontend/src/calendar/week'
 
 test('the calendar renders a grid matching the configured slot size', async ({ page }) => {
-  await signInAsSandbox(page)
-  await page.goto('/calendar')
+  await gotoResourceCalendar(page)
 
   await expect(page.getByTestId('calendar')).toBeVisible()
   const grid = page.getByTestId('calendar-grid')
@@ -45,8 +44,7 @@ test('the calendar renders a grid matching the configured slot size', async ({ p
 })
 
 test('the week label and navigation bounds reflect the booking horizon', async ({ page }) => {
-  await signInAsSandbox(page)
-  await page.goto('/calendar')
+  await gotoResourceCalendar(page)
 
   await expect(page.getByTestId('calendar-week-label')).toBeVisible()
   // The current week is the earliest reachable, so paging back is refused

@@ -16,14 +16,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
-import type { Booking, ListBookingsResult } from '../api'
+import type { Booking, ListResourceBookingsResult } from '../api'
 import type { CalendarConfig } from '../config'
 import { CalendarGrid } from './CalendarGrid'
 import { slotsPerDayFor } from '../config'
 import { slotTestId, startOfWeek, toDateKey } from './week'
 
-const listBookings = vi.hoisted(() => vi.fn())
-vi.mock('../api', () => ({ listBookings }))
+const listResourceBookings = vi.hoisted(() => vi.fn())
+vi.mock('../api', () => ({ listResourceBookings }))
 
 /** A Wednesday, 14:30 local. Every expectation below is relative to this. */
 const NOW = new Date(2026, 6, 22, 14, 30)
@@ -33,9 +33,15 @@ const MONDAY = startOfWeek(NOW)
 const THIRTY: CalendarConfig = { slotMinutes: 30, openHour: 6, closeHour: 23 }
 const TEN: CalendarConfig = { ...THIRTY, slotMinutes: 10 }
 
-/** Resolves `listBookings` with an ok result carrying `bookings`. */
+const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
+const RESOURCE_ID = 1
+
+/** Resolves `listResourceBookings` with an ok result carrying `bookings`. */
 function resolveWith(bookings: Booking[] = []) {
-  listBookings.mockResolvedValue({ outcome: 'ok', data: bookings } satisfies ListBookingsResult)
+  listResourceBookings.mockResolvedValue({
+    outcome: 'ok',
+    data: bookings,
+  } satisfies ListResourceBookingsResult)
 }
 
 /** A confirmed booking over an arbitrary local wall-clock interval. */
@@ -54,7 +60,9 @@ function booking(id: number, start: Date, end: Date): Booking {
 
 /** Renders the grid and waits for the initial load to settle. */
 async function renderGrid(props: Partial<React.ComponentProps<typeof CalendarGrid>> = {}) {
-  const view = render(<CalendarGrid now={NOW} {...props} />)
+  const view = render(
+    <CalendarGrid publicId={PUBLIC_ID} resourceId={RESOURCE_ID} now={NOW} {...props} />,
+  )
   await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
   return view
 }
@@ -75,7 +83,7 @@ function selectedIndices(dayOffset: number, config: CalendarConfig = THIRTY): nu
 }
 
 beforeEach(() => {
-  listBookings.mockReset()
+  listResourceBookings.mockReset()
   resolveWith()
 })
 
@@ -215,9 +223,11 @@ describe('existing bookings', () => {
     expect(slot(4, 5).dataset.blocked).toBeUndefined()
   })
 
-  it('requests exactly the displayed week', async () => {
+  it('requests exactly the displayed week, scoped to the Space and Resource', async () => {
     await renderGrid()
-    const [from, to] = listBookings.mock.calls[0]
+    const [publicId, resourceId, from, to] = listResourceBookings.mock.calls[0]
+    expect(publicId).toBe(PUBLIC_ID)
+    expect(resourceId).toBe(RESOURCE_ID)
     expect(toDateKey(from as Date)).toBe(toDateKey(MONDAY))
     expect((to as Date).getTime() - (from as Date).getTime()).toBe(7 * 86400_000)
   })
@@ -291,7 +301,15 @@ describe('selecting a booking to cancel it', () => {
     // gone, and the freed slots must be selectable again.
     resolveWith([])
     await act(async () => {
-      rerender(<CalendarGrid now={NOW} onBookingSelect={onBookingSelect} refreshToken={1} />)
+      rerender(
+        <CalendarGrid
+          publicId={PUBLIC_ID}
+          resourceId={RESOURCE_ID}
+          now={NOW}
+          onBookingSelect={onBookingSelect}
+          refreshToken={1}
+        />,
+      )
     })
     await waitFor(() => expect(screen.queryByTestId('booking-11')).toBeNull())
 
@@ -312,7 +330,15 @@ describe('selecting a booking to cancel it', () => {
     expect(onBookingSelect.mock.calls.at(-1)?.[0]).toMatchObject({ id: 11 })
 
     await act(async () => {
-      rerender(<CalendarGrid now={NOW} onBookingSelect={onBookingSelect} refreshToken={1} />)
+      rerender(
+        <CalendarGrid
+          publicId={PUBLIC_ID}
+          resourceId={RESOURCE_ID}
+          now={NOW}
+          onBookingSelect={onBookingSelect}
+          refreshToken={1}
+        />,
+      )
     })
     await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
 
@@ -381,10 +407,10 @@ describe('selecting a booking to cancel it', () => {
 
 describe('a failed load', () => {
   it('surfaces an error instead of an empty, apparently-free calendar', async () => {
-    listBookings.mockResolvedValue({
+    listResourceBookings.mockResolvedValue({
       outcome: 'failed',
       message: "We couldn't reach the server.",
-    } satisfies ListBookingsResult)
+    } satisfies ListResourceBookingsResult)
     await renderGrid()
 
     expect(screen.getByTestId('calendar-error')).toBeTruthy()
@@ -396,13 +422,30 @@ describe('a failed load', () => {
     expect(slot(4, 0).dataset.blocked).toBe('unavailable')
   })
 
+  it.each(['unauthenticated', 'forbidden', 'not_found'] as const)(
+    'treats %s as a load error too, fail-closed like a network failure',
+    async (outcome) => {
+      listResourceBookings.mockResolvedValue({
+        outcome,
+        message: 'Access refused.',
+      } satisfies ListResourceBookingsResult)
+      await renderGrid()
+
+      expect(screen.getByTestId('calendar-error')).toBeTruthy()
+      // Every slot is unavailable, exactly as an ordinary network failure would
+      // leave it — the grid has no trustworthy answer about what is booked.
+      expect(slot(4, 0).disabled).toBe(true)
+      expect(slot(4, 0).dataset.blocked).toBe('unavailable')
+    },
+  )
+
   it('treats an invalid_request as an error too, without showing the raw detail', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    listBookings.mockResolvedValue({
+    listResourceBookings.mockResolvedValue({
       outcome: 'invalid_request',
       detail: 'query.from: input should be a valid datetime',
       raw: null,
-    } satisfies ListBookingsResult)
+    } satisfies ListResourceBookingsResult)
     await renderGrid()
 
     const alert = screen.getByRole('alert')
@@ -413,7 +456,7 @@ describe('a failed load', () => {
   })
 
   it('retries on demand and recovers', async () => {
-    listBookings.mockResolvedValueOnce({ outcome: 'failed', message: 'Nope.' })
+    listResourceBookings.mockResolvedValueOnce({ outcome: 'failed', message: 'Nope.' })
     await renderGrid()
     expect(screen.getByTestId('calendar-error')).toBeTruthy()
 
@@ -424,7 +467,7 @@ describe('a failed load', () => {
   })
 
   it('does not select when a slot is clicked while the load has failed', async () => {
-    listBookings.mockResolvedValue({ outcome: 'failed', message: 'Nope.' })
+    listResourceBookings.mockResolvedValue({ outcome: 'failed', message: 'Nope.' })
     await renderGrid()
     fireEvent.pointerDown(slot(4, 4))
     expect(screen.queryByTestId('calendar-selection')).toBeNull()
