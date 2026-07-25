@@ -57,11 +57,16 @@ export function ResourceConfigPanel({
   // The selected Space can change under this component (the picker in
   // AdminPage), and a save elsewhere can update `space.timezone` out from
   // under a stale local edit — both should reset the field to what the
-  // server now says.
-  useEffect(() => {
+  // server now says. Done during render against a remembered value rather
+  // than in an effect: the same pattern `BookingPanel` and `CalendarGrid`
+  // use, and the one the `react-hooks/set-state-in-effect` lint enforces.
+  const timezoneKey = `${space.public_id}:${space.timezone}`
+  const [seenTimezoneKey, setSeenTimezoneKey] = useState(timezoneKey)
+  if (seenTimezoneKey !== timezoneKey) {
+    setSeenTimezoneKey(timezoneKey)
     setTimezoneInput(space.timezone)
     setTimezoneError('')
-  }, [space.public_id, space.timezone])
+  }
 
   async function handleTimezoneSave() {
     setTimezoneBusy(true)
@@ -227,12 +232,19 @@ function ResourceRow({
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
-  useEffect(() => {
+  // Reset the fields when the row's Resource — or its stored schedule — changes
+  // out from under a stale local edit. Done during render against a remembered
+  // signature rather than in an effect, matching `BookingPanel`/`CalendarGrid`
+  // and the `react-hooks/set-state-in-effect` lint.
+  const resourceKey = `${resource.id}:${resource.opens_at}:${resource.closes_at}:${resource.slot_minutes}`
+  const [seenResourceKey, setSeenResourceKey] = useState(resourceKey)
+  if (seenResourceKey !== resourceKey) {
+    setSeenResourceKey(resourceKey)
     setOpensAt(toTimeInputValue(resource.opens_at))
     setClosesAt(toTimeInputValue(resource.closes_at))
     setSlotMinutes(resource.slot_minutes === null ? '' : String(resource.slot_minutes))
     setError('')
-  }, [resource.id, resource.opens_at, resource.closes_at, resource.slot_minutes])
+  }
 
   async function handleSave() {
     setBusy(true)

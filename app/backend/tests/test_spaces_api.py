@@ -812,7 +812,9 @@ def test_an_explicit_null_description_clears_it(api: Api, alice: User, space_a: 
     assert response.json()["name"] == "Court A"
 
 
-def test_a_space_defaults_to_utc_and_exposes_its_timezone(api: Api, alice: User, space_a: Space) -> None:
+def test_a_space_defaults_to_utc_and_exposes_its_timezone(
+    api: Api, alice: User, space_a: Space
+) -> None:
     body = api.as_user(alice).get(f"/spaces/{space_a.public_id}").json()
 
     assert body["timezone"] == "UTC"
@@ -840,9 +842,7 @@ def test_a_fixed_offset_is_rejected_as_a_timezone(api: Api, alice: User, space_a
     """A fixed offset is exactly the mistake the IANA-name requirement guards
     against — it looks plausible and is silently wrong the next time the zone's
     DST rule flips."""
-    response = api.as_user(alice).patch(
-        f"/spaces/{space_a.public_id}", json={"timezone": "+02:00"}
-    )
+    response = api.as_user(alice).patch(f"/spaces/{space_a.public_id}", json={"timezone": "+02:00"})
 
     assert response.status_code == 422
 
