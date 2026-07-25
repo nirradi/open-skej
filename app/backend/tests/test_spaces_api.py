@@ -812,6 +812,61 @@ def test_an_explicit_null_description_clears_it(api: Api, alice: User, space_a: 
     assert response.json()["name"] == "Court A"
 
 
+def test_a_space_defaults_to_utc_and_exposes_its_timezone(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    body = api.as_user(alice).get(f"/spaces/{space_a.public_id}").json()
+
+    assert body["timezone"] == "UTC"
+
+
+def test_an_admin_can_set_the_space_timezone(api: Api, alice: User, space_a: Space) -> None:
+    response = api.as_user(alice).patch(
+        f"/spaces/{space_a.public_id}", json={"timezone": "Europe/Berlin"}
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["timezone"] == "Europe/Berlin"
+    assert response.json()["name"] == "Court A", "an omitted field is untouched"
+
+
+def test_an_unknown_timezone_is_rejected_with_422(api: Api, alice: User, space_a: Space) -> None:
+    response = api.as_user(alice).patch(
+        f"/spaces/{space_a.public_id}", json={"timezone": "Not/AZone"}
+    )
+
+    assert response.status_code == 422
+
+
+def test_a_fixed_offset_is_rejected_as_a_timezone(api: Api, alice: User, space_a: Space) -> None:
+    """A fixed offset is exactly the mistake the IANA-name requirement guards
+    against — it looks plausible and is silently wrong the next time the zone's
+    DST rule flips."""
+    response = api.as_user(alice).patch(f"/spaces/{space_a.public_id}", json={"timezone": "+02:00"})
+
+    assert response.status_code == 422
+
+
+def test_an_explicit_null_timezone_is_rejected(api: Api, alice: User, space_a: Space) -> None:
+    """``timezone`` is NOT NULL in the database, so — like ``name`` — an explicit
+    null is a client error rather than an instruction."""
+    response = api.as_user(alice).patch(f"/spaces/{space_a.public_id}", json={"timezone": None})
+
+    assert response.status_code == 422
+
+
+def test_a_member_gets_403_setting_the_space_timezone(
+    api: Api, session: Session, alice: User, carol: User, space_a: Space
+) -> None:
+    _add_member(session, space_a, carol, MembershipRole.MEMBER)
+
+    response = api.as_user(carol).patch(
+        f"/spaces/{space_a.public_id}", json={"timezone": "Europe/Berlin"}
+    )
+
+    assert response.status_code == 403
+
+
 def test_archiving_stamps_archived_at(api: Api, alice: User, space_a: Space) -> None:
     response = api.as_user(alice).post(f"/spaces/{space_a.public_id}/archive")
 

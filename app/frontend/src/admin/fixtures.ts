@@ -20,6 +20,7 @@ import type {
   ApiOk,
   Invitation,
   Member,
+  Resource,
   Space,
 } from '../api'
 
@@ -58,6 +59,7 @@ export function makeSpace(overrides: Partial<Space> = {}): Space {
     public_id: 'sp_7f3a9c',
     name: 'Tennis Court',
     description: null,
+    timezone: 'UTC',
     created_at: '2026-07-01T10:00:00.000Z',
     archived_at: null,
     my_role: 'owner',
@@ -100,6 +102,19 @@ export function makeInvitation(overrides: Partial<Invitation> = {}): Invitation 
     invited_by_user_id: 1,
     created_at: '2026-07-03T10:00:00.000Z',
     accepted_at: null,
+    ...overrides,
+  }
+}
+
+export function makeResource(overrides: Partial<Resource> = {}): Resource {
+  return {
+    id: 30,
+    name: 'Court A',
+    opens_at: '07:00:00',
+    closes_at: '22:00:00',
+    slot_minutes: 60,
+    created_at: '2026-07-01T10:00:00.000Z',
+    archived_at: null,
     ...overrides,
   }
 }

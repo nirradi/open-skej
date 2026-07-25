@@ -38,13 +38,16 @@ import {
   requestAccess,
   revokeInvitation,
   updateMemberRole,
+  updateResource,
+  updateSpace,
 } from './client'
-import type { AccessRequest, Invitation, Member, Space, SpacePreview } from './types'
+import type { AccessRequest, Invitation, Member, Resource, Space, SpacePreview } from './types'
 
 const space: Space = {
   public_id: 'aBcDeFgHiJkLmNoPqRsTuV',
   name: 'Tennis court',
   description: 'The one by the car park',
+  timezone: 'UTC',
   created_at: '2026-07-01T09:00:00Z',
   archived_at: null,
   my_role: 'owner',
@@ -75,6 +78,16 @@ const accessRequest: AccessRequest = {
   created_at: '2026-07-03T09:00:00Z',
   decided_at: null,
   decided_by_user_id: null,
+}
+
+const resource: Resource = {
+  id: 7,
+  name: 'Court A',
+  opens_at: '07:00:00',
+  closes_at: '22:00:00',
+  slot_minutes: 60,
+  created_at: '2026-07-01T09:00:00Z',
+  archived_at: null,
 }
 
 const invitation: Invitation = {
@@ -203,6 +216,48 @@ describe('getSpace', () => {
     await getSpace('a/b?c')
 
     expect(lastRequest().url).toBe(`${API_BASE_URL}/spaces/a%2Fb%3Fc`)
+  })
+})
+
+describe('updateSpace', () => {
+  it('patches only the given keys and returns the updated Space', async () => {
+    const updated: Space = { ...space, timezone: 'Europe/Berlin' }
+    fetchMock.mockResolvedValue(jsonResponse(200, updated))
+
+    const result = await updateSpace(space.public_id, { timezone: 'Europe/Berlin' })
+
+    const { url, init } = lastRequest()
+    expect(url).toBe(`${API_BASE_URL}/spaces/${space.public_id}`)
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ timezone: 'Europe/Berlin' })
+    expect(result).toEqual({ outcome: 'ok', data: updated })
+  })
+
+  it('resolves an unknown timezone to invalid_request', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(422, { detail: "'Not/AZone' is not a known IANA timezone name" }),
+    )
+
+    const result = await updateSpace(space.public_id, { timezone: 'Not/AZone' })
+
+    expect(result.outcome).toBe('invalid_request')
+  })
+
+  it('resolves a member (not admin) to forbidden', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { detail: 'Forbidden.' }))
+
+    const result = await updateSpace(space.public_id, { timezone: 'Europe/Berlin' })
+
+    expect(result.outcome).toBe('forbidden')
+  })
+
+  it('reports an archived Space as a conflict', async () => {
+    const detail = 'This Space is archived and can no longer be changed.'
+    fetchMock.mockResolvedValue(jsonResponse(409, { detail }))
+
+    const result = await updateSpace(space.public_id, { timezone: 'Europe/Berlin' })
+
+    expect(result).toEqual({ outcome: 'conflict', message: detail })
   })
 })
 
@@ -457,6 +512,63 @@ describe('archiveSpace', () => {
     const result = await archiveSpace(space.public_id)
 
     expect(result.outcome).toBe('forbidden')
+  })
+})
+
+describe('updateResource', () => {
+  it('patches only the given keys and returns the updated Resource', async () => {
+    const updated: Resource = { ...resource, opens_at: '08:00:00' }
+    fetchMock.mockResolvedValue(jsonResponse(200, updated))
+
+    const result = await updateResource(space.public_id, resource.id, { opens_at: '08:00:00' })
+
+    const { url, init } = lastRequest()
+    expect(url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/resources/${resource.id}`)
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(init.body as string)).toEqual({ opens_at: '08:00:00' })
+    expect(result).toEqual({ outcome: 'ok', data: updated })
+  })
+
+  it('clears an hours column with an explicit null, distinct from omitting it', async () => {
+    const cleared: Resource = { ...resource, opens_at: null }
+    fetchMock.mockResolvedValue(jsonResponse(200, cleared))
+
+    await updateResource(space.public_id, resource.id, { opens_at: null })
+
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual({ opens_at: null })
+  })
+
+  it('resolves a non-positive slot_minutes to invalid_request', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(422, { detail: 'slot_minutes must be positive' }))
+
+    const result = await updateResource(space.public_id, resource.id, { slot_minutes: 0 })
+
+    expect(result.outcome).toBe('invalid_request')
+  })
+
+  it('resolves a member (not admin) to forbidden', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { detail: 'Forbidden.' }))
+
+    const result = await updateResource(space.public_id, resource.id, { name: 'Nope' })
+
+    expect(result.outcome).toBe('forbidden')
+  })
+
+  it('reports a Resource of another Space as not_found', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { detail: 'Not found' }))
+
+    const result = await updateResource(space.public_id, 999_999, { name: 'Nope' })
+
+    expect(result.outcome).toBe('not_found')
+  })
+
+  it('reports an archived Resource as a conflict', async () => {
+    const detail = 'This Resource is archived and can no longer be changed.'
+    fetchMock.mockResolvedValue(jsonResponse(409, { detail }))
+
+    const result = await updateResource(space.public_id, resource.id, { name: 'Nope' })
+
+    expect(result).toEqual({ outcome: 'conflict', message: detail })
   })
 })
 

@@ -260,9 +260,12 @@ def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
     if "name" in fields and payload.name is not None:
         space.name = payload.name
     # An explicit null clears the description; absence leaves it untouched. The
-    # schema rejects a null name, so only description can be cleared this way.
+    # schema rejects a null name and a null timezone, so only description can be
+    # cleared this way.
     if "description" in fields:
         space.description = payload.description
+    if "timezone" in fields and payload.timezone is not None:
+        space.timezone = payload.timezone
 
     session.commit()
     return space

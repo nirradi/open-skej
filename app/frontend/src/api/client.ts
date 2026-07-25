@@ -680,6 +680,28 @@ export async function getSpace(publicId: string): Promise<AuthenticatedResult<Sp
 }
 
 /**
+ * `PATCH /spaces/{public_id}` — admin+. Rename, redescribe, or reset the
+ * venue's IANA timezone.
+ *
+ * Partial: only the keys present in `patch` are sent, so omitting a field
+ * leaves it unchanged server-side and sending `description: null` clears it —
+ * the same omitted-vs-null distinction `SpaceUpdate` documents on the backend.
+ * `timezone` is not nullable there, so sending it `null` is a client bug the
+ * server reports as `invalid_request`, not a way to reset it.
+ *
+ * `conflict` means the Space is archived and takes no more mutations.
+ */
+export async function updateSpace(
+  publicId: string,
+  patch: { name?: string; description?: string | null; timezone?: string },
+): Promise<MutatingResult<Space>> {
+  return mutatingRequest<Space>(`/spaces/${encodeURIComponent(publicId)}`, {
+    method: 'PATCH',
+    ...jsonBody(patch),
+  })
+}
+
+/**
  * `GET /spaces/{public_id}/resources` — the Resources a member may pick a
  * calendar from.
  *
@@ -696,6 +718,32 @@ export async function listResources(
   const query = options.includeArchived ? '?include_archived=true' : ''
   return authenticatedRequest<Resource[]>(
     `/spaces/${encodeURIComponent(publicId)}/resources${query}`,
+  )
+}
+
+/**
+ * `PATCH /spaces/{public_id}/resources/{resource_id}` — admin+. Rename a
+ * Resource or edit its operating hours and slot interval.
+ *
+ * Partial, and only the keys present in `patch` are sent: omitting
+ * `opens_at` / `closes_at` / `slot_minutes` leaves that column untouched,
+ * while sending it `null` clears it back to "no restriction" — the same
+ * omit-vs-null distinction `ResourceUpdate` documents on the backend.
+ * `opens_at` / `closes_at` are `HH:MM:SS` strings, matching `Resource`'s wire
+ * shape.
+ *
+ * `conflict` covers an archived Space or an archived Resource, either of
+ * which rejects every mutation with a 409; `not_found` covers a Resource id
+ * that is not this Space's, indistinguishable from one that does not exist.
+ */
+export async function updateResource(
+  publicId: string,
+  resourceId: number,
+  patch: { name?: string; opens_at?: string | null; closes_at?: string | null; slot_minutes?: number | null },
+): Promise<MutatingResult<Resource>> {
+  return mutatingRequest<Resource>(
+    `/spaces/${encodeURIComponent(publicId)}/resources/${resourceId}`,
+    { method: 'PATCH', ...jsonBody(patch) },
   )
 }
 

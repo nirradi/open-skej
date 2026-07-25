@@ -23,6 +23,8 @@ export {
   revokeInvitation,
   setAccessTokenProvider,
   updateMemberRole,
+  updateResource,
+  updateSpace,
 } from './client'
 export type { AccessTokenProvider } from './client'
 export type {
