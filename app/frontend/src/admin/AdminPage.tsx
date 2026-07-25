@@ -7,8 +7,8 @@ import { CreateSpaceForm } from './CreateSpaceForm'
 import { InvitationsPanel } from './InvitationsPanel'
 import { MembersPanel } from './MembersPanel'
 import { messageFor } from './messages'
-import { ResourceConfigPanel } from './ResourceConfigPanel'
 import { ShareLink } from './ShareLink'
+import { SpaceSchedulePanel } from './SpaceSchedulePanel'
 
 type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: string } | null
 
@@ -19,10 +19,11 @@ type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: stri
  *
  * It manages **people** — members and their roles, the access-request queue,
  * invitations, and archiving — and the minimal **schedule** surface
- * `DEFERRED.md` item 2 calls for: a Resource's operating hours and slot
- * interval, and the Space's IANA timezone. It is not a general configuration
- * surface — no Resource create/archive, no rule parameters (task 4.13) — see
- * `ResourceConfigPanel`.
+ * `DEFERRED.md` item 2 calls for: the Space's operating hours, slot interval,
+ * and IANA timezone (task 4.13a moved hours and slot interval off Resources
+ * and onto the Space itself). It is not a general configuration surface — no
+ * Resource create/archive, no rule parameters (task 4.13b) — see
+ * `SpaceSchedulePanel`.
  *
  * The Space picker below is a list of *memberships*, which is a different thing
  * from a directory. `GET /spaces` returns the Spaces the caller belongs to and
@@ -224,7 +225,7 @@ function SpaceAdmin({
         onMembershipChanged={onMembershipChanged}
       />
       <InvitationsPanel space={space} />
-      <ResourceConfigPanel space={space} onSpaceChanged={onSpaceChanged} />
+      <SpaceSchedulePanel space={space} onSpaceChanged={onSpaceChanged} />
 
       {/* Archiving is owner-only on the server, so an admin is not offered it. */}
       {space.my_role === 'owner' ? (

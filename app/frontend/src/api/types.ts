@@ -294,15 +294,32 @@ export type PreviewStatus = 'none' | 'pending' | 'denied' | 'member'
  * mutation on it with a 409, so the UI should stop offering them.
  *
  * `timezone` is the venue's IANA zone name (`Europe/Berlin`, never a fixed
- * offset) — the recurring wall-clock config a Resource's operating hours are
+ * offset) — the recurring wall-clock config `opens_at` / `closes_at` are
  * resolved against, not a property of any stored instant. See
  * `.claude/rules/identity-and-access.md`.
+ *
+ * `opens_at` / `closes_at` are `HH:MM:SS` strings (Python's `time` serialised
+ * by FastAPI), or `null` when the Space carries no hours restriction. They are
+ * this Space's own operating hours and slot interval — every Resource in it
+ * shares them, since a Resource carries no configuration of its own.
+ *
+ * `max_duration_minutes`, `booking_horizon_days`, `max_bookings_per_week` and
+ * `max_bookings_per_month` are the Space's rule-engine parameters; `null`
+ * means that rule is not enforced here. Not yet read by the booking engine —
+ * that is task 4.13b.
  */
 export interface Space {
   public_id: string
   name: string
   description: string | null
   timezone: string
+  opens_at: string | null
+  closes_at: string | null
+  slot_minutes: number | null
+  max_duration_minutes: number | null
+  booking_horizon_days: number | null
+  max_bookings_per_week: number | null
+  max_bookings_per_month: number | null
   created_at: string
   archived_at: string | null
   my_role: MembershipRole
@@ -317,18 +334,13 @@ export interface Space {
  * ever visible to someone already inside the Space, and its own routes are
  * addressed by it directly.
  *
- * `opens_at` / `closes_at` are `HH:MM:SS` strings (Python's `time` serialised
- * by FastAPI), or `null` when the Resource carries no hours restriction yet.
- * They are local wall-clock configuration, not instants — see
- * `.claude/rules/identity-and-access.md` — so nothing here should be treated
- * as UTC.
+ * No hours, no slot interval, no rule parameters: a Resource is one of N
+ * indistinguishable courts, a unit of bookable capacity carrying no
+ * configuration of its own. See `Space` for where that configuration lives.
  */
 export interface Resource {
   id: number
   name: string
-  opens_at: string | null
-  closes_at: string | null
-  slot_minutes: number | null
   created_at: string
   archived_at: string | null
 }

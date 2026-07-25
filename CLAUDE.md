@@ -5,12 +5,14 @@ This file and `.claude/rules/*.md` describe **what the system is and why**.
 ## What it is
 
 Open-Skej books time on shared resources — a tennis court, a piece of expensive equipment. Each such
-resource is a **Resource**: a bookable calendar. Resources are grouped under a **Space** — a venue
-(a club, a lab) that owns many of them and is the boundary of who may book. A booking is always
-against one Resource; membership and roles are held at the Space, so a member of the venue may book
-any Resource in it. The differentiator is **AI-driven rule configuration**: booking constraints are
+resource is a **Resource**: a unit of bookable capacity, one of N indistinguishable courts in its
+**Space**. A Space is the venue (a club, a lab) that owns many Resources and is the boundary of both
+who may book and how: membership, roles, and every booking constraint are Space-level, not
+per-Resource — a member of the venue may book any Resource in it, all governed by the same rules. A
+booking is always against one Resource, and the overlap constraint keyed on it is what still tells
+two Resources apart. The differentiator is **AI-driven rule configuration**: booking constraints are
 authored in natural language ("only 1 hour sessions", "no more than twice a week") and stored as
-parameterized Python snippets that the rule engine executes, per Resource.
+parameterized Python snippets that the rule engine executes, per Space.
 
 Rule evaluation is bounded to **at most one calendar month of history**. That bound is a design
 constraint, not a tuning knob: it caps the work any single booking attempt can cause, so a rule
@@ -47,7 +49,7 @@ app/frontend/    React SPA
                    request for a non-member, and for a member the Space itself with a picker onto its
                    Resources; and `/s/{public_id}/resources/{id}` — the calendar for one Resource
   src/admin/     Space creation, members, invitations, the access-request queue, and the minimal
-                   per-Resource operating-hours/slot and Space-timezone configuration surface
+                   Space schedule (operating hours, slot interval, timezone) configuration surface
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/
   interfaces.py  The rule contract — authoritative, read before writing any rule
@@ -67,10 +69,10 @@ a `+02:00` value would yield a *local* hour and silently mis-enforce them. Conve
 **Instants carry no zone; recurring configuration does.** A stored datetime — a booking's `start_at`,
 `created_at`, any instant — is UTC and carries no timezone, full stop: an instant is an absolute
 point, and a zone on it would add ambiguity without adding information. The one exception is
-recurring wall-clock configuration, not an instant at all — a Resource's operating hours are
-authored as local clock times against the Space's IANA zone (`.claude/rules/identity-and-access.md`
-has the full model) — and that split is exactly why it is the exception: a rule resolving to a
-different UTC instant per date is the one thing that needs a zone to resolve at all.
+recurring wall-clock configuration, not an instant at all — a Space's operating hours are authored
+as local clock times against its own IANA zone (`.claude/rules/identity-and-access.md` has the full
+model) — and that split is exactly why it is the exception: a rule resolving to a different UTC
+instant per date is the one thing that needs a zone to resolve at all.
 
 **Conversion happens at the boundary, per date, never once at write time.** Resolving local operating
 hours to a UTC window is repeated for every date the question is asked about, not computed once and

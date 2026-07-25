@@ -77,9 +77,6 @@ const CREATED_REQUEST: AccessRequest = {
 const RESOURCE: Resource = {
   id: 7,
   name: 'Court 1',
-  opens_at: null,
-  closes_at: null,
-  slot_minutes: null,
   created_at: '2026-07-01T00:00:00Z',
   archived_at: null,
 }

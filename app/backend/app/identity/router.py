@@ -199,7 +199,8 @@ def preview_space(public_id: str, user: CurrentUser, session: SessionDep) -> Spa
 
 @router.patch("/{public_id}", response_model=SpaceRead)
 def update_space(payload: SpaceUpdate, context: AdminContext, session: SessionDep) -> SpaceRead:
-    """Rename a Space or edit its description. Admin or owner."""
+    """Rename a Space, edit its description, timezone, operating hours, slot
+    interval, or rule parameters. Admin or owner."""
     try:
         space = service.update_space(session, context.space, payload)
     except service.SpaceArchivedError:
@@ -241,14 +242,7 @@ def create_resource(
     Space in the signature; a Resource carries no permissions of its own.
     """
     try:
-        resource = service.create_resource(
-            session,
-            context.space,
-            name=payload.name,
-            opens_at=payload.opens_at,
-            closes_at=payload.closes_at,
-            slot_minutes=payload.slot_minutes,
-        )
+        resource = service.create_resource(session, context.space, name=payload.name)
     except service.SpaceArchivedError:
         raise _archived()
 
@@ -291,7 +285,7 @@ def read_resource(resource_id: int, context: MemberContext, session: SessionDep)
 def update_resource(
     resource_id: int, payload: ResourceUpdate, context: AdminContext, session: SessionDep
 ) -> ResourceRead:
-    """Rename a Resource or edit its operating-hours configuration. Admin+."""
+    """Rename a Resource. Admin+."""
     try:
         resource = service.update_resource(
             session, context.space, resource_id=resource_id, payload=payload

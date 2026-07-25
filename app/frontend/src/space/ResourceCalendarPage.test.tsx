@@ -35,6 +35,13 @@ const SPACE: Space = {
   name: 'Tennis Court',
   description: null,
   timezone: 'UTC',
+  opens_at: null,
+  closes_at: null,
+  slot_minutes: null,
+  max_duration_minutes: null,
+  booking_horizon_days: null,
+  max_bookings_per_week: null,
+  max_bookings_per_month: null,
   created_at: '2026-07-01T00:00:00Z',
   archived_at: null,
   my_role: 'member',
@@ -43,9 +50,6 @@ const SPACE: Space = {
 const RESOURCE: Resource = {
   id: RESOURCE_ID,
   name: 'Court 1',
-  opens_at: null,
-  closes_at: null,
-  slot_minutes: null,
   created_at: '2026-07-01T00:00:00Z',
   archived_at: null,
 }

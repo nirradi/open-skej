@@ -1,6 +1,6 @@
-"""Boundary conversion from a Resource's local operating hours to a UTC window.
+"""Boundary conversion from a Space's local operating hours to a UTC window.
 
-This is the one place the Space's IANA ``timezone`` and a Resource's local
+This is the one place a Space's IANA ``timezone`` and its own local
 ``opens_at`` / ``closes_at`` meet a calendar date and produce the UTC clock
 times the rule engine actually understands. See ``.claude/rules/identity-
 and-access.md`` ("Timezone lives on the Space") for why the zone lives where
@@ -11,15 +11,14 @@ folding the conversion into the engine or the ORM.
 
 ``rules.canon.AvailabilityHoursRule`` takes ``opens_at`` / ``closes_at`` as
 **UTC** clock times and never converts anything itself — that is deliberate,
-not an oversight this module patches over. A Resource's operating hours are
-authored and stored as *local* wall clock (a court that opens at 07:00 does
-so in the venue's own morning, not in Greenwich's), so something has to
-resolve "07:00, Europe/Berlin" to a UTC instant before the engine ever sees
-it. This module is that something, and it is deliberately the *only* thing
-it is: no ORM import, no engine import, a pure function of its four
-arguments so it is trivial to unit test without a database and safe for
-task 4.13 to call from the ``rules_stub`` boundary without dragging either
-dependency along.
+not an oversight this module patches over. A Space's operating hours are
+authored and stored as *local* wall clock (a venue that opens at 07:00 does
+so in its own morning, not in Greenwich's), so something has to resolve
+"07:00, Europe/Berlin" to a UTC instant before the engine ever sees it. This
+module is that something, and it is deliberately the *only* thing it is: no
+ORM import, no engine import, a pure function of its four arguments so it is
+trivial to unit test without a database and safe for task 4.13b to call from
+the ``rules_stub`` boundary without dragging either dependency along.
 
 **Why the conversion cannot happen once, at write time.** A fixed UTC offset
 stored alongside the hours would be correct on the day it was computed and
@@ -67,13 +66,13 @@ class MidnightWrapError(ValueError):
 def resolve_operating_hours(
     opens_at: time, closes_at: time, tz_name: str, on_date: date
 ) -> tuple[time, time]:
-    """Resolve a Resource's local operating hours to UTC clock times for ``on_date``.
+    """Resolve a Space's local operating hours to UTC clock times for ``on_date``.
 
-    ``opens_at`` / ``closes_at`` are the Resource's stored local wall-clock
-    hours; ``tz_name`` is the parent Space's IANA zone (``Europe/Berlin``,
-    never a fixed offset); ``on_date`` is the calendar date — in that local
-    zone — the hours apply to. The return value is the equivalent UTC clock
-    times for that same date, which is exactly the shape
+    ``opens_at`` / ``closes_at`` are the Space's stored local wall-clock hours;
+    ``tz_name`` is that same Space's IANA zone (``Europe/Berlin``, never a
+    fixed offset); ``on_date`` is the calendar date — in that local zone — the
+    hours apply to. The return value is the equivalent UTC clock times for
+    that same date, which is exactly the shape
     ``rules.canon.AvailabilityHoursRule`` is constructed with.
 
     **DST is the point, not an edge case.** The same wall-clock input

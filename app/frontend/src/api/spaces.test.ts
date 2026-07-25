@@ -48,6 +48,13 @@ const space: Space = {
   name: 'Tennis court',
   description: 'The one by the car park',
   timezone: 'UTC',
+  opens_at: '09:00:00',
+  closes_at: '17:00:00',
+  slot_minutes: 60,
+  max_duration_minutes: null,
+  booking_horizon_days: null,
+  max_bookings_per_week: null,
+  max_bookings_per_month: null,
   created_at: '2026-07-01T09:00:00Z',
   archived_at: null,
   my_role: 'owner',
@@ -83,9 +90,6 @@ const accessRequest: AccessRequest = {
 const resource: Resource = {
   id: 7,
   name: 'Court A',
-  opens_at: '07:00:00',
-  closes_at: '22:00:00',
-  slot_minutes: 60,
   created_at: '2026-07-01T09:00:00Z',
   archived_at: null,
 }
@@ -239,6 +243,54 @@ describe('updateSpace', () => {
     )
 
     const result = await updateSpace(space.public_id, { timezone: 'Not/AZone' })
+
+    expect(result.outcome).toBe('invalid_request')
+  })
+
+  it('patches operating hours, slot interval, and rule parameters', async () => {
+    const updated: Space = {
+      ...space,
+      opens_at: '07:00:00',
+      closes_at: '22:00:00',
+      slot_minutes: 30,
+      max_duration_minutes: 120,
+      booking_horizon_days: 60,
+      max_bookings_per_week: 3,
+      max_bookings_per_month: 10,
+    }
+    fetchMock.mockResolvedValue(jsonResponse(200, updated))
+
+    const patch = {
+      opens_at: '07:00:00',
+      closes_at: '22:00:00',
+      slot_minutes: 30,
+      max_duration_minutes: 120,
+      booking_horizon_days: 60,
+      max_bookings_per_week: 3,
+      max_bookings_per_month: 10,
+    }
+    const result = await updateSpace(space.public_id, patch)
+
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual(patch)
+    expect(result).toEqual({ outcome: 'ok', data: updated })
+  })
+
+  it('clears operating hours and rule parameters with an explicit null, distinct from omitting them', async () => {
+    const cleared: Space = { ...space, opens_at: null, max_duration_minutes: null }
+    fetchMock.mockResolvedValue(jsonResponse(200, cleared))
+
+    await updateSpace(space.public_id, { opens_at: null, max_duration_minutes: null })
+
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual({
+      opens_at: null,
+      max_duration_minutes: null,
+    })
+  })
+
+  it('resolves a non-positive slot_minutes to invalid_request', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(422, { detail: 'slot_minutes must be positive' }))
+
+    const result = await updateSpace(space.public_id, { slot_minutes: 0 })
 
     expect(result.outcome).toBe('invalid_request')
   })
@@ -516,34 +568,17 @@ describe('archiveSpace', () => {
 })
 
 describe('updateResource', () => {
-  it('patches only the given keys and returns the updated Resource', async () => {
-    const updated: Resource = { ...resource, opens_at: '08:00:00' }
+  it('patches the name and returns the updated Resource', async () => {
+    const updated: Resource = { ...resource, name: 'Centre Court' }
     fetchMock.mockResolvedValue(jsonResponse(200, updated))
 
-    const result = await updateResource(space.public_id, resource.id, { opens_at: '08:00:00' })
+    const result = await updateResource(space.public_id, resource.id, { name: 'Centre Court' })
 
     const { url, init } = lastRequest()
     expect(url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/resources/${resource.id}`)
     expect(init.method).toBe('PATCH')
-    expect(JSON.parse(init.body as string)).toEqual({ opens_at: '08:00:00' })
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Centre Court' })
     expect(result).toEqual({ outcome: 'ok', data: updated })
-  })
-
-  it('clears an hours column with an explicit null, distinct from omitting it', async () => {
-    const cleared: Resource = { ...resource, opens_at: null }
-    fetchMock.mockResolvedValue(jsonResponse(200, cleared))
-
-    await updateResource(space.public_id, resource.id, { opens_at: null })
-
-    expect(JSON.parse(lastRequest().init.body as string)).toEqual({ opens_at: null })
-  })
-
-  it('resolves a non-positive slot_minutes to invalid_request', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(422, { detail: 'slot_minutes must be positive' }))
-
-    const result = await updateResource(space.public_id, resource.id, { slot_minutes: 0 })
-
-    expect(result.outcome).toBe('invalid_request')
   })
 
   it('resolves a member (not admin) to forbidden', async () => {

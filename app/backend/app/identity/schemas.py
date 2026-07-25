@@ -53,13 +53,27 @@ _MESSAGE_MAX = 1000
 # values against the Space's zone to a bookable UTC window is a boundary concern,
 # owned where booking evaluation happens and not here.
 _SLOT_MINUTES_MAX = 1440
+# Sanity bounds on the rule-engine parameters, not values the engine itself
+# enforces — that is task 4.13b's job. These only keep an obviously-wrong value
+# (a negative cap, a duration measured in years) out of the database.
+_MAX_DURATION_MINUTES_MAX = 7 * 1440  # a week, in minutes
+_BOOKING_HORIZON_DAYS_MAX = 3650  # ten years
+_MAX_BOOKINGS_PER_WEEK_MAX = 1000
+_MAX_BOOKINGS_PER_MONTH_MAX = 1000
 # Matches ``users.email`` and ``space_invitations.email``, both String(320) — the
 # maximum length RFC 5321 permits for a full address.
 _EMAIL_MAX = 320
 
 
 class SpaceCreate(BaseModel):
-    """The body of ``POST /spaces``."""
+    """The body of ``POST /spaces``.
+
+    Carries no operating-hours or rule-parameter fields — a fresh Space gets
+    sensible default hours and slot interval (see ``service.create_space``) so
+    it is immediately bookable, and the four rule parameters default to unset.
+    Setting either is a follow-up ``PATCH`` through :class:`SpaceUpdate`, not a
+    creation-time concern.
+    """
 
     name: str = Field(min_length=1, max_length=_NAME_MAX)
     description: Optional[str] = Field(default=None, max_length=_DESCRIPTION_MAX)
@@ -78,11 +92,25 @@ class SpaceUpdate(BaseModel):
     database, so an explicit null for either is a client error rather than an
     instruction, and is rejected here as 422 instead of reaching the database as
     an ``IntegrityError`` 500.
+
+    ``opens_at`` / ``closes_at`` / ``slot_minutes`` and the four rule parameters
+    are all nullable, following the same omit-vs-null convention: an explicit
+    null clears the column back to "no restriction" / "rule not enforced", and
+    an omitted field is left as it was.
     """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=_NAME_MAX)
     description: Optional[str] = Field(default=None, max_length=_DESCRIPTION_MAX)
     timezone: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    opens_at: Optional[time] = None
+    closes_at: Optional[time] = None
+    slot_minutes: Optional[int] = Field(default=None, gt=0, le=_SLOT_MINUTES_MAX)
+    max_duration_minutes: Optional[int] = Field(default=None, gt=0, le=_MAX_DURATION_MINUTES_MAX)
+    booking_horizon_days: Optional[int] = Field(default=None, gt=0, le=_BOOKING_HORIZON_DAYS_MAX)
+    max_bookings_per_week: Optional[int] = Field(default=None, gt=0, le=_MAX_BOOKINGS_PER_WEEK_MAX)
+    max_bookings_per_month: Optional[int] = Field(
+        default=None, gt=0, le=_MAX_BOOKINGS_PER_MONTH_MAX
+    )
 
     @field_validator("timezone")
     @classmethod
@@ -110,6 +138,11 @@ class SpaceRead(BaseModel):
     ``my_role`` travels with the Space so the frontend can decide which controls
     to render without a second round trip. It is a convenience, never a security
     boundary: every privileged route re-checks the role server-side.
+
+    ``opens_at`` / ``closes_at`` / ``slot_minutes`` are this Space's operating
+    hours and slot interval — every Resource in it shares them, since a Resource
+    carries no configuration of its own. The four rule-parameter fields are the
+    canon's per-Space limits; ``null`` means that rule is not enforced here.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -118,6 +151,13 @@ class SpaceRead(BaseModel):
     name: str
     description: Optional[str]
     timezone: str
+    opens_at: Optional[time]
+    closes_at: Optional[time]
+    slot_minutes: Optional[int]
+    max_duration_minutes: Optional[int]
+    booking_horizon_days: Optional[int]
+    max_bookings_per_week: Optional[int]
+    max_bookings_per_month: Optional[int]
     created_at: datetime
     archived_at: Optional[datetime]
     my_role: MembershipRole
@@ -129,6 +169,13 @@ class SpaceRead(BaseModel):
             name=space.name,
             description=space.description,
             timezone=space.timezone,
+            opens_at=space.opens_at,
+            closes_at=space.closes_at,
+            slot_minutes=space.slot_minutes,
+            max_duration_minutes=space.max_duration_minutes,
+            booking_horizon_days=space.booking_horizon_days,
+            max_bookings_per_week=space.max_bookings_per_week,
+            max_bookings_per_month=space.max_bookings_per_month,
             created_at=space.created_at,
             archived_at=space.archived_at,
             my_role=role,
@@ -154,39 +201,23 @@ class SpacePreview(BaseModel):
 class ResourceCreate(BaseModel):
     """The body of ``POST /spaces/{public_id}/resources``.
 
-    Only ``name`` is required. The operating-hours columns are optional because
-    the configuration surface that sets them is a later, deliberately narrow
-    concern — a Resource created with none of them simply carries no hours
-    restriction yet. They are validated for shape here (a slot is a positive
-    number of minutes, no longer than a day) but not *resolved*: turning a local
-    wall-clock ``opens_at`` into a bookable UTC window against the Space's zone
-    happens at the booking boundary, not at creation.
+    ``name`` only. A Resource is one of N indistinguishable courts and carries
+    no configuration of its own — operating hours, slot interval, and every rule
+    limit live on the Space, not here.
     """
 
     name: str = Field(min_length=1, max_length=_NAME_MAX)
-    opens_at: Optional[time] = None
-    closes_at: Optional[time] = None
-    slot_minutes: Optional[int] = Field(default=None, gt=0, le=_SLOT_MINUTES_MAX)
 
 
 class ResourceUpdate(BaseModel):
     """The body of ``PATCH /spaces/{public_id}/resources/{resource_id}``.
 
-    Partial, and *omitted* is distinct from *explicitly null* — the same rule as
-    :class:`SpaceUpdate`. Omitting ``opens_at`` leaves it as it was; sending
-    ``null`` clears it back to "no restriction". The router reads
-    ``model_fields_set`` to tell the two apart, the only way to express "clear
-    this field" in a PATCH without a sentinel.
-
-    ``name`` is the exception: it is ``NOT NULL`` in the database, so an explicit
-    null is a client error rejected here as 422 rather than left to surface as an
-    ``IntegrityError`` 500.
+    ``name`` only, and an explicit null is a client error rejected here as 422
+    rather than left to surface as an ``IntegrityError`` 500 — ``name`` is
+    ``NOT NULL`` in the database.
     """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=_NAME_MAX)
-    opens_at: Optional[time] = None
-    closes_at: Optional[time] = None
-    slot_minutes: Optional[int] = Field(default=None, gt=0, le=_SLOT_MINUTES_MAX)
 
     @model_validator(mode="after")
     def _reject_explicit_null_name(self) -> "ResourceUpdate":
@@ -203,15 +234,16 @@ class ResourceRead(BaseModel):
     handle its own routes are addressed by, and it is only ever visible to people
     already inside the Space. That is the same judgement made for ``user_id`` and
     the opposite of the one made for ``Space.id`` — see this module's docstring.
+
+    No hours, no slot interval, no rule parameters: a Resource is a unit of
+    bookable capacity, config-free by design. See :class:`SpaceRead` for where
+    that configuration actually lives.
     """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     name: str
-    opens_at: Optional[time]
-    closes_at: Optional[time]
-    slot_minutes: Optional[int]
     created_at: datetime
     archived_at: Optional[datetime]
 

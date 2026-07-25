@@ -160,13 +160,28 @@ class Space(Base):
     only once you are already inside the venue and needs no unguessable id.
 
     ``timezone`` is the venue's IANA zone (``Europe/Berlin``, never a fixed
-    offset). It lives here rather than on a Resource because a venue is in one
-    physical place, and it exists to resolve a Resource's *operating hours* —
-    local wall-clock config — to a UTC instant per date. Stored instants
-    everywhere else carry no zone; this is the one place a zone is a property of
-    the data, because operating hours are a rule that lands on a different UTC
-    moment as the calendar and DST move. An offset column would be the version of
-    this that looks right in July and is wrong in January.
+    offset). It lives here because a venue is in one physical place, and it
+    exists to resolve this Space's own *operating hours* — local wall-clock
+    config — to a UTC instant per date. Stored instants everywhere else carry no
+    zone; this is the one place a zone is a property of the data, because
+    operating hours are a rule that lands on a different UTC moment as the
+    calendar and DST move. An offset column would be the version of this that
+    looks right in July and is wrong in January.
+
+    ``opens_at`` / ``closes_at`` / ``slot_minutes`` are the venue's operating
+    hours and booking-slot interval — **per Space, not per Resource**. A
+    Resource is one of N indistinguishable courts and carries no configuration
+    of its own; every court in a Space shares the one schedule set here. They
+    are local wall-clock values, resolved against ``timezone`` to a UTC window
+    per date at the boundary, and nullable because a Space with none set simply
+    has no hours restriction yet.
+
+    ``max_duration_minutes``, ``booking_horizon_days``, ``max_bookings_per_week``
+    and ``max_bookings_per_month`` are the venue's rule-engine parameters — the
+    other half of "the Space is the unit of configuration and policy". A
+    frequency cap counts every booking the user holds anywhere in the Space,
+    across all its Resources, never per Resource. All four are nullable: unset
+    means the corresponding rule is not enforced for this Space.
 
     ``archived_at`` is the sole end-state. An archived Space rejects new bookings
     on any of its Resources; existing future bookings stay and remain cancellable.
@@ -184,6 +199,18 @@ class Space(Base):
     # be added NOT NULL to a table that already holds rows, and so a Space created
     # by a path that does not set it still lands on a valid zone.
     timezone: Mapped[str] = mapped_column(String(64), default="UTC", server_default=text("'UTC'"))
+    # Operating-hours configuration. Stored as *local* wall-clock times against
+    # this Space's own ``timezone``; the conversion to a UTC window happens per
+    # date at the boundary, never here.
+    opens_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
+    closes_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
+    slot_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    # Rule-engine parameters, consumed by task 4.13b's canon assembly. Unset
+    # (null) means the corresponding rule is not part of this Space's canon.
+    max_duration_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    booking_horizon_days: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    max_bookings_per_week: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    max_bookings_per_month: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     archived_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
@@ -200,13 +227,17 @@ class Space(Base):
 
 
 class Resource(Base):
-    """One bookable calendar inside a Space — a court, a room, a machine.
+    """One of N indistinguishable courts inside a Space — a unit of bookable
+    capacity, and nothing more.
 
     A Resource is what a booking is actually made against: ``bookings.resource_id``
     is a foreign key onto this table, and the overlap invariant is keyed on it, so
     two courts booked at the same hour do not collide while the same court twice
-    does. It belongs to exactly one :class:`Space` (its venue) and carries **no
-    permissions of its own** — a member of the Space may book any Resource in it.
+    does. That overlap constraint is the *only* thing that still distinguishes two
+    Resources in the same Space — it belongs to exactly one :class:`Space` (its
+    venue) and carries **no configuration and no permissions of its own**.
+    Operating hours, slot interval, and every rule limit live on the Space; a
+    member of the Space may book any Resource in it.
 
     A Resource has no ``public_id``. Admission is Space-level, so nothing reaches
     a Resource without first being inside its Space; there is no capability URL to
@@ -215,13 +246,8 @@ class Resource(Base):
     Space, which returns 404 (never 403) for a Resource that exists but is not
     yours — the same oracle-free rule the Space routes already follow.
 
-    The operating-hours columns — ``opens_at``, ``closes_at``, ``slot_minutes`` —
-    are the per-Resource booking configuration. They are **local wall-clock**
-    times, resolved against the parent Space's ``timezone`` to a UTC window per
-    date at the boundary; they are nullable because the configuration surface that
-    populates them is a later concern, and a Resource with none set simply has no
-    hours restriction yet. ``archived_at`` retires a Resource without deleting it,
-    matching the Space's own end-state; there is no delete and so no cascade.
+    ``archived_at`` retires a Resource without deleting it, matching the Space's
+    own end-state; there is no delete and so no cascade.
     """
 
     __tablename__ = "resources"
@@ -229,12 +255,6 @@ class Resource(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"))
     name: Mapped[str] = mapped_column(String(200))
-    # Operating-hours configuration, populated by the configuration UI later.
-    # Stored as *local* wall-clock times against the Space's IANA zone; the
-    # conversion to a UTC window happens per date at the boundary, never here.
-    opens_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
-    closes_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
-    slot_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     archived_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
 
