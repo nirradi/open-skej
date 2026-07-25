@@ -140,9 +140,11 @@ class CalendarContext:
 
 @dataclass(frozen=True)
 class HistoryContext:
-    """The user's relevant prior bookings for this resource.
+    """The requesting user's relevant prior bookings.
 
-    Already capped and already filtered by the caller. Everything in here counts.
+    Filtered to the **user**, not to any one resource — a caller may draw these from several
+    resources at once (an application counting a frequency cap across every Resource in a Space, for
+    instance). Already capped and already filtered by the caller. Everything in here counts.
     """
 
     bookings: tuple[BookingRecord, ...] = ()

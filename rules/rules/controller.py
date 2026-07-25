@@ -40,7 +40,20 @@ class ContextMismatchError(ValueError):
 
 
 def _check_context_matches_request(request: BookingRequest, context: Context) -> None:
-    """Raise ``ContextMismatchError`` unless ``context`` genuinely describes ``request``."""
+    """Raise ``ContextMismatchError`` unless ``context`` genuinely describes ``request``.
+
+    History is filtered to the requesting **user** — never to the requested resource. A caller may
+    legitimately hand the engine one user's bookings drawn from several resources (an application
+    scoping a frequency cap to every Resource in a Space rather than to the one being booked); the
+    engine has no opinion on how wide that scope is, only on whose bookings it may be. The real
+    invariant, and the only one checked here, is that every booking in ``context.history`` belongs
+    to the user in ``request`` — mixing in another user's history would silently count it toward
+    this user's limits, which is exactly what ``ContextMismatchError`` exists to catch instead of
+    hiding it.
+
+    A future ``Context`` may carry the Space itself, so a rule can decide its own scope rather than
+    relying on how the caller pre-filtered history; that is not this check's job today.
+    """
     if context.user.user_id != request.user_id:
         raise ContextMismatchError(
             f"Context is for user {context.user.user_id!r} but the request is from "
@@ -53,12 +66,6 @@ def _check_context_matches_request(request: BookingRequest, context: Context) ->
                 f"Context.history.bookings[{index}] belongs to user {booking.user_id!r}, not the "
                 f"requesting user {request.user_id!r}. History must be filtered to the requesting "
                 "user before the context is built."
-            )
-        if booking.resource_id != request.resource_id:
-            raise ContextMismatchError(
-                f"Context.history.bookings[{index}] is for resource {booking.resource_id!r}, not "
-                f"the requested resource {request.resource_id!r}. History must be filtered to the "
-                "requested resource before the context is built."
             )
 
 
