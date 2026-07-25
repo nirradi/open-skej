@@ -115,6 +115,13 @@ exists only to resolve a Resource's *operating hours* — local wall-clock confi
 per date at the boundary. That is the one place a zone is a property of the data; stored instants
 carry none. Operating hours (`opens_at`, `closes_at`, `slot_minutes`) are per-Resource columns.
 
+The zone and the operating hours are **admin-editable**: `PATCH /spaces/{public_id}` sets the Space's
+`timezone` and `PATCH /spaces/{public_id}/resources/{resource_id}` sets a Resource's hours and slot
+interval, both admin+. `SpaceRead` carries `timezone` so the config UI reads it without a second
+call. A `timezone` is validated as a real IANA name at the boundary — an unknown name or a fixed
+offset (`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
+operating-hours resolution far from where it was set.
+
 **No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
 reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a
 cascade would destroy booking history the moment a Resource or user was removed. A Resource retires
