@@ -292,11 +292,17 @@ export type PreviewStatus = 'none' | 'pending' | 'denied' | 'member'
  *
  * `archived_at` non-null means the Space is closed: the server rejects every
  * mutation on it with a 409, so the UI should stop offering them.
+ *
+ * `timezone` is the venue's IANA zone name (`Europe/Berlin`, never a fixed
+ * offset) — the recurring wall-clock config a Resource's operating hours are
+ * resolved against, not a property of any stored instant. See
+ * `.claude/rules/identity-and-access.md`.
  */
 export interface Space {
   public_id: string
   name: string
   description: string | null
+  timezone: string
   created_at: string
   archived_at: string | null
   my_role: MembershipRole

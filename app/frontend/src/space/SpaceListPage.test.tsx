@@ -27,6 +27,7 @@ function makeSpace(overrides: Partial<Space> = {}): Space {
     public_id: 'aBcDeFgHiJkLmNoPqRsTuV',
     name: 'Tennis Club',
     description: null,
+    timezone: 'UTC',
     created_at: '2026-07-01T00:00:00Z',
     archived_at: null,
     my_role: 'member',
