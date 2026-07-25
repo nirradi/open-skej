@@ -30,24 +30,31 @@ run time:
 
 ## The two Spaces
 
-Configuration — operating hours, slot interval, timezone — lives on the
-**Space** now (task 4.13a), not on its Resources: a Resource is one of N
-indistinguishable courts and carries no config of its own. So the two Spaces
-below differ from each other in their schedule, and each Space's own
-Resources are deliberately identical siblings.
+Configuration — operating hours, slot interval, timezone, and the rule-engine
+parameters (task 4.13b) — lives on the **Space**, not on its Resources: a
+Resource is one of N indistinguishable courts and carries no config of its
+own. So the two Spaces below differ from each other in their schedule and
+canon, and each Space's own Resources are deliberately identical siblings.
 
-* ``SPACE_A_NAME`` — zone ``SPACE_A_TIMEZONE`` (``Europe/Berlin``, chosen
-  because it is not UTC: Playwright pins the browser clock to UTC, which is
-  exactly the setting that would hide a timezone bug if every Space in the
-  sandbox were UTC too). Owner + admin + member. Two identical Resources
-  (courts) sharing the one Space-level schedule.
-* ``SPACE_B_NAME`` — zone ``SPACE_B_TIMEZONE`` (UTC), its own distinct
-  schedule, one Resource, and neither the member nor the stranger has a
-  membership row in it. A member of Space A must get 404 here, never 403.
-
-The rule-parameter columns (max duration, booking horizon, weekly/monthly
-caps) are deliberately left unset here — the canon is still module-level
-literals until 4.13b, so nothing in the backend reads them yet.
+* ``SPACE_A_NAME`` — the Playwright target (``app/e2e``). Zone
+  ``SPACE_A_TIMEZONE`` (``Europe/Berlin``) but **no availability hours**
+  (``opens_at``/``closes_at`` both ``None``): the E2E suite books early-morning
+  slots and asserts a copy-contract denial on duration alone
+  (``03-sad-path``), so this Space's canon is kept to exactly what that suite
+  exercises — ``max_duration_minutes`` matching the suite's hardcoded
+  ``MAX_BOOKING_MINUTES`` and a generous ``booking_horizon_days`` — and
+  nothing that could deny a booking for a different reason (an availability
+  window, a frequency cap) and break the suite's assumption that duration is
+  the only thing standing between it and success. Owner + admin + member. Two
+  identical Resources (courts) sharing the one Space-level schedule.
+* ``SPACE_B_NAME`` — the manual-QA target for everything Space A deliberately
+  does not exercise. Zone ``SPACE_B_TIMEZONE`` (``Australia/Sydney``, not
+  UTC and not Space A's own zone) with real ``opens_at``/``closes_at``, so the
+  per-date UTC resolution (``app.operating_hours``) is visible; a
+  ``max_duration_minutes`` of its own; and a ``max_bookings_per_week`` cap, so
+  Space-wide counting across a user's bookings is observable too. One
+  Resource, and neither the member nor the stranger has a membership row in
+  it — a member of Space A must get 404 here, never 403.
 
 ## Reset, not accumulate
 
@@ -111,26 +118,41 @@ STRANGER_EMAIL = "stranger@sandbox.open-skej.local"
 # yet, and giving this one a login identity would collapse that distinction.
 PENDING_INVITEE_EMAIL = "invitee@sandbox.open-skej.local"
 
-# --- Space A: non-UTC, two identical Resources sharing one schedule ----------
+# --- Space A: the E2E target — two identical Resources, a duration-only canon
 
 SPACE_A_NAME = "Sandbox Space A (Berlin)"
 SPACE_A_DESCRIPTION = "Owner + admin + member; two identical courts on one schedule."
 SPACE_A_TIMEZONE = "Europe/Berlin"
-SPACE_A_OPENS_AT = time(6, 0)
-SPACE_A_CLOSES_AT = time(22, 0)
+# No availability window: `app/e2e/tests/03-sad-path.spec.ts` books
+# early-morning slots and must see a denial for duration alone, never for an
+# hour outside a UTC-resolved window.
+SPACE_A_OPENS_AT: time | None = None
+SPACE_A_CLOSES_AT: time | None = None
 SPACE_A_SLOT_MINUTES = 60
+# Mirrors `MAX_BOOKING_MINUTES` in `03-sad-path.spec.ts` — a copy-contract
+# constant on both sides, not a coincidence.
+SPACE_A_MAX_DURATION_MINUTES = 120
+SPACE_A_BOOKING_HORIZON_DAYS = 60
+# Deliberately no frequency cap: the suite books repeatedly against this
+# Space and a weekly/monthly limit would eventually deny a booking the suite
+# expects to succeed, for a reason it never asserts on.
 
 RESOURCE_A1_NAME = "Court 1"
 RESOURCE_A2_NAME = "Court 2"
 
 # --- Space B: a different tenant, unreachable by the member or the stranger --
+# Real availability hours in a non-UTC, non-Space-A zone and a weekly cap, so
+# the per-date UTC resolution and Space-wide counting are both observable in
+# manual QA — capabilities Space A's canon deliberately does not exercise.
 
-SPACE_B_NAME = "Sandbox Space B (UTC)"
+SPACE_B_NAME = "Sandbox Space B (Sydney)"
 SPACE_B_DESCRIPTION = "Owned by the same owner as Space A; nobody else is in it."
-SPACE_B_TIMEZONE = "UTC"
+SPACE_B_TIMEZONE = "Australia/Sydney"
 SPACE_B_OPENS_AT = time(9, 0)
 SPACE_B_CLOSES_AT = time(17, 0)
 SPACE_B_SLOT_MINUTES = 30
+SPACE_B_MAX_DURATION_MINUTES = 90
+SPACE_B_MAX_BOOKINGS_PER_WEEK = 3
 # Its one Resource is the auto-created first Resource `create_space` always
 # gives a fresh Space (`service.FIRST_RESOURCE_NAME`) — Space B needs nothing
 # more than that to demonstrate cross-tenant isolation, so nothing here adds a
@@ -218,14 +240,15 @@ def _add_membership(session: Session, space: Space, user: User, role: Membership
 
 
 def _seed_future_bookings(session: Session, resource: Resource, member: User) -> None:
-    """Two confirmed bookings inside Resource A1's hours, so the calendar a
-    manual QA session opens is not empty.
+    """Two confirmed bookings on Resource A1, so the calendar a manual QA
+    session opens is not empty.
 
     Anchored on "tomorrow" and "the day after" rather than a fixed date so the
     seed stays useful indefinitely; computed in Space A's zone and converted
-    to UTC at the boundary like everything else here, so both actually land
-    inside ``SPACE_A_OPENS_AT``/``CLOSES_AT`` however DST falls on the day the
-    seed happens to run.
+    to UTC at the boundary like everything else here. Space A has no
+    availability window (see the module docstring), so there is no hours
+    constraint to land inside — only ``SPACE_A_MAX_DURATION_MINUTES``, which a
+    one-hour slot is well within.
     """
     tz = ZoneInfo(SPACE_A_TIMEZONE)
     today = datetime.now(tz).date()
@@ -282,6 +305,8 @@ def run(session: Session) -> None:
     space_a.opens_at = SPACE_A_OPENS_AT
     space_a.closes_at = SPACE_A_CLOSES_AT
     space_a.slot_minutes = SPACE_A_SLOT_MINUTES
+    space_a.max_duration_minutes = SPACE_A_MAX_DURATION_MINUTES
+    space_a.booking_horizon_days = SPACE_A_BOOKING_HORIZON_DAYS
     session.commit()
 
     _add_membership(session, space_a, admin, MembershipRole.ADMIN)
@@ -310,6 +335,8 @@ def run(session: Session) -> None:
     space_b.opens_at = SPACE_B_OPENS_AT
     space_b.closes_at = SPACE_B_CLOSES_AT
     space_b.slot_minutes = SPACE_B_SLOT_MINUTES
+    space_b.max_duration_minutes = SPACE_B_MAX_DURATION_MINUTES
+    space_b.max_bookings_per_week = SPACE_B_MAX_BOOKINGS_PER_WEEK
     session.commit()
 
     # A pending access request: the stranger asks to get into Space A.

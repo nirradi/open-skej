@@ -44,9 +44,12 @@ into a pass defeats containment *silently* — it looks like a working rule that
 * **`CalendarContext`** — `week_starts_on` (a `Weekday` enum) and `now`. **No timezone field.**
 * **`BookingRequest`** / **`BookingRecord`** — `user_id`, `resource_id`, `start_at`, `end_at`.
 * **`HistoryContext`** — `bookings`, the caller's pre-filtered, pre-capped list. **Everything in it
-  counts.** `BookingRecord` has no status field and the engine never inspects one: filtering belongs
-  to the layer that owns the schema, so a future `deleted` or no-show flag cannot silently obsolete
-  every rule that forgot to check it.
+  counts.** It is filtered to the requesting **user**, never to one resource: a caller may legitimately
+  draw it from several resources at once — the backend counts a frequency cap across every Resource in
+  a Space, not per court — and the controller's cross-check enforces only that the user matches, not
+  the resource. `BookingRecord` has no status field and the engine never inspects one: filtering
+  belongs to the layer that owns the schema, so a future `deleted` or no-show flag cannot silently
+  obsolete every rule that forgot to check it.
 * **`Context`** — aggregates `user` / `calendar` / `history` and enforces the history-window
   invariant.
 * **`RuleResult`** — `passed` (bool), `fail_reason` (`str | None`, friendly copy shown verbatim in
@@ -82,8 +85,14 @@ nowhere else. **It converts every datetime to UTC** (`.astimezone(timezone.utc)`
 engine types — the engine rejects a non-zero offset outright, so a booking a client sends as
 `+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
 message**: `RuleResult(passed=True)` carries no copy, but the API shows friendly text on success. **It
-passes empty history**, because `DEFAULT_CANON` holds only the request-local rules; the day a counting
-rule joins the canon, the adapter is where the history query is added, capped to `history_window`.
+assembles the canon per Space** from that Space's own configuration rather than running
+`DEFAULT_CANON` — a null column omits its rule, and a Space's local operating hours are resolved to a
+UTC window per booking date before `AvailabilityHoursRule` is built. **It passes Space-wide history**
+only when the Space's canon includes a counting rule: the router loads the user's bookings across
+every Resource in the Space, capped to `history_window`, and passes them in; with no counting rule
+configured, history stays empty and no query runs. `DEFAULT_CANON` is no longer what the API runs — it
+remains the *reference* canon the generation loop is measured against and the source of the default
+values a Space that overrides nothing would use.
 
 `ContextMismatchError` is deliberately not caught at this boundary: the adapter builds both the
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
@@ -121,9 +130,11 @@ the engine has no timezone to convert from.
 
 `frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n)` and
 `MaxBookingsPerMonthRule(n)`, the only ones whose verdict depends on anything beyond the request.
-They are **exported but deliberately absent from `DEFAULT_CANON`** — the four rules in `canon.py` are
-what the end-to-end suite asserts against, and adding a booking limit to the default canon would
-change behaviour those tests depend on.
+They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of the four
+request-local rules in `canon.py`. The API does not run `DEFAULT_CANON`; it assembles a per-Space
+canon that *includes* these two when a Space sets `max_bookings_per_week` / `max_bookings_per_month`.
+Keeping them out of the reference canon is what lets the end-to-end suite assert against a seeded Space
+configured to those four rules' values without a counting rule silently changing the outcome.
 
 **A booking is counted against the window it starts in, and the window is anchored on the request
 rather than on `now`.** A request three weeks out is judged against that week's bookings, not this

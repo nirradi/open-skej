@@ -19,14 +19,14 @@ Exceptions here are plain domain errors, translated to status codes by the
 router — the same split ``app.db.driver`` uses with ``OverlapError``.
 """
 
-from datetime import time
+from datetime import datetime, time
 from typing import Optional, Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import utcnow
+from app.db.models import Booking, BookingStatus, utcnow
 from app.identity.authz import role_at_least
 from app.identity.models import (
     AccessRequestStatus,
@@ -343,6 +343,49 @@ def list_resources(session: Session, space: Space, *, include_archived: bool) ->
         query = query.where(Resource.archived_at.is_(None))
 
     return session.execute(query).scalars().all()
+
+
+def list_user_bookings_in_space(
+    session: Session,
+    space: Space,
+    user_id: int,
+    *,
+    lower: datetime,
+    upper: datetime,
+) -> Sequence[Booking]:
+    """This user's confirmed bookings across **every** Resource in ``space``.
+
+    Backs the rule engine's Space-wide frequency caps (``.claude/rules/rule-
+    engine.md``): a cap counts every booking the user holds anywhere in the
+    venue, across all its Resources, never per Resource, so the query joins
+    onto every Resource in the Space rather than filtering to one.
+
+    ``[lower, upper)`` is a half-open **overlap** window, matching
+    ``PostgresBookingDriver.list_bookings``: a booking counts if it overlaps
+    the window at all, not only if it starts inside it, because the caller is
+    expected to pass ``rules.history_window(now)`` and the engine's own
+    ``Context`` validates history by overlap, not by containment. The caller
+    (the router) is what actually caps the window; this function does not
+    re-derive it, so a caller that passes too wide a window gets exactly what
+    it asked for rather than a silently narrowed one.
+
+    Cancelled bookings are excluded: a cancelled booking frees the slot it held
+    and does not count toward the user's limit, the same treatment
+    ``list_bookings`` gives a cancelled row when listing a calendar.
+    """
+    stmt = (
+        select(Booking)
+        .join(Resource, Booking.resource_id == Resource.id)
+        .where(
+            Resource.space_id == space.id,
+            Booking.user_id == user_id,
+            Booking.status == BookingStatus.CONFIRMED,
+            Booking.start_at < upper,
+            Booking.end_at > lower,
+        )
+        .order_by(Booking.start_at, Booking.id)
+    )
+    return session.execute(stmt).scalars().all()
 
 
 def get_resource(session: Session, space: Space, resource_id: int) -> Resource:

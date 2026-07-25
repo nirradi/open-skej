@@ -182,10 +182,15 @@ def test_history_belonging_to_another_user_raises():
         evaluate_request(make_request(), context, [])
 
 
-def test_history_for_another_resource_raises():
-    context = make_context(make_booking(resource_id="court-2"))
-    with pytest.raises(ContextMismatchError, match="court-2"):
-        evaluate_request(make_request(), context, [])
+def test_history_for_a_different_resource_is_accepted():
+    """History is filtered to the user, not the resource.
+
+    An application scoping a frequency cap across every Resource in a Space (rather than to the one
+    being booked) legitimately hands the engine one user's bookings drawn from several resources —
+    the engine has no opinion on how wide that scope is, only on whose bookings it may be.
+    """
+    context = make_context(make_booking(resource_id="court-2"), make_booking(resource_id="court-3"))
+    assert evaluate_request(make_request(), context, []).passed
 
 
 def test_context_built_for_a_different_user_raises():
