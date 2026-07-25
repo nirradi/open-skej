@@ -25,6 +25,7 @@ id discloses nothing to anyone who is not already there.
 
 from datetime import datetime, time
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -67,24 +68,39 @@ class SpaceCreate(BaseModel):
 class SpaceUpdate(BaseModel):
     """The body of ``PATCH /spaces/{public_id}``.
 
-    Both fields are optional, and *omitted* is deliberately distinct from
+    All fields are optional, and *omitted* is deliberately distinct from
     *explicitly null*: omitting ``description`` leaves it alone, while sending
     ``null`` clears it. The router reads ``model_fields_set`` to tell the two
     apart, which is the only way to express "clear this field" in a PATCH without
     inventing a sentinel value.
 
-    ``name`` is the exception — it is not nullable in the database, so an
-    explicit null is a client error rather than an instruction, and is rejected
-    here as 422 instead of reaching the database as an ``IntegrityError`` 500.
+    ``name`` and ``timezone`` are the exception — neither is nullable in the
+    database, so an explicit null for either is a client error rather than an
+    instruction, and is rejected here as 422 instead of reaching the database as
+    an ``IntegrityError`` 500.
     """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=_NAME_MAX)
     description: Optional[str] = Field(default=None, max_length=_DESCRIPTION_MAX)
+    timezone: Optional[str] = Field(default=None, min_length=1, max_length=64)
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError:
+            raise ValueError(f"{value!r} is not a known IANA timezone name")
+        return value
 
     @model_validator(mode="after")
     def _reject_explicit_null_name(self) -> "SpaceUpdate":
         if "name" in self.model_fields_set and self.name is None:
             raise ValueError("name may not be null; omit it to leave it unchanged")
+        if "timezone" in self.model_fields_set and self.timezone is None:
+            raise ValueError("timezone may not be null; omit it to leave it unchanged")
         return self
 
 
@@ -101,6 +117,7 @@ class SpaceRead(BaseModel):
     public_id: str
     name: str
     description: Optional[str]
+    timezone: str
     created_at: datetime
     archived_at: Optional[datetime]
     my_role: MembershipRole
@@ -111,6 +128,7 @@ class SpaceRead(BaseModel):
             public_id=space.public_id,
             name=space.name,
             description=space.description,
+            timezone=space.timezone,
             created_at=space.created_at,
             archived_at=space.archived_at,
             my_role=role,
