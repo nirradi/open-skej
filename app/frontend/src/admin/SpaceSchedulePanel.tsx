@@ -31,12 +31,20 @@ const COMMON_TIMEZONES = [
  * edited here. There is nothing left to configure per Resource, which is why
  * this panel — unlike its 4.12 predecessor — has no per-Resource rows at all.
  *
+ * ## Rule parameters live here too
+ *
+ * Task 4.13b assembles each Space's rule canon from its own configuration
+ * (`.claude/rules/rule-engine.md`), so `max_duration_minutes`,
+ * `booking_horizon_days`, `max_bookings_per_week`, and
+ * `max_bookings_per_month` are edited alongside the schedule fields above —
+ * one Space-wide config, one panel. Each is nullable: an empty field clears
+ * it to `null`, meaning that rule is not enforced for this Space, the same
+ * "no restriction" convention the hours fields already use.
+ *
  * ## Not a general configuration surface
  *
  * No Resource create/archive, no Space rename — those live elsewhere or
- * nowhere yet. No rule parameters (max duration, caps) — those get their UI
- * in task 4.13b when they are actually enforced by the booking engine, and
- * this panel does not reach into the rule engine at all.
+ * nowhere yet.
  *
  * ## Authorization
  *
@@ -60,6 +68,18 @@ export function SpaceSchedulePanel({
   const [slotMinutes, setSlotMinutes] = useState(
     space.slot_minutes === null ? '' : String(space.slot_minutes),
   )
+  const [maxDurationMinutes, setMaxDurationMinutes] = useState(
+    toNumberInputValue(space.max_duration_minutes),
+  )
+  const [bookingHorizonDays, setBookingHorizonDays] = useState(
+    toNumberInputValue(space.booking_horizon_days),
+  )
+  const [maxBookingsPerWeek, setMaxBookingsPerWeek] = useState(
+    toNumberInputValue(space.max_bookings_per_week),
+  )
+  const [maxBookingsPerMonth, setMaxBookingsPerMonth] = useState(
+    toNumberInputValue(space.max_bookings_per_month),
+  )
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -71,7 +91,9 @@ export function SpaceSchedulePanel({
   // use, and the one the `react-hooks/set-state-in-effect` lint enforces.
   const scheduleKey =
     `${space.public_id}:${space.timezone}:${space.opens_at}:` +
-    `${space.closes_at}:${space.slot_minutes}`
+    `${space.closes_at}:${space.slot_minutes}:${space.max_duration_minutes}:` +
+    `${space.booking_horizon_days}:${space.max_bookings_per_week}:` +
+    `${space.max_bookings_per_month}`
   const [seenScheduleKey, setSeenScheduleKey] = useState(scheduleKey)
   if (seenScheduleKey !== scheduleKey) {
     setSeenScheduleKey(scheduleKey)
@@ -79,6 +101,10 @@ export function SpaceSchedulePanel({
     setOpensAt(toTimeInputValue(space.opens_at))
     setClosesAt(toTimeInputValue(space.closes_at))
     setSlotMinutes(space.slot_minutes === null ? '' : String(space.slot_minutes))
+    setMaxDurationMinutes(toNumberInputValue(space.max_duration_minutes))
+    setBookingHorizonDays(toNumberInputValue(space.booking_horizon_days))
+    setMaxBookingsPerWeek(toNumberInputValue(space.max_bookings_per_week))
+    setMaxBookingsPerMonth(toNumberInputValue(space.max_bookings_per_month))
     setError('')
   }
 
@@ -91,6 +117,10 @@ export function SpaceSchedulePanel({
       opens_at: fromTimeInputValue(opensAt),
       closes_at: fromTimeInputValue(closesAt),
       slot_minutes: slotMinutes === '' ? null : Number(slotMinutes),
+      max_duration_minutes: fromNumberInputValue(maxDurationMinutes),
+      booking_horizon_days: fromNumberInputValue(bookingHorizonDays),
+      max_bookings_per_week: fromNumberInputValue(maxBookingsPerWeek),
+      max_bookings_per_month: fromNumberInputValue(maxBookingsPerMonth),
     })
     setBusy(false)
 
@@ -109,8 +139,8 @@ export function SpaceSchedulePanel({
     >
       <h2 className="text-sm font-semibold text-slate-900">Schedule</h2>
       <p className="mt-1 text-xs text-slate-500">
-        The venue's timezone, operating hours, and slot interval — shared by every
-        Resource in this Space.
+        The venue's timezone, operating hours, slot interval, and booking rules — shared
+        by every Resource in this Space. Leave a rule field empty to leave it unenforced.
       </p>
 
       <div className="mt-3">
@@ -179,6 +209,72 @@ export function SpaceSchedulePanel({
             onChange={(event) => setSlotMinutes(event.target.value)}
           />
         </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-end gap-3">
+        <div>
+          <label className="block text-xs text-slate-600" htmlFor="space-max-duration">
+            Max booking length (minutes)
+          </label>
+          <input
+            id="space-max-duration"
+            type="number"
+            min={1}
+            className="mt-1 w-32 rounded border border-slate-300 px-2 py-1 text-sm"
+            data-testid="max-duration-input"
+            value={maxDurationMinutes}
+            disabled={archived || busy}
+            onChange={(event) => setMaxDurationMinutes(event.target.value)}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-600" htmlFor="space-horizon">
+            Booking horizon (days)
+          </label>
+          <input
+            id="space-horizon"
+            type="number"
+            min={1}
+            className="mt-1 w-28 rounded border border-slate-300 px-2 py-1 text-sm"
+            data-testid="booking-horizon-input"
+            value={bookingHorizonDays}
+            disabled={archived || busy}
+            onChange={(event) => setBookingHorizonDays(event.target.value)}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-600" htmlFor="space-max-per-week">
+            Max bookings per week
+          </label>
+          <input
+            id="space-max-per-week"
+            type="number"
+            min={1}
+            className="mt-1 w-28 rounded border border-slate-300 px-2 py-1 text-sm"
+            data-testid="max-bookings-per-week-input"
+            value={maxBookingsPerWeek}
+            disabled={archived || busy}
+            onChange={(event) => setMaxBookingsPerWeek(event.target.value)}
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs text-slate-600" htmlFor="space-max-per-month">
+            Max bookings per month
+          </label>
+          <input
+            id="space-max-per-month"
+            type="number"
+            min={1}
+            className="mt-1 w-28 rounded border border-slate-300 px-2 py-1 text-sm"
+            data-testid="max-bookings-per-month-input"
+            value={maxBookingsPerMonth}
+            disabled={archived || busy}
+            onChange={(event) => setMaxBookingsPerMonth(event.target.value)}
+          />
+        </div>
 
         <button
           type="button"
@@ -212,4 +308,14 @@ function toTimeInputValue(value: string | null): string {
 /** `HH:MM` from the input, or `null` for "no restriction" → the wire shape. */
 function fromTimeInputValue(value: string): string | null {
   return value === '' ? null : `${value}:00`
+}
+
+/** `number | null` (the wire shape) → the string a number input wants. */
+function toNumberInputValue(value: number | null): string {
+  return value === null ? '' : String(value)
+}
+
+/** The input's string value → `number | null`, empty meaning "not enforced". */
+function fromNumberInputValue(value: string): number | null {
+  return value === '' ? null : Number(value)
 }
