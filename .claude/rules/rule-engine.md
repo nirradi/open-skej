@@ -80,7 +80,7 @@ contain a buggy rule.
 therefore a fact about the packaging, not a promise a reviewer must keep.
 
 `app/backend/app/rules_stub.py` is the adapter, and the whole of it. It holds no rule logic; it
-translates between the HTTP boundary and `evaluate_request`, and three translations live there and
+translates between the HTTP boundary and `evaluate_request`, and four translations live there and
 nowhere else. **It converts every datetime to UTC** (`.astimezone(timezone.utc)`) before building
 engine types — the engine rejects a non-zero offset outright, so a booking a client sends as
 `+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
@@ -98,25 +98,37 @@ values a Space that overrides nothing would use.
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
 tracker, not be served as a polite refusal.
 
+**A Space whose operating hours cannot be resolved is denied, not served.** A local window that wraps
+past midnight in the Space's own zone raises `MidnightWrapError` while the canon is being assembled,
+and the adapter converts it to a denial carrying the engine's generic `RULE_ERROR_MESSAGE`. A
+configuration the boundary cannot resolve is a failure to positively establish that the booking is
+permitted, so it resolves to **no** — the same reading the controller gives a rule that raises,
+applied one layer out.
+
 ## The canon
 
-`canon.py` holds the four hand-written rules every Space enforces: `NotInThePastRule()`,
+`canon.py` holds the four hand-written request-local rules: `NotInThePastRule()`,
 `BookingHorizonRule(days)`, `MaxDurationRule(max_duration)`, `AvailabilityHoursRule(opens_at,
 closes_at)`. They are written by hand rather than generated — they are the reference the generation
 loop is measured against, and the worked example of the rule shape.
 
 **Parameters live on the instance, never as module constants.** A Space allowing 45-minute bookings
-and one allowing two hours are the same rule with different arguments, so per-Space configuration
-becomes a change to how the canon is built rather than a change to any rule. `DEFAULT_CANON` supplies
-the values in force today.
+and one allowing two hours are the same rule with different arguments, so per-Space configuration is
+a change to how the canon is built rather than a change to any rule. `DEFAULT_CANON` is the reference
+assembly of these four at their default values; the canon the API actually runs is built per Space
+(see Backend integration), where a null column omits its rule entirely. `NotInThePastRule` is the
+only one always present — you can never book the past, whatever a Space configures.
 
-**The order is `(NotInThePast, BookingHorizon, MaxDuration, AvailabilityHours)`, and it arbitrates
-user-facing copy.** The controller is fail-fast, so the first rule to deny decides the single message
-shown when a request breaks several rules at once. The date rules run first because they reject a
-booking on *when* it is, which no shortening or shifting within the day can fix; telling someone to
-trim a three-hour booking that sits 90 days out sends them to fix the one thing that is not the
-problem. Duration and availability hours are remedies the user can apply to an otherwise bookable
-date, so they follow. Past and horizon are mutually exclusive and never arbitrate against each other.
+**The assembled order is `(NotInThePast, BookingHorizon, MaxDuration, AvailabilityHours,
+MaxBookingsPerWeek, MaxBookingsPerMonth)`, and it arbitrates user-facing copy.** The controller is
+fail-fast, so the first rule to deny decides the single message shown when a request breaks several
+rules at once. The date rules run first because they reject a booking on *when* it is, which no
+shortening or shifting within the day can fix; telling someone to trim a three-hour booking that sits
+90 days out sends them to fix the one thing that is not the problem. Duration and availability hours
+are remedies the user can apply to an otherwise bookable date, so they follow. Past and horizon are
+mutually exclusive and never arbitrate against each other. **The counting rules come last** because a
+frequency cap is the one denial no change to *this* request can fix — no shorter, earlier or later
+booking clears it — so every rule naming a fixable problem gets first refusal.
 
 **Denial copy is contract, not wording.** `app/e2e/tests/03-sad-path.spec.ts` asserts the
 max-duration message as a full-string match and reproduces the singular/plural and `" and "` join of
@@ -125,8 +137,9 @@ package.
 
 **Availability hours are UTC hours.** `opens_at` and `closes_at` are UTC clock times and
 `start_at.time()` is a UTC wall clock, so a Space opening at 06:00 local does not open at
-`time(6, 0)` unless it sits on UTC. Rendering those bounds in a viewer's timezone is the UI's job;
-the engine has no timezone to convert from.
+`time(6, 0)` unless it sits on UTC. The adapter resolves a Space's local hours to a UTC window for
+the booking's own date before constructing the rule (see Backend integration); the engine itself has
+no timezone to convert from, and rendering those bounds in a viewer's timezone stays the UI's job.
 
 `frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n)` and
 `MaxBookingsPerMonthRule(n)`, the only ones whose verdict depends on anything beyond the request.
