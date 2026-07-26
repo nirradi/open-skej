@@ -39,8 +39,9 @@ app/backend/app/
                    booking is made against a Resource inside a Space the caller belongs to, resolved
                    through `require_space_role`. It is the only booking router — there is no unscoped
                    route and no default Resource or user for one to carry
-  rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy,
-                   builds the engine Context. Name is historical; it holds no rule logic
+  rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy, and
+                   assembles the canon from the Space's own configuration rather than running a
+                   module-level one. Name is historical; it holds no rule logic
 app/frontend/    React SPA
   src/auth/      Auth0 and sandbox wiring behind one `useSession()` seam, and the route guard
                    built on it — `ProtectedRoute` is what makes `/` the front door: login rendered

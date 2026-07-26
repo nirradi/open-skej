@@ -162,7 +162,8 @@ round-trip and a chance for the two to disagree.
 
 * **Cold link-holder** — sees a minimal preview (name, description, own status) and may request
   access; an admin approves. The preview is deliberately thin: no member list, no bookings.
-  `/preview` is the one route reachable without a membership.
+  `/preview` is the one route reachable without a **membership** — it still requires a session, since
+  the status it returns is the caller's own and means nothing without an identity.
 * **Invitee** — an invitation **pre-approves**. Membership is granted on first login, matched on
   verified email, with no request step.
 
