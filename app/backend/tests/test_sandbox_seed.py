@@ -147,6 +147,20 @@ def test_seed_produces_every_interesting_state(session):
     assert space_b.closes_at is not None
     assert space_b.max_duration_minutes == SPACE_B_MAX_DURATION_MINUTES
     assert space_b.max_bookings_per_week == SPACE_B_MAX_BOOKINGS_PER_WEEK
+
+    # Two Resources, like Space A — the weekly cap is Space-wide, so
+    # demonstrating it needs a booking to land on a different Resource than
+    # the first two (task 5.1).
+    resources_b = (
+        session.execute(
+            select(Resource).where(Resource.space_id == space_b.id).order_by(Resource.id)
+        )
+        .scalars()
+        .all()
+    )
+    assert len(resources_b) == 2
+    assert {r.name for r in resources_b} == {"Main", "Court 2"}
+
     member_ids_in_b = set(
         session.execute(
             select(SpaceMembership.user_id).where(SpaceMembership.space_id == space_b.id)

@@ -52,9 +52,11 @@ canon, and each Space's own Resources are deliberately identical siblings.
   UTC and not Space A's own zone) with real ``opens_at``/``closes_at``, so the
   per-date UTC resolution (``app.operating_hours``) is visible; a
   ``max_duration_minutes`` of its own; and a ``max_bookings_per_week`` cap, so
-  Space-wide counting across a user's bookings is observable too. One
-  Resource, and neither the member nor the stranger has a membership row in
-  it — a member of Space A must get 404 here, never 403.
+  Space-wide counting across a user's bookings is observable too. Two
+  Resources — the frequency cap is Space-wide, and demonstrating that
+  requires a third booking to land on a *different* Resource than the first
+  two — and neither the member nor the stranger has a membership row in
+  either — a member of Space A must get 404 here, never 403.
 
 ## Reset, not accumulate
 
@@ -148,15 +150,28 @@ RESOURCE_A2_NAME = "Court 2"
 SPACE_B_NAME = "Sandbox Space B (Sydney)"
 SPACE_B_DESCRIPTION = "Owned by the same owner as Space A; nobody else is in it."
 SPACE_B_TIMEZONE = "Australia/Sydney"
-SPACE_B_OPENS_AT = time(9, 0)
-SPACE_B_CLOSES_AT = time(17, 0)
+# Not 09:00-17:00: Sydney sits at UTC+10 (AEST) / UTC+11 (AEDT), both ahead of
+# an opens_at that early, so resolving "09:00-17:00 local" to UTC pushes
+# opening back onto the *previous* UTC calendar day (23:00/22:00) while
+# closing stays on the same one (07:00/06:00) — `resolve_operating_hours`
+# correctly refuses to express that as a same-UTC-day pair and raises
+# `MidnightWrapError` on *every* date, which made this Space unable to accept
+# any booking at all (found by task 5.1, running the seed against the live
+# API rather than a unit test pinned to one date). 11:00-21:00 keeps opening
+# at or after Sydney's UTC offset in both AEST and AEDT, so the window never
+# crosses a UTC calendar-day boundary, while still being a real non-UTC,
+# DST-observing zone for the per-date resolution to demonstrate.
+SPACE_B_OPENS_AT = time(11, 0)
+SPACE_B_CLOSES_AT = time(21, 0)
 SPACE_B_SLOT_MINUTES = 30
 SPACE_B_MAX_DURATION_MINUTES = 90
 SPACE_B_MAX_BOOKINGS_PER_WEEK = 3
-# Its one Resource is the auto-created first Resource `create_space` always
-# gives a fresh Space (`service.FIRST_RESOURCE_NAME`) — Space B needs nothing
-# more than that to demonstrate cross-tenant isolation, so nothing here adds a
-# second one.
+# Its first Resource is the one `create_space` auto-creates for every fresh
+# Space (`service.FIRST_RESOURCE_NAME`); a second, identical sibling is added
+# below (mirroring Space A's own Court 1 / Court 2 pair) so the weekly cap's
+# Space-wide count can be demonstrated crossing a Resource boundary, not just
+# accumulating on one.
+RESOURCE_B2_NAME = "Court 2"
 
 # --- The archived Space -------------------------------------------------------
 
@@ -338,6 +353,12 @@ def run(session: Session) -> None:
     space_b.max_duration_minutes = SPACE_B_MAX_DURATION_MINUTES
     space_b.max_bookings_per_week = SPACE_B_MAX_BOOKINGS_PER_WEEK
     session.commit()
+
+    # `create_space` auto-created one Resource ("Main"); add an identical
+    # sibling so a manual verification of the weekly cap can put its third
+    # booking on a different Resource than the first two — see the module
+    # docstring on why Space B needs two.
+    service.create_resource(session, space_b, name=RESOURCE_B2_NAME)
 
     # A pending access request: the stranger asks to get into Space A.
     service.request_access(

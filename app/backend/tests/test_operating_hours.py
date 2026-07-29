@@ -112,3 +112,51 @@ def test_midnight_wrap_raises_a_clear_domain_error():
             tz_name="Pacific/Auckland",
             on_date=date(2026, 1, 21),
         )
+
+
+def test_midnight_wrap_is_not_only_a_utc_plus_13_problem():
+    """An ordinary 09:00-17:00 window wraps at UTC+10 too, not just UTC+13/+14.
+
+    Found by task 5.1 verifying the seeded sandbox end to end: Australia/Sydney
+    sits at UTC+10 (AEST), so 09:00 local resolves to 23:00Z on the *previous*
+    UTC date while 17:00 resolves to 07:00Z the same day — the same inversion
+    the Auckland case above demonstrates, just at a smaller offset. The
+    wrap condition is `opens_at_hour < utc_offset_hours`, which this module's
+    own docstring undersells by naming only "roughly UTC-11 to UTC+12" and
+    UTC+13/+14 as the practical case; an ordinary 9-to-5 schedule at UTC+10
+    hits it too. This is exactly why the sandbox seed no longer uses these
+    hours for its Sydney Space (`app/backend/app/sandbox_seed.py`).
+    """
+    with pytest.raises(MidnightWrapError):
+        resolve_operating_hours(
+            opens_at=time(9, 0),
+            closes_at=time(17, 0),
+            tz_name="Australia/Sydney",
+            on_date=date(2026, 7, 29),
+        )
+
+
+def test_sydney_space_b_hours_do_not_wrap_in_either_season():
+    """The sandbox seed's actual Space B hours (11:00-21:00) resolve cleanly.
+
+    Sydney alternates AEST (UTC+10) and AEDT (UTC+11) across the year; 11:00
+    keeps opening at or after the offset in both, so neither season crosses a
+    UTC calendar-day boundary — unlike the 09:00-17:00 window above.
+    """
+    winter_open, winter_close = resolve_operating_hours(
+        opens_at=time(11, 0),
+        closes_at=time(21, 0),
+        tz_name="Australia/Sydney",
+        on_date=date(2026, 7, 29),  # AEST, UTC+10
+    )
+    assert winter_open == time(1, 0)
+    assert winter_close == time(11, 0)
+
+    summer_open, summer_close = resolve_operating_hours(
+        opens_at=time(11, 0),
+        closes_at=time(21, 0),
+        tz_name="Australia/Sydney",
+        on_date=date(2026, 1, 15),  # AEDT, UTC+11
+    )
+    assert summer_open == time(0, 0)
+    assert summer_close == time(10, 0)
