@@ -247,6 +247,47 @@ describe('already_started', () => {
   })
 })
 
+describe('not_yours', () => {
+  const message = 'You can only cancel your own bookings. Ask an admin if this one needs to go.'
+
+  it('renders a plain, terminal statement', async () => {
+    cancelResourceBooking.mockResolvedValue({ outcome: 'not_yours', message })
+    renderPanel()
+    confirmCancel()
+
+    const notYours = await screen.findByTestId('cancel-not-yours')
+    expect(notYours.textContent).toBe(message)
+  })
+
+  it('hides the retry control — nothing here can make it the caller\'s booking', async () => {
+    cancelResourceBooking.mockResolvedValue({ outcome: 'not_yours', message })
+    renderPanel()
+    confirmCancel()
+
+    await screen.findByTestId('cancel-not-yours')
+    expect(screen.queryByTestId('cancel-start')).toBeNull()
+  })
+
+  it('does not refresh the calendar — nothing changed', async () => {
+    cancelResourceBooking.mockResolvedValue({ outcome: 'not_yours', message })
+    renderPanel()
+    confirmCancel()
+
+    await screen.findByTestId('cancel-not-yours')
+    expect(onCalendarChanged).not.toHaveBeenCalled()
+  })
+
+  it('is not mistaken for already_started or a generic error', async () => {
+    cancelResourceBooking.mockResolvedValue({ outcome: 'not_yours', message })
+    renderPanel()
+    confirmCancel()
+
+    await screen.findByTestId('cancel-not-yours')
+    expect(screen.queryByTestId('cancel-started')).toBeNull()
+    expect(screen.queryByTestId('cancel-error')).toBeNull()
+  })
+})
+
 describe('the access floor', () => {
   it.each(['unauthenticated', 'forbidden'] as const)(
     'renders %s as generic copy, offering a retry',

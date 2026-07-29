@@ -175,6 +175,23 @@ export interface ApiAlreadyStarted {
 }
 
 /**
+ * 403 + `error: "not_yours"` — a member cancelling a booking that belongs to
+ * someone else. Admin and owner never see this; only a plain member does.
+ *
+ * The one bounded exception to `ApiNotFound`'s "not there, or not yours"
+ * phrasing: everywhere else in this client, "not yours" collapses into 404
+ * because the caller might not even be a member and there is an id worth
+ * concealing. Here the caller has already proven membership and is looking at
+ * the booking on the calendar they just loaded, so there is nothing left to
+ * conceal — the server says so plainly instead, with real product copy.
+ * Mirrors `BookingNotYours` in `app/backend/app/schemas.py`.
+ */
+export interface ApiNotYours {
+  outcome: 'not_yours'
+  message: string
+}
+
+/**
  * The server rejected the request as malformed — a 422 with no `error` key
  * (FastAPI request validation) or a 400 (bad window, naive datetime).
  *
@@ -468,16 +485,18 @@ export type CreateResourceBookingResult =
   | ApiFailure
 
 /**
- * `DELETE .../bookings/{id}` — the access floor plus the three ways a cancel is
+ * `DELETE .../bookings/{id}` — the access floor plus the four ways a cancel is
  * refused. `already_cancelled` is benign (the desired end state already
  * holds); `already_started` has no remedy at all — the interval is under way
- * and cannot be released.
+ * and cannot be released; `not_yours` is a plain member cancelling someone
+ * else's booking, refused with real copy rather than folded into `not_found`.
  */
 export type CancelResourceBookingResult =
   | ApiOk<Booking>
   | ApiNotFound
   | ApiAlreadyCancelled
   | ApiAlreadyStarted
+  | ApiNotYours
   | ApiUnauthenticated
   | ApiForbidden
   | ApiInvalidRequest

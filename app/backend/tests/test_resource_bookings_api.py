@@ -455,6 +455,116 @@ def test_cancelling_an_already_cancelled_booking_is_409(
     assert response.json()["error"] == "already_cancelled"
 
 
+# --- Ownership: a member cancels their own; admin and owner cancel any. --------
+
+
+@pytest.fixture
+def other_member(session: Session) -> User:
+    """A second plain member of ``space``, distinct from ``member``.
+
+    Needed because "another member's booking" requires two members who are
+    each other's "someone else" — cancelling ``owner``'s booking would also
+    prove the point, but conflating it with the owner risks reading a pass here
+    as evidence for the wrong rule (rank above admin) rather than the one this
+    test is actually about (rank below admin).
+    """
+    return _make_user(session, "auth0|other-member", "other-member@example.com")
+
+
+@pytest.fixture
+def admin(session: Session, space: Space) -> User:
+    user = _make_user(session, "auth0|admin", "admin@example.com")
+    session.add(SpaceMembership(space_id=space.id, user_id=user.id, role=MembershipRole.ADMIN))
+    session.commit()
+    return user
+
+
+def test_a_member_cancelling_another_members_booking_is_refused_and_the_booking_survives(
+    api: Api,
+    session: Session,
+    driver: PostgresBookingDriver,
+    member: User,
+    other_member: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    """The defect this task fixes: three guards ran before the release — proving
+    membership, that the booking is on this Resource, and that it has not
+    started — and not one of them compared ``booking.user_id`` to the caller.
+
+    Asserts the row is still ``confirmed``, not merely that the response was
+    403 — a check that returns the right status while still cancelling the
+    booking underneath it is the failure this guards against.
+    """
+    session.add(
+        SpaceMembership(space_id=space.id, user_id=other_member.id, role=MembershipRole.MEMBER)
+    )
+    session.commit()
+    booking = driver.create_booking(
+        start_at=at(10), end_at=at(11), user_id=member.id, resource_id=resource.id
+    )
+
+    response = api.as_user(other_member).delete(_url(space, resource, f"/{booking.id}"))
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "not_yours"
+
+    stored = driver.get_booking(booking.id)
+    assert stored.status == "confirmed"
+
+
+def test_an_admin_can_cancel_a_members_booking(
+    api: Api,
+    driver: PostgresBookingDriver,
+    member: User,
+    admin: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    booking = driver.create_booking(
+        start_at=at(10), end_at=at(11), user_id=member.id, resource_id=resource.id
+    )
+
+    response = api.as_user(admin).delete(_url(space, resource, f"/{booking.id}"))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_the_owner_can_cancel_a_members_booking(
+    api: Api,
+    driver: PostgresBookingDriver,
+    owner: User,
+    member: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    """The owner ranks above admin in ``_ROLE_RANK``, so the same ladder covers
+    it without a separate check.
+    """
+    booking = driver.create_booking(
+        start_at=at(10), end_at=at(11), user_id=member.id, resource_id=resource.id
+    )
+
+    response = api.as_user(owner).delete(_url(space, resource, f"/{booking.id}"))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_a_member_can_cancel_their_own_booking(
+    api: Api, driver: PostgresBookingDriver, member: User, space: Space, resource: Resource
+) -> None:
+    booking = driver.create_booking(
+        start_at=at(10), end_at=at(11), user_id=member.id, resource_id=resource.id
+    )
+
+    response = api.as_user(member).delete(_url(space, resource, f"/{booking.id}"))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
 # --- Non-member: focused case, on top of the isolation sweep. -------------------
 
 

@@ -83,7 +83,19 @@ bypass the backend's mutual exclusion exists to prevent.
 Two tenants on one deployment are genuinely independent because no role spans them.
 
 `owner` archives the Space, `admin` manages members and invitations and access requests, `member`
-books.
+books. **A member cancels only their own booking; admin and owner cancel any booking in the
+Space** — the same ladder `require_space_role` already enforces everywhere else, applied to one
+more decision rather than a new permission concept.
+
+That check is enforced in the cancel handler itself, not by `require_space_role`, because the
+answer depends on whose row is being cancelled and `require_space_role` only ever knows the caller
+and the Space. A member refused this way gets **403, not 404** — the one bounded exception to this
+document's 404-not-403 rule. That rule exists to stop an unguessable `public_id` becoming an
+existence oracle for an outsider; this caller is a *proven member* looking at a booking they can
+already see on the calendar they just loaded, so there is nothing left to conceal, and a 404 would
+tell them a booking they can plainly see does not exist. This is the identical reasoning already
+given above for a member who lacks a role: at the point a caller is confirmed to be inside the
+Space, refusing them plainly is the honest answer and 404 has nothing left to hide.
 
 **Role ordering is an explicit rank table (`_ROLE_RANK`), never enum comparison.** `MembershipRole`
 is a `str` enum, so comparing two roles compares their strings — under which `"admin" < "member" <

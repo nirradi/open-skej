@@ -130,6 +130,23 @@ class BookingAlreadyStarted(BaseModel):
     message: str
 
 
+class BookingNotYours(BaseModel):
+    """The 403 body for a member cancelling a booking that is not theirs.
+
+    403, not 404: unlike every other Space-scoped refusal, this caller is a
+    proven member who is looking at the booking on the calendar they just
+    loaded. A 404 would tell them a booking they can plainly see does not
+    exist, which is worse than telling them the truth — there is nothing left
+    to conceal from a caller who is already inside the Space and can already
+    see this row. See ``.claude/rules/identity-and-access.md``, "Roles are
+    per-Space", for the identical reasoning applied to a member who lacks a
+    role.
+    """
+
+    error: Literal["not_yours"] = "not_yours"
+    message: str
+
+
 class BookingAlreadyCancelled(BaseModel):
     """The 409 body for cancelling a booking that is already cancelled.
 
