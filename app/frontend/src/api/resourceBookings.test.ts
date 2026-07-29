@@ -360,12 +360,21 @@ describe('cancelResourceBooking', () => {
     expect(result.outcome).toBe('unauthenticated')
   })
 
-  it('maps a 403 to forbidden', async () => {
+  it('maps a bare 403 to forbidden', async () => {
     fetchMock.mockResolvedValue(jsonResponse(403, { detail: 'Not a member.' }))
 
     const result = await cancelResourceBooking(PUBLIC_ID, RESOURCE_ID, 42)
 
     expect(result.outcome).toBe('forbidden')
+  })
+
+  it('maps 403 + not_yours (the discriminated form) to not_yours, not forbidden', async () => {
+    const message = 'You can only cancel your own bookings.'
+    fetchMock.mockResolvedValue(jsonResponse(403, { error: 'not_yours', message }))
+
+    const result = await cancelResourceBooking(PUBLIC_ID, RESOURCE_ID, 42)
+
+    expect(result).toEqual({ outcome: 'not_yours', message })
   })
 
   it('maps an unrecognised discriminator to failed, not to already_cancelled', async () => {

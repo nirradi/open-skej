@@ -142,6 +142,21 @@ def _all_space_scoped_routes() -> set[tuple[str, str]]:
 # ``service.py``, not a second role gate, so it is proven by
 # ``test_an_admin_cannot_promote_themselves_to_owner`` and its neighbours above,
 # not by this table.
+#
+# ``DELETE`` on the booking route is the same shape one more time, and it is
+# why the table still lists it as ``MEMBER`` rather than lying about it as
+# ``ADMIN``: ``MEMBER`` is the true floor of the ``require_space_role`` gate
+# that decides whether the caller reaches the handler at all — a plain member
+# is never refused *at the gate* for cancelling. Whether that member may
+# cancel *this particular booking* is a second, ownership-dependent question
+# the handler body asks afterwards (own booking: member suffices; someone
+# else's: admin required), the same way the owner-only membership business
+# rule above is a second question the service layer asks. A single
+# ``MembershipRole`` column cannot express "the floor depends on whose row
+# this is", so this table stays honest by stating only the gate's floor and
+# leaving the ownership floor to its own tests —
+# ``test_a_member_cancelling_another_members_booking_is_refused_and_the_booking_survives``
+# and its neighbours in ``test_resource_bookings_api.py``, not this table.
 ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
     ("GET", "/spaces/{public_id}"): MembershipRole.MEMBER,
     ("PATCH", "/spaces/{public_id}"): MembershipRole.ADMIN,

@@ -497,6 +497,12 @@ export async function createResourceBooking(
  * `not_found` here covers three things the server keeps indistinguishable on
  * purpose — see `ListResourceBookingsResult`'s docstring — so this function
  * does not attempt to tell them apart either.
+ *
+ * `not_yours` is different: a 403 carrying its own discriminator, not a bare
+ * one, because a plain member cancelling someone else's booking is a proven
+ * member who can already see the block on the calendar — there is nothing for
+ * a 404 to conceal, so the server says so with real copy instead of folding it
+ * into `not_found`. See `ApiNotYours`.
  */
 export async function cancelResourceBooking(
   publicId: string,
@@ -520,6 +526,8 @@ export async function cancelResourceBooking(
           return { outcome: 'already_cancelled', message: envelope.message }
         case 'already_started':
           return { outcome: 'already_started', message: envelope.message }
+        case 'not_yours':
+          return { outcome: 'not_yours', message: envelope.message }
         default:
           return unexpectedDiscriminator(envelope.error)
       }

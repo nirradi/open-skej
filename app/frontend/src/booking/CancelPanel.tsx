@@ -33,6 +33,16 @@
  *   remedy at all: retrying will refuse the same way every time. Rendered as a
  *   plain, terminal statement, and the confirm control is hidden rather than
  *   inviting a retry — unlike `failed`, where trying again might work.
+ * - **`not_yours`** — a plain member trying to cancel someone else's booking.
+ *   Terminal in the same way as `already_started`: retrying refuses identically
+ *   every time, since nothing this panel can do changes whose booking it is, so
+ *   the confirm control is hidden rather than offered again. Distinct from
+ *   `forbidden` even though both are 403 — this one names a rule about *this*
+ *   cancellation specifically, and the server's own copy says so, so it is
+ *   shown rather than folded into the generic access-floor failure. The button
+ *   that produced it stays visible on other bookings: 5.3, not this task, is
+ *   what stops the calendar from offering a cancel it knows the server will
+ *   refuse.
  * - **`unauthenticated` / `forbidden`** — the access floor every authenticated
  *   route carries. Neither is a rule about *this* cancellation, so both render
  *   as the same generic failure `failed` does.
@@ -60,6 +70,8 @@ export type CancelResult =
   | { kind: 'notice'; message: string }
   /** The interval is already under way: terminal, no retry offered. */
   | { kind: 'started'; message: string }
+  /** Someone else's booking: terminal, no retry offered. */
+  | { kind: 'not_yours'; message: string }
   /** Our bug, the access floor, or an unactionable failure: generic copy only. */
   | { kind: 'error'; message: string }
 
@@ -139,6 +151,12 @@ export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }
           // offered again.
           setResult({ kind: 'started', message: outcome.message })
           break
+        case 'not_yours':
+          // No remedy from here either: the caller cannot make this booking
+          // theirs, so the confirm control is hidden the same way it is for
+          // `already_started`.
+          setResult({ kind: 'not_yours', message: outcome.message })
+          break
         case 'invalid_request':
           // `detail` is diagnostics, not copy. Logged, never rendered.
           console.error('cancelResourceBooking rejected the request', outcome.detail, outcome.raw)
@@ -183,6 +201,16 @@ export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }
         <p
           role="alert"
           data-testid="cancel-started"
+          className="rounded border border-slate-300 bg-slate-100 p-3 text-slate-700"
+        >
+          {result.message}
+        </p>
+      )}
+
+      {result.kind === 'not_yours' && (
+        <p
+          role="alert"
+          data-testid="cancel-not-yours"
           className="rounded border border-slate-300 bg-slate-100 p-3 text-slate-700"
         >
           {result.message}
@@ -241,7 +269,7 @@ export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }
         <dd data-testid="cancel-duration">{summary.duration}</dd>
       </dl>
 
-      {!confirming && !cancelling && result.kind !== 'started' && (
+      {!confirming && !cancelling && result.kind !== 'started' && result.kind !== 'not_yours' && (
         <button
           type="button"
           data-testid="cancel-start"

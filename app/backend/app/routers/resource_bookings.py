@@ -23,6 +23,11 @@ The mapping of outcomes to status codes:
 * **409 + ``error: "already_started"``** — a cancel of a booking already under way.
 * **404 / 409 ``error: "not_found"`` / ``"already_cancelled"``** — the cancel
   targets a missing or already-cancelled booking.
+* **403 + ``error: "not_yours"``** — a member (not admin/owner) cancelling a
+  booking that belongs to someone else. The one bounded exception to the
+  404-not-403 rule above: this caller already proved membership and is looking
+  at a booking they can already see on the calendar, so there is nothing left
+  for a 404 to conceal.
 
 **The rule-engine call's shape changes here, by design (task 4.13b).** It was
 ``evaluate(request)`` against the module-level ``DEFAULT_CANON``; it is now
@@ -50,7 +55,7 @@ from app.db import (
 from app.db.models import utcnow
 from app.dependencies import get_driver
 from app.identity import service
-from app.identity.authz import SpaceContext, require_space_role
+from app.identity.authz import SpaceContext, require_space_role, role_at_least
 from app.identity.models import MembershipRole, Resource, Space, User
 from app.db.session import get_session
 from app.rules_stub import BookingRequest, SpaceRuleConfig, evaluate
@@ -61,6 +66,7 @@ from app.schemas import (
     BookingCreate,
     BookingDenied,
     BookingNotFound,
+    BookingNotYours,
     BookingRead,
     BookingSpaceArchived,
 )
@@ -79,6 +85,7 @@ NOT_FOUND_MESSAGE = "That booking no longer exists. Refresh the calendar to see 
 ALREADY_CANCELLED_MESSAGE = "That booking was already cancelled."
 SPACE_ARCHIVED_MESSAGE = "This Space is archived and is no longer taking new bookings."
 ALREADY_STARTED_MESSAGE = "This booking has already started and can no longer be cancelled."
+NOT_YOURS_MESSAGE = "You can only cancel your own bookings. Ask an admin if this one needs to go."
 RESOURCE_NOT_FOUND_DETAIL = "Resource not found"
 
 
@@ -276,6 +283,7 @@ def create_resource_booking(
     "/{booking_id}",
     response_model=BookingRead,
     responses={
+        status.HTTP_403_FORBIDDEN: {"model": BookingNotYours},
         status.HTTP_404_NOT_FOUND: {"model": BookingNotFound},
         status.HTTP_409_CONFLICT: {"model": BookingAlreadyCancelled},
     },
@@ -286,9 +294,20 @@ def cancel_resource_booking(
     """Cancel a booking on this Resource, freeing its interval.
 
     Allowed on an archived Space: archiving stops new bookings but leaves the
-    existing future ones cancellable. Two Stream 4 guards run before the release:
-    the booking must belong to *this* Resource (else 404, so a booking id is not
-    an oracle across Resources), and it must not have started yet (else 409).
+    existing future ones cancellable.
+
+    Four guards run before the release, and it matters which of them is about
+    *authorization* and which is not — this route has a history of getting that
+    wrong. ``ResourceCtx`` (via ``require_space_role``) proves only
+    *membership*: that the caller belongs to this Space at all. The next guard
+    below proves the booking is *on this Resource*. The one after that proves
+    it *has not started*. **Not one of those three says anything about whose
+    booking this is** — that reads as "authorization happens here" because
+    three guards in a row run before the cancel, and the obvious rule (a member
+    cancels their own; admin and owner cancel any booking in the Space) was
+    never written down as a fourth. ``BookingRead`` has carried ``user_id``
+    since task 4.2 and nothing ever compared it to ``context.user.id`` until
+    this guard did.
 
     Not routed through the rule engine — the rules gate acquiring a slot, not
     releasing one, and running them here would let a rule refuse to release a
@@ -309,6 +328,19 @@ def cancel_resource_booking(
         return JSONResponse(
             status_code=status.HTTP_404_NOT_FOUND,
             content=BookingNotFound(message=NOT_FOUND_MESSAGE).model_dump(),
+        )
+
+    # Ownership: a member may cancel only their own booking; admin and owner
+    # may cancel any booking in the Space, the same ladder `require_space_role`
+    # already enforces elsewhere. 403, not 404 — see `BookingNotYours` for why
+    # this is the one bounded exception to the 404-not-403 rule the rest of the
+    # Space API follows.
+    if booking.user_id != context.user.id and not role_at_least(
+        context.space_context.role, MembershipRole.ADMIN
+    ):
+        return JSONResponse(
+            status_code=status.HTTP_403_FORBIDDEN,
+            content=BookingNotYours(message=NOT_YOURS_MESSAGE).model_dump(),
         )
 
     if booking.start_at <= utcnow():
