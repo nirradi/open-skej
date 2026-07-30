@@ -96,12 +96,28 @@ export interface CalendarGridProps {
   /** The Resource whose bookings this grid renders. */
   resourceId: number
   /**
+   * The Monday of the week to render. Owned by the caller, not this
+   * component — a refresh, a bookmark, a pasted link and Back all have to
+   * land on the same week, which only holds if there is exactly one place
+   * that decides what "the displayed week" is, and it is not a `useState`
+   * here. Previous/Next report a new value upward through `onWeekChange`
+   * rather than paging an internal one.
+   */
+  weekStart: Date
+  /**
    * The current time. Injectable so tests can sit at a fixed point relative to
    * the horizon; production passes nothing and gets a clock read once on mount.
    */
   now?: Date
   /** Calendar configuration. Defaults to the module singleton in `config.ts`. */
   config?: CalendarConfig
+  /**
+   * Notified when Previous, Next or "This week" is clicked, with the week
+   * start it wants shown. This component does not act on its own click —
+   * the caller decides whether and how the visible week actually changes
+   * (in practice, by writing `?week=` and re-rendering with a new prop).
+   */
+  onWeekChange?: (weekStart: Date) => void
   /** Notified whenever the selected range changes. Task 1.7's entry point. */
   onSelectionChange?: (interval: SelectedInterval | null) => void
   /**
@@ -158,8 +174,10 @@ const weekLabelFormat = new Intl.DateTimeFormat(undefined, {
 export function CalendarGrid({
   publicId,
   resourceId,
+  weekStart,
   now: nowProp,
   config,
+  onWeekChange,
   onSelectionChange,
   onBookingSelect,
   refreshToken = 0,
@@ -168,7 +186,6 @@ export function CalendarGrid({
   const [fallbackNow] = useState(() => new Date())
   const now = nowProp ?? fallbackNow
 
-  const [weekStart, setWeekStart] = useState(() => startOfWeek(now))
   const [reloadNonce, setReloadNonce] = useState(0)
   const [settled, setSettled] = useState<LoadState | null>(null)
   const [anchor, setAnchor] = useState<{ dateKey: string; index: number } | null>(null)
@@ -181,6 +198,24 @@ export function CalendarGrid({
   const [seenRefreshToken, setSeenRefreshToken] = useState(refreshToken)
   if (seenRefreshToken !== refreshToken) {
     setSeenRefreshToken(refreshToken)
+    setSelection(null)
+    setAnchor(null)
+    setSelectedBookingId(null)
+  }
+
+  // Drop both selections when the displayed week changes, by whatever means —
+  // the buttons below, but just as much Back, a pasted link, or a parent that
+  // re-resolves `?week=` for any other reason. A selection is slot indices
+  // plus a date key, and carrying it across to a week that may not even share
+  // that date would leave it pointing at nothing on screen. Keyed off the prop
+  // itself, in render, rather than an effect on it or a clear inside the
+  // button handlers below: this component cannot tell "the buttons changed
+  // it" apart from "the caller changed it", and after task 5.8 it must not
+  // need to.
+  const weekKey = weekStart.getTime()
+  const [seenWeekKey, setSeenWeekKey] = useState(weekKey)
+  if (seenWeekKey !== weekKey) {
+    setSeenWeekKey(weekKey)
     setSelection(null)
     setAnchor(null)
     setSelectedBookingId(null)
@@ -370,20 +405,17 @@ export function CalendarGrid({
 
   const canPrev = canGoToPreviousWeek(weekStart, now)
   const canNext = canGoToNextWeek(weekStart, now)
+  const thisWeek = startOfWeek(now)
+  const isCurrentWeek = weekStart.getTime() === thisWeek.getTime()
 
-  /**
-   * Pages the grid by `deltaWeeks`, dropping any selection.
-   *
-   * The selection is cleared here rather than in an effect on `weekStart`
-   * because it is a consequence of the *event*, not of the new state: a
-   * selection is a pair of slot indices plus a date key, and carrying it across
-   * a page would leave it pointing at a day no longer on screen.
-   */
+  /** Reports the week `deltaWeeks` away from the one currently shown. */
   const goToWeek = (deltaWeeks: number) => {
-    setWeekStart((current) => addDays(current, deltaWeeks * DAYS_PER_WEEK))
-    setSelection(null)
-    setAnchor(null)
-    setSelectedBookingId(null)
+    onWeekChange?.(addDays(weekStart, deltaWeeks * DAYS_PER_WEEK))
+  }
+
+  /** Reports the current week — a no-op while it is already the one shown. */
+  const goToThisWeek = () => {
+    if (!isCurrentWeek) onWeekChange?.(thisWeek)
   }
 
   const dayHeight = slotsPerDay * SLOT_ROW_HEIGHT_PX
@@ -411,6 +443,15 @@ export function CalendarGrid({
             onClick={() => goToWeek(1)}
           >
             Next →
+          </button>
+          <button
+            type="button"
+            data-testid="calendar-this-week"
+            className="rounded border border-slate-300 px-3 py-1 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
+            disabled={isCurrentWeek}
+            onClick={goToThisWeek}
+          >
+            This week
           </button>
         </div>
         <h2 className="text-sm font-medium text-slate-700" data-testid="calendar-week-label">

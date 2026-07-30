@@ -13,6 +13,7 @@
  * slots, which is the failure mode that would invite a double booking.
  */
 
+import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
@@ -20,7 +21,7 @@ import type { Booking, ListResourceBookingsResult } from '../api'
 import type { CalendarConfig } from '../config'
 import { CalendarGrid } from './CalendarGrid'
 import { slotsPerDayFor } from '../config'
-import { slotTestId, startOfWeek, toDateKey } from './week'
+import { addDays, DAYS_PER_WEEK, slotTestId, startOfWeek, toDateKey } from './week'
 
 const listResourceBookings = vi.hoisted(() => vi.fn())
 vi.mock('../api', () => ({ listResourceBookings }))
@@ -59,11 +60,37 @@ function booking(id: number, start: Date, end: Date, mine = true): Booking {
   }
 }
 
-/** Renders the grid and waits for the initial load to settle. */
-async function renderGrid(props: Partial<React.ComponentProps<typeof CalendarGrid>> = {}) {
-  const view = render(
-    <CalendarGrid publicId={PUBLIC_ID} resourceId={RESOURCE_ID} now={NOW} {...props} />,
+type GridHarnessProps = Omit<Partial<React.ComponentProps<typeof CalendarGrid>>, 'weekStart'> & {
+  initialWeekStart?: Date
+}
+
+/**
+ * Wraps `CalendarGrid` with the sliver of state a real caller owns since task
+ * 5.8: `weekStart` is a prop the grid reports navigation upward from, never
+ * state it holds itself, so exercising Previous / Next / "This week" through
+ * this suite needs something to feed the reported value back in — the
+ * minimal version of what `ResourceCalendarPage` does with `?week=`.
+ */
+function GridHarness({ initialWeekStart = MONDAY, onWeekChange, ...rest }: GridHarnessProps) {
+  const [weekStart, setWeekStart] = useState(initialWeekStart)
+  return (
+    <CalendarGrid
+      publicId={PUBLIC_ID}
+      resourceId={RESOURCE_ID}
+      now={NOW}
+      {...rest}
+      weekStart={weekStart}
+      onWeekChange={(next) => {
+        setWeekStart(next)
+        onWeekChange?.(next)
+      }}
+    />
   )
+}
+
+/** Renders the grid (behind `GridHarness`) and waits for the initial load to settle. */
+async function renderGrid(props: GridHarnessProps = {}) {
+  const view = render(<GridHarness {...props} />)
   await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
   return view
 }
@@ -154,12 +181,61 @@ describe('navigation bounds', () => {
     expect((screen.getByTestId('calendar-prev-week') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('reports navigation upward rather than paging itself', async () => {
+    // The grid takes `weekStart` as a prop and must not own it — proved here
+    // with a bare render (no `GridHarness`, so nothing feeds the reported
+    // value back in): if the click still changed what's on screen, the grid
+    // would be pacing an internal copy of the week regardless of the prop.
+    const onWeekChange = vi.fn()
+    render(<CalendarGrid publicId={PUBLIC_ID} resourceId={RESOURCE_ID} now={NOW} weekStart={MONDAY} onWeekChange={onWeekChange} />)
+    await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
+
+    fireEvent.click(screen.getByTestId('calendar-next-week'))
+    expect(onWeekChange).toHaveBeenCalledWith(addDays(MONDAY, DAYS_PER_WEEK))
+    // No harness is feeding the reported value back in, so the label must
+    // still read the original week.
+    expect(screen.getByTestId('calendar-week-label').textContent).toContain('Jul 20')
+  })
+
   it('enables previous once the user has paged forward', async () => {
     await renderGrid()
     fireEvent.click(screen.getByTestId('calendar-next-week'))
     await waitFor(() =>
       expect((screen.getByTestId('calendar-prev-week') as HTMLButtonElement).disabled).toBe(false),
     )
+  })
+
+  describe('"This week"', () => {
+    it('is disabled on the current week', async () => {
+      await renderGrid()
+      expect((screen.getByTestId('calendar-this-week') as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('returns to the current week in one click from four weeks out', async () => {
+      await renderGrid()
+      const next = screen.getByTestId('calendar-next-week')
+      for (let i = 0; i < 4; i += 1) {
+        fireEvent.click(next)
+        await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
+      }
+      expect(screen.getByTestId('calendar-week-label').textContent).not.toContain('Jul 20')
+
+      const thisWeek = screen.getByTestId('calendar-this-week') as HTMLButtonElement
+      expect(thisWeek.disabled).toBe(false)
+      fireEvent.click(thisWeek)
+
+      await waitFor(() =>
+        expect(screen.getByTestId('calendar-week-label').textContent).toContain('Jul 20'),
+      )
+      expect((screen.getByTestId('calendar-this-week') as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('does nothing while already on the current week', async () => {
+      const onWeekChange = vi.fn()
+      await renderGrid({ onWeekChange })
+      fireEvent.click(screen.getByTestId('calendar-this-week'))
+      expect(onWeekChange).not.toHaveBeenCalled()
+    })
   })
 
   it('disables next at the horizon, and the last reachable week is inside it', async () => {
@@ -330,6 +406,7 @@ describe('selecting a booking to cancel it', () => {
           publicId={PUBLIC_ID}
           resourceId={RESOURCE_ID}
           now={NOW}
+          weekStart={MONDAY}
           onBookingSelect={onBookingSelect}
           refreshToken={1}
         />,
@@ -359,6 +436,7 @@ describe('selecting a booking to cancel it', () => {
           publicId={PUBLIC_ID}
           resourceId={RESOURCE_ID}
           now={NOW}
+          weekStart={MONDAY}
           onBookingSelect={onBookingSelect}
           refreshToken={1}
         />,
@@ -396,6 +474,67 @@ describe('selecting a booking to cancel it', () => {
       fireEvent.click(screen.getByTestId('calendar-next-week'))
     })
     await waitFor(() => expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull())
+  })
+
+  it('drops the selected booking when `weekStart` changes with no click at all', async () => {
+    // A bare render, no `GridHarness`: the prop itself is what moves — the
+    // shape Back, a pasted link, or any other caller-driven `?week=` change
+    // takes, none of which fire a click this component ever sees.
+    const onBookingSelect = vi.fn()
+    withBooking()
+    const { rerender } = render(
+      <CalendarGrid
+        publicId={PUBLIC_ID}
+        resourceId={RESOURCE_ID}
+        now={NOW}
+        weekStart={MONDAY}
+        onBookingSelect={onBookingSelect}
+      />,
+    )
+    await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
+    fireEvent.click(screen.getByTestId('booking-11'))
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toMatchObject({ id: 11 })
+
+    rerender(
+      <CalendarGrid
+        publicId={PUBLIC_ID}
+        resourceId={RESOURCE_ID}
+        now={NOW}
+        weekStart={addDays(MONDAY, DAYS_PER_WEEK)}
+        onBookingSelect={onBookingSelect}
+      />,
+    )
+    // Reset in the same render the prop changed, before the new week's fetch
+    // even resolves.
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
+
+    // And it stays null once the new week's bookings load — the mock hands
+    // back a booking with the same id regardless of which week was asked for,
+    // so this is what proves the reset is explicit rather than merely "the
+    // booking happened to vanish", the same distinction the refresh-token
+    // tests above draw.
+    await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
+    expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
+  })
+
+  it('drops a range selection when `weekStart` changes with no click at all', async () => {
+    const { rerender } = render(
+      <CalendarGrid publicId={PUBLIC_ID} resourceId={RESOURCE_ID} now={NOW} weekStart={MONDAY} />,
+    )
+    await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerUp(window)
+    expect(screen.getByTestId('calendar-selection')).toBeTruthy()
+
+    rerender(
+      <CalendarGrid
+        publicId={PUBLIC_ID}
+        resourceId={RESOURCE_ID}
+        now={NOW}
+        weekStart={addDays(MONDAY, DAYS_PER_WEEK)}
+      />,
+    )
+    expect(screen.queryByTestId('calendar-selection')).toBeNull()
   })
 
   it('never covers a slot that was selectable', async () => {

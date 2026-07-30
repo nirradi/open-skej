@@ -33,7 +33,7 @@
 import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test'
 
 import { slotStartMinutes, slotsPerDay } from '../../frontend/src/config'
-import { slotTestId } from '../../frontend/src/calendar/week'
+import { dateFromKey, slotTestId } from '../../frontend/src/calendar/week'
 
 export const BACKEND_URL = 'http://localhost:8000'
 
@@ -313,18 +313,6 @@ export async function renderedDateKeys(page: Page): Promise<string[]> {
     nodes.map((node) => node.getAttribute('data-testid') ?? ''),
   )
   return ids.map((id) => id.replace('calendar-day-', ''))
-}
-
-/**
- * A `Date` that round-trips through `toDateKey` back to `key`.
- *
- * Built with the local-time constructor because `toDateKey` reads local
- * components; parsing `key` as ISO (which `Date.parse` treats as UTC) would
- * shift the day by one under a negative offset.
- */
-export function dateFromKey(key: string): Date {
-  const [year, month, day] = key.split('-').map(Number)
-  return new Date(year, month - 1, day)
 }
 
 /** The `data-testid` of slot `index` on the day identified by `key`. */
