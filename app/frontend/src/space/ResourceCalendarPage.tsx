@@ -24,12 +24,18 @@
  * already do, and it only ever widens once `space.my_role` is actually known.
  */
 
-import { useCallback, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useParams, useSearchParams } from 'react-router-dom'
 
 import { getSpace, listResources, type Booking, type Resource, type Space } from '../api'
 import { BookingPanel, CancelPanel } from '../booking'
-import { CalendarGrid, type SelectedInterval } from '../calendar'
+import {
+  CalendarGrid,
+  parseWeekStartParam,
+  startOfWeek,
+  toDateKey,
+  type SelectedInterval,
+} from '../calendar'
 import { NotFoundCard, SpaceAccessGate } from './SpaceAccessGate'
 
 /**
@@ -86,6 +92,51 @@ export function ResourceCalendarPage() {
   const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null)
   const [refreshToken, setRefreshToken] = useState(0)
   const [header, setHeader] = useState<HeaderLoad>(null)
+
+  // Read once on mount, not on every render: `now` anchors both what "the
+  // current week" means and the far end of `?week=`'s valid range, and it must
+  // not drift mid-session — a page that recomputed it on every render would
+  // let the horizon creep forward under a caller's feet.
+  const [now] = useState(() => new Date())
+
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  /**
+   * The week to render, derived from the URL rather than mirrored into a
+   * `useState` — task 5.8's whole point. A `useState` seeded from `?week=`
+   * would go stale the moment the URL changes by any means this component
+   * did not itself cause (Back, a pasted link), which is exactly the bug this
+   * shape exists to prevent. A malformed or out-of-range value reads as
+   * `null` and falls back to the current week silently: it is a URL a person
+   * can type.
+   */
+  const weekStart = useMemo(
+    () => parseWeekStartParam(searchParams.get('week'), now) ?? startOfWeek(now),
+    [now, searchParams],
+  )
+
+  /**
+   * Pushes a new `?week=`, so Back walks week by week the way a person
+   * expects. Deliberately not `replace`: that's what 5.7's single-Resource
+   * redirect uses, and the two staying different is what keeps Back from
+   * walking into a redirect loop on this route.
+   */
+  const handleWeekChange = useCallback(
+    (nextWeekStart: Date) => {
+      // Sets `week` on the existing params rather than replacing the whole
+      // object with `{ week }`. There is no other query parameter on this
+      // route today, so the two behave identically — and the day one is added
+      // the object form drops it silently, which is a bug that presents as
+      // "paging the calendar forgets something unrelated" and reads as
+      // anything but a line in this callback.
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('week', toDateKey(nextWeekStart))
+        return next
+      })
+    },
+    [setSearchParams],
+  )
 
   useEffect(() => {
     if (!validParams || !publicId) return
@@ -174,6 +225,9 @@ export function ResourceCalendarPage() {
           <CalendarGrid
             publicId={publicId}
             resourceId={resourceId}
+            now={now}
+            weekStart={weekStart}
+            onWeekChange={handleWeekChange}
             onSelectionChange={handleSelectionChange}
             onBookingSelect={handleBookingSelect}
             refreshToken={refreshToken}

@@ -9,7 +9,15 @@
  * turn keeping that promise into a test failure, which is precisely backwards.
  */
 
-import { expect, gotoResourceCalendar, renderedDateKeys, slotId, slotsPerDay, test } from './fixtures'
+import {
+  expect,
+  gotoNextWeek,
+  gotoResourceCalendar,
+  renderedDateKeys,
+  slotId,
+  slotsPerDay,
+  test,
+} from './fixtures'
 import { calendarConfig, formatSlotLabel } from '../../frontend/src/config'
 import { DAYS_PER_WEEK } from '../../frontend/src/calendar/week'
 
@@ -51,4 +59,46 @@ test('the week label and navigation bounds reflect the booking horizon', async (
   // outright rather than silently doing nothing.
   await expect(page.getByTestId('calendar-prev-week')).toBeDisabled()
   await expect(page.getByTestId('calendar-next-week')).toBeEnabled()
+})
+
+test('the week lives in the URL, and a reload lands on the same one', async ({ page }) => {
+  // This is the regression the reported bug actually was: paging forward used
+  // to move only in-memory state, so a refresh silently snapped back to the
+  // current week regardless of what was on screen.
+  const pagedDateKeys = await gotoNextWeek(page)
+
+  const url = new URL(page.url())
+  expect(url.searchParams.get('week')).toBe(pagedDateKeys[0])
+
+  await page.reload()
+  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  await expect(page.getByTestId('calendar-error')).toHaveCount(0)
+  expect(await renderedDateKeys(page)).toEqual(pagedDateKeys)
+})
+
+test('"This week" is one click back from several weeks out', async ({ page }) => {
+  await gotoResourceCalendar(page)
+  const currentWeekDateKeys = await renderedDateKeys(page)
+
+  const thisWeek = page.getByTestId('calendar-this-week')
+  await expect(thisWeek).toBeDisabled()
+
+  const next = page.getByTestId('calendar-next-week')
+  for (let i = 0; i < 4; i += 1) {
+    await next.click()
+    await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  }
+  await expect(page.locator('[data-testid^="calendar-day-"]').first()).not.toHaveAttribute(
+    'data-testid',
+    `calendar-day-${currentWeekDateKeys[0]}`,
+  )
+  await expect(thisWeek).toBeEnabled()
+
+  await thisWeek.click()
+  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  expect(await renderedDateKeys(page)).toEqual(currentWeekDateKeys)
+  await expect(thisWeek).toBeDisabled()
+
+  const url = new URL(page.url())
+  expect(url.searchParams.get('week')).toBe(currentWeekDateKeys[0])
 })

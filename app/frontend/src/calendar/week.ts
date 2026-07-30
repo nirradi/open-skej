@@ -141,6 +141,52 @@ export function bookingTestId(bookingId: number): string {
 }
 
 /**
+ * The inverse of `toDateKey`: a local-time `Date` at midnight on the day the
+ * key names.
+ *
+ * Kept beside `toDateKey` so the two representations of a date cannot drift
+ * apart — `parseWeekStartParam` below and `app/e2e/tests/fixtures.ts` both
+ * need exactly this shape.
+ */
+export function dateFromKey(key: string): Date {
+  const [year, month, day] = key.split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
+/**
+ * Reads the `?week=` query value into the week-start it names, or `null` if
+ * it should be treated as absent.
+ *
+ * `null` covers everything a hand-typed or stale URL can do wrong: not a date
+ * at all, a date `Date` silently rolls over (`2026-02-30`), a real date
+ * earlier than the current week (navigation is forward-only —
+ * `canGoToPreviousWeek`), or one beyond the booking horizon. A real date that
+ * is not itself a week start is *not* one of these — it is normalised to the
+ * week containing it, the friendly reading of a hand-edited link. The caller
+ * falls back to the current week on `null`; this never throws and never
+ * signals which of the above happened, because a mistyped URL is not an
+ * error a visitor can act on.
+ */
+export function parseWeekStartParam(value: string | null, now: Date): Date | null {
+  if (value === null || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
+
+  const parsed = dateFromKey(value)
+  const [year, month, day] = value.split('-').map(Number)
+  if (parsed.getFullYear() !== year || parsed.getMonth() !== month - 1 || parsed.getDate() !== day) {
+    return null
+  }
+
+  const weekStart = startOfWeek(parsed)
+  const earliest = startOfWeek(now)
+  const latest = startOfWeek(horizonEnd(now))
+  if (weekStart.getTime() < earliest.getTime() || weekStart.getTime() > latest.getTime()) {
+    return null
+  }
+
+  return weekStart
+}
+
+/**
  * A wall-clock time as `HH:MM`, in the browser's local timezone.
  *
  * Forced to 24-hour rather than left to the locale, so that every time in the

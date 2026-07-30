@@ -14,12 +14,14 @@ import {
   BOOKING_HORIZON_DAYS,
   canGoToNextWeek,
   canGoToPreviousWeek,
+  dateFromKey,
   DAYS_PER_WEEK,
   daysOfWeek,
   horizonEnd,
   intervalsOverlap,
   isSlotBeyondHorizon,
   isSlotInPast,
+  parseWeekStartParam,
   slotInterval,
   slotTestId,
   startOfDay,
@@ -173,6 +175,60 @@ describe('intervalsOverlap', () => {
 
   it('is true for containment', () => {
     expect(intervalsOverlap(at(9, 30), at(9, 45), at(9), at(11))).toBe(true)
+  })
+})
+
+describe('dateFromKey', () => {
+  it('inverts toDateKey', () => {
+    const day = new Date(2026, 6, 20)
+    expect(toDateKey(dateFromKey(toDateKey(day)))).toBe(toDateKey(day))
+    expect(dateFromKey('2026-07-20').getTime()).toBe(day.getTime())
+  })
+})
+
+describe('parseWeekStartParam', () => {
+  it('reads a week-start key as itself', () => {
+    expect(parseWeekStartParam('2026-07-20', NOW)?.getTime()).toBe(THIS_WEEK.getTime())
+  })
+
+  it('normalises a real date that is not a week start to the week containing it', () => {
+    // Thursday of THIS_WEEK.
+    expect(parseWeekStartParam('2026-07-23', NOW)?.getTime()).toBe(THIS_WEEK.getTime())
+  })
+
+  it('falls back to null when there is no value at all', () => {
+    expect(parseWeekStartParam(null, NOW)).toBeNull()
+  })
+
+  it('falls back to null for a value that is not a date at all', () => {
+    expect(parseWeekStartParam('banana', NOW)).toBeNull()
+  })
+
+  it('falls back to null for an empty string', () => {
+    expect(parseWeekStartParam('', NOW)).toBeNull()
+  })
+
+  it('falls back to null for a date that rolls over rather than naming a real day', () => {
+    // Date(2026, 1, 30) rolls over to March, which is not what the string says.
+    expect(parseWeekStartParam('2026-02-30', NOW)).toBeNull()
+  })
+
+  it('falls back to null for a week earlier than the current one', () => {
+    expect(parseWeekStartParam('2026-07-13', NOW)).toBeNull()
+  })
+
+  it('falls back to null for a date beyond the booking horizon', () => {
+    const beyond = toDateKey(addDays(startOfWeek(horizonEnd(NOW)), DAYS_PER_WEEK))
+    expect(parseWeekStartParam(beyond, NOW)).toBeNull()
+  })
+
+  it('accepts the last week the horizon still reaches', () => {
+    const lastWeek = startOfWeek(horizonEnd(NOW))
+    expect(parseWeekStartParam(toDateKey(lastWeek), NOW)?.getTime()).toBe(lastWeek.getTime())
+  })
+
+  it('accepts the current week itself', () => {
+    expect(parseWeekStartParam(toDateKey(THIS_WEEK), NOW)?.getTime()).toBe(THIS_WEEK.getTime())
   })
 })
 
