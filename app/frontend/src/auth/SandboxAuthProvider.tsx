@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 
-import { setAccessTokenProvider, type AccessTokenProvider } from '../api'
+import {
+  clearSessionLost,
+  getSessionLostSnapshot,
+  setAccessTokenProvider,
+  subscribeSessionLost,
+  type AccessTokenProvider,
+} from '../api'
 import { getSandboxAccessToken } from './sandboxToken'
 import { SessionContext, type Session } from './session'
 
@@ -53,14 +59,32 @@ async function rejectSignedOut(): Promise<string> {
  * parent-first, so the provider is in place before any descendant's first
  * fetch. The effect below exists only to uninstall on unmount and to
  * reinstall after StrictMode's development-only mount/unmount/remount cycle.
+ *
+ * ## `sessionLost` overrides `signedIn`, not the other way round
+ *
+ * `signedIn` only ever reflects whether `login()`/`logout()` was called — it
+ * has no way to learn that `getSandboxAccessToken` started rejecting mid-
+ * session, which is exactly the sandbox-mode shape of the bug task 5.4
+ * fixes: a lapsed sandbox token would otherwise keep `useSession()`
+ * answering `authenticated` forever. `client.ts`'s session-lost store (read
+ * with `useSyncExternalStore`, not a `useEffect` + `setState` — the latter is
+ * both the wrong primitive for a value that changes outside React and
+ * forbidden by this repo's eslint config) is where that failure is actually
+ * discovered, so it wins over `signedIn` whenever both have an opinion.
+ * `signedIn` itself, and the token provider keyed on it below, are
+ * deliberately left alone: `login()` is the only thing that clears
+ * `sessionLost`, so nothing here can quietly re-arm silent auth on its own.
  */
 export function SandboxAuthProvider({ children }: { children: ReactNode }) {
   const [signedIn, setSignedIn] = useState(readSignedIn)
+  const sessionLost = useSyncExternalStore(subscribeSessionLost, getSessionLostSnapshot)
 
   // Ignores its argument entirely: `connection` and `screenHint` steer a
   // hosted login screen sandbox mode does not have, and there is no identity
   // to pass — that was already chosen via `localStorage` before this runs.
   const login = useCallback(() => {
+    // The only place this clears — see the `sessionLost` note above.
+    clearSessionLost()
     window.localStorage.setItem(SANDBOX_SIGNED_IN_STORAGE_KEY, 'true')
     setSignedIn(true)
   }, [])
@@ -71,8 +95,12 @@ export function SandboxAuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const session: Session = useMemo(
-    () => ({ status: signedIn ? 'authenticated' : 'unauthenticated', login, logout }),
-    [signedIn, login, logout],
+    () => ({
+      status: sessionLost ? 'unauthenticated' : signedIn ? 'authenticated' : 'unauthenticated',
+      login,
+      logout,
+    }),
+    [sessionLost, signedIn, login, logout],
   )
 
   const provider: AccessTokenProvider = signedIn ? getSandboxAccessToken : rejectSignedOut

@@ -1,6 +1,7 @@
-import { useCallback, useMemo, type ReactNode } from 'react'
+import { useCallback, useMemo, useSyncExternalStore, type ReactNode } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
 
+import { clearSessionLost, getSessionLostSnapshot, subscribeSessionLost } from '../api'
 import { AccessTokenBridge } from './AccessTokenBridge'
 import { SessionContext, type Session, type SessionLoginOptions } from './session'
 
@@ -19,12 +20,30 @@ import { SessionContext, type Session, type SessionLoginOptions } from './sessio
  * that as "signed out" would flash a login screen at an already-signed-in
  * user. `ProtectedRoute` and `SpacePage` used to each guard against this
  * themselves; centralising it here means neither has to remember to.
+ *
+ * ## `sessionLost` overrides `isAuthenticated`, not the other way round
+ *
+ * `isAuthenticated` is the SDK's own cached read of `localStorage` and keeps
+ * answering `true` after the refresh token it is backed by has stopped
+ * working — that mismatch is the whole bug task 5.4 fixes. `client.ts`'s
+ * session-lost store (read here with `useSyncExternalStore`, the correct
+ * primitive for a value that changes outside React and this repo's eslint
+ * config forbids modelling with a `useEffect` + `setState`) is the one place
+ * that mismatch is ever discovered, so it wins over `isAuthenticated`
+ * whenever both have an opinion. `login()` is the only thing that clears it,
+ * which is what stops this from silently re-authenticating on its own.
  */
 export function Auth0SessionProvider({ children }: { children: ReactNode }) {
   const { isLoading, isAuthenticated, loginWithRedirect, logout: auth0Logout } = useAuth0()
+  const sessionLost = useSyncExternalStore(subscribeSessionLost, getSessionLostSnapshot)
 
   const login = useCallback(
     (options?: SessionLoginOptions) => {
+      // The only place this clears. Not on the next successful request, and
+      // not on a timer — either would re-arm silent auth the moment a guarded
+      // screen fell through to this exact control, which is the loop this
+      // task must not reintroduce.
+      clearSessionLost()
       const returnTo = options?.returnTo ?? `${window.location.pathname}${window.location.search}`
       void loginWithRedirect({
         appState: { returnTo },
@@ -47,11 +66,17 @@ export function Auth0SessionProvider({ children }: { children: ReactNode }) {
 
   const session: Session = useMemo(
     () => ({
-      status: isLoading ? 'loading' : isAuthenticated ? 'authenticated' : 'unauthenticated',
+      status: sessionLost
+        ? 'unauthenticated'
+        : isLoading
+          ? 'loading'
+          : isAuthenticated
+            ? 'authenticated'
+            : 'unauthenticated',
       login,
       logout,
     }),
-    [isLoading, isAuthenticated, login, logout],
+    [sessionLost, isLoading, isAuthenticated, login, logout],
   )
 
   return (

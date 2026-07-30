@@ -249,6 +249,26 @@ assumes one mode's provider is in the tree throws under the other, which is exac
 seam exists to prevent — sandbox mode has no `Auth0Provider`, and the Auth0 build has no sandbox
 session.
 
+**A session that stops working ends for every screen at once.** Neither implementation can discover
+this on its own: the Auth0 SDK's `isAuthenticated` and sandbox mode's signed-in flag both keep
+answering "signed in" after the token backing them has stopped working, because both are reads of
+what someone once did, not of whether it still holds. The api client is where the failure is actually
+observed — a rejected token provider, or a 401 the server returned to a token that was sent — so it
+publishes that fact as a store the session implementations subscribe to and let override their own
+state. That is `setAccessTokenProvider`'s seam pointed the other way: React hands the api client the
+token, the api client hands React the news that it stopped working, and neither module imports the
+other. Without it, a guarded screen stays on display filling with 401s and every panel prints its own
+apology with no way back in, which is the state a person can only escape by clearing browser storage.
+
+**Only an explicit sign-in clears it.** Not the next successful request, and not a timer: either
+would re-arm silent auth the instant a guarded screen fell through to the login controls, which is a
+loop. The screens themselves need no new gate — `ProtectedRoute` already renders `LoginControls` for
+an unauthenticated session, and those controls already return the user to the URL they were on.
+
+Copy for this states the fact and never the cause. A lapsed refresh token, a revoked grant, a rotated
+signing key and a changed tenant all arrive here, the person's next move is identical in all of them,
+and naming the wrong one is worse than naming none. The diagnosis goes to the console.
+
 An admin dashboard for Space creation, share links, and member management. Role menus offer only
 roles at or below the actor's own, which is a convenience — the server's 403 is the boundary.
 

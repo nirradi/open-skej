@@ -102,26 +102,47 @@ function SpaceLinkGate({ publicId }: { publicId: string }) {
 
   if (status === 'unauthenticated') {
     return (
-      <main className={PAGE_CLASS}>
-        <div className={CARD_CLASS} data-testid="space-sign-in">
-          <h1 className="text-lg font-semibold text-slate-900">You&rsquo;ve been sent a Space</h1>
-          <p className="mt-2 mb-4 text-sm text-slate-600">
-            Sign in to see what this link opens. If you&rsquo;re not a member yet, you&rsquo;ll be
-            able to ask for access on the next screen.
-          </p>
-          {/*
-            Explicit rather than relying on the default: the default reads
-            `window.location`, which is the same URL today, and stating it here
-            means a later change to how this route is mounted cannot silently
-            start returning people to the wrong place.
-          */}
-          <LoginControls returnTo={`/s/${publicId}`} />
-        </div>
-      </main>
+      <SignInCard
+        publicId={publicId}
+        heading="You’ve been sent a Space"
+        body="Sign in to see what this link opens. If you’re not a member yet, you’ll be able to ask for access on the next screen."
+      />
     )
   }
 
   return <SpacePreviewCard publicId={publicId} />
+}
+
+/**
+ * The sign-in prompt this route shows wherever it needs one — a cold visitor
+ * in `SpaceLinkGate` above, and a member whose session turned out to be stale
+ * in `SpacePreviewCard` below. One component instead of two near-identical
+ * cards, so the `returnTo` and the markup cannot drift apart between them.
+ */
+function SignInCard({
+  publicId,
+  heading,
+  body,
+}: {
+  publicId: string
+  heading: string
+  body: string
+}) {
+  return (
+    <main className={PAGE_CLASS}>
+      <div className={CARD_CLASS} data-testid="space-sign-in">
+        <h1 className="text-lg font-semibold text-slate-900">{heading}</h1>
+        <p className="mt-2 mb-4 text-sm text-slate-600">{body}</p>
+        {/*
+          Explicit rather than relying on the default: the default reads
+          `window.location`, which is the same URL today, and stating it here
+          means a later change to how this route is mounted cannot silently
+          start returning people to the wrong place.
+        */}
+        <LoginControls returnTo={`/s/${publicId}`} />
+      </div>
+    </main>
+  )
 }
 
 type Load =
@@ -191,13 +212,7 @@ function SpacePreviewCard({ publicId }: { publicId: string }) {
 
   if (load.kind === 'signed_out') {
     return (
-      <main className={PAGE_CLASS}>
-        <div className={CARD_CLASS} data-testid="space-sign-in">
-          <h1 className="text-lg font-semibold text-slate-900">Sign in to open this Space</h1>
-          <p className="mt-2 mb-4 text-sm text-slate-600">Your session has expired.</p>
-          <LoginControls returnTo={`/s/${publicId}`} />
-        </div>
-      </main>
+      <SignInCard publicId={publicId} heading="Sign in to open this Space" body="You’re signed out." />
     )
   }
 
