@@ -71,7 +71,9 @@ const SANDBOX_SPACE_A_NAME = 'Sandbox Space A (Berlin)'
 export interface Booking {
   id: number
   resource_id: number
-  user_id: number
+  /** Populated only for admin/owner; null for the plain member every fixture here acts as. */
+  user_id: number | null
+  mine: boolean
   start_at: string
   end_at: string
   status: 'confirmed' | 'cancelled'

@@ -37,6 +37,7 @@ const created: Booking = {
   id: 1,
   resource_id: RESOURCE_ID,
   user_id: 1,
+  mine: true,
   start_at: '2026-07-24T05:00:00Z',
   end_at: '2026-07-24T06:30:00Z',
   status: 'confirmed',

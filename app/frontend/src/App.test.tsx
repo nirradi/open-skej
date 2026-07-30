@@ -108,6 +108,7 @@ function bookingAt(dayOffset: number, startHour: number, endHour: number): Booki
     id: 1,
     resource_id: 1,
     user_id: 1,
+    mine: true,
     start_at: start.toISOString(),
     end_at: end.toISOString(),
     status: 'confirmed',

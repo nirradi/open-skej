@@ -32,6 +32,7 @@ const confirmedBooking: Booking = {
   id: 42,
   resource_id: RESOURCE_ID,
   user_id: 9,
+  mine: true,
   start_at: '2026-07-20T10:00:00Z',
   end_at: '2026-07-20T11:00:00Z',
   status: 'confirmed',

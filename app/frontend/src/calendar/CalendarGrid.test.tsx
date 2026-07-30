@@ -45,11 +45,12 @@ function resolveWith(bookings: Booking[] = []) {
 }
 
 /** A confirmed booking over an arbitrary local wall-clock interval. */
-function booking(id: number, start: Date, end: Date): Booking {
+function booking(id: number, start: Date, end: Date, mine = true): Booking {
   return {
     id,
     resource_id: 1,
-    user_id: 1,
+    user_id: mine ? 1 : 2,
+    mine,
     start_at: start.toISOString(),
     end_at: end.toISOString(),
     status: 'confirmed',
@@ -221,6 +222,29 @@ describe('existing bookings', () => {
     // Half-open: the slot starting exactly at the booking's end is free.
     expect(slot(4, 9).dataset.blocked).toBeUndefined()
     expect(slot(4, 5).dataset.blocked).toBeUndefined()
+  })
+
+  it('renders a not-mine booking visually distinct, with an aria-label that says so', async () => {
+    const start = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4, 9, 0)
+    const end = new Date(start.getTime() + 60 * 60_000)
+    resolveWith([booking(8, start, end, false)])
+    await renderGrid()
+
+    const block = screen.getByTestId('booking-8')
+    expect(block.getAttribute('aria-label')).toContain('someone else')
+    // Not the caller's own indigo — a distinct colour is the whole assertion.
+    expect(block.className).not.toContain('indigo')
+  })
+
+  it('renders the caller\'s own booking as before: indigo, with no "someone else" copy', async () => {
+    const start = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4, 9, 0)
+    const end = new Date(start.getTime() + 60 * 60_000)
+    resolveWith([booking(9, start, end, true)])
+    await renderGrid()
+
+    const block = screen.getByTestId('booking-9')
+    expect(block.getAttribute('aria-label')).not.toContain('someone else')
+    expect(block.className).toContain('indigo')
   })
 
   it('requests exactly the displayed week, scoped to the Space and Resource', async () => {
