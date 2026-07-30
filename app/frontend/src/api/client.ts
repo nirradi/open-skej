@@ -149,6 +149,26 @@ let accessTokenProvider: AccessTokenProvider | null = null
  */
 export function setAccessTokenProvider(provider: AccessTokenProvider | null): void {
   accessTokenProvider = provider
+  installEpoch += 1
+}
+
+/**
+ * Counts installs, so a deferred teardown can tell "still mine" from
+ * "somebody reinstalled since".
+ *
+ * Comparing the *provider* would be the obvious way to answer that and is
+ * wrong: `SandboxAuthProvider` installs `getSandboxAccessToken`, a
+ * module-level function, so the reference it reinstalls on a remount is
+ * identical to the one it tore down and an identity check cannot see the
+ * difference. `AccessTokenBridge` happens to install a fresh closure each
+ * time and would have got away with it — which is exactly the kind of
+ * asymmetry that makes a bug look mode-specific and unrelated to its cause.
+ * A counter is indifferent to what is being installed.
+ */
+let installEpoch = 0
+
+export function accessTokenProviderEpoch(): number {
+  return installEpoch
 }
 
 /**
@@ -176,8 +196,8 @@ export function setAccessTokenProvider(provider: AccessTokenProvider | null): vo
  * unmount has nothing to reinstall, so the provider is still `provider` and
  * it is uninstalled as intended.
  */
-export function clearAccessTokenProviderIf(provider: AccessTokenProvider): void {
-  if (accessTokenProvider === provider) accessTokenProvider = null
+export function clearAccessTokenProviderIf(epoch: number): void {
+  if (installEpoch === epoch) accessTokenProvider = null
 }
 
 /**

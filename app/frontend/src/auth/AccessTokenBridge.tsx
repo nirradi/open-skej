@@ -1,7 +1,11 @@
 import { useEffect, type ReactNode } from 'react'
 import { useAuth0 } from '@auth0/auth0-react'
 
-import { clearAccessTokenProviderIf, setAccessTokenProvider } from '../api'
+import {
+  accessTokenProviderEpoch,
+  clearAccessTokenProviderIf,
+  setAccessTokenProvider,
+} from '../api'
 
 /**
  * Connects the Auth0 SDK to the api client, then renders its children.
@@ -53,7 +57,8 @@ export function AccessTokenBridge({ children }: { children: ReactNode }) {
     // for exactly the span in which every child's effect re-runs on a
     // StrictMode remount — and a child that fetches on mount sends that
     // request anonymously. See `clearAccessTokenProviderIf`.
-    return () => queueMicrotask(() => clearAccessTokenProviderIf(provider))
+    const epoch = accessTokenProviderEpoch()
+    return () => queueMicrotask(() => clearAccessTokenProviderIf(epoch))
   }, [getAccessTokenSilently])
 
   return <>{children}</>

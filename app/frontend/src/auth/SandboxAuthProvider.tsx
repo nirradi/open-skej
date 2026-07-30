@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
 
 import {
+  accessTokenProviderEpoch,
   clearAccessTokenProviderIf,
   clearSessionLost,
   getSessionLostSnapshot,
@@ -113,7 +114,8 @@ export function SandboxAuthProvider({ children }: { children: ReactNode }) {
     // and the one the E2E suite actually runs into: effects run child-first,
     // so nulling unconditionally here sends every child's remount refetch out
     // with no `Authorization` header. See `clearAccessTokenProviderIf`.
-    return () => queueMicrotask(() => clearAccessTokenProviderIf(provider))
+    const epoch = accessTokenProviderEpoch()
+    return () => queueMicrotask(() => clearAccessTokenProviderIf(epoch))
   }, [provider])
 
   return <SessionContext value={session}>{children}</SessionContext>
