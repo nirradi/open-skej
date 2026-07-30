@@ -49,9 +49,32 @@ def test_to_rule_request_carries_identity_and_interval():
 def test_booking_read_serialises_a_stored_booking(driver):
     booking = driver.create_booking(start_at=START, end_at=END)
 
-    read = BookingRead.model_validate(booking)
+    read = BookingRead(
+        id=booking.id,
+        resource_id=booking.resource_id,
+        user_id=booking.user_id,
+        mine=True,
+        start_at=booking.start_at,
+        end_at=booking.end_at,
+        status=booking.status,
+        created_at=booking.created_at,
+        cancelled_at=booking.cancelled_at,
+    )
 
     assert read.id == booking.id
     assert read.start_at == START
     assert read.status is BookingStatus.CONFIRMED
     assert read.cancelled_at is None
+
+
+@requires_postgres
+def test_booking_read_cannot_be_built_from_the_orm_row_alone(driver):
+    """``mine`` and ``user_id``'s visibility depend on who is asking, which a
+    bare ORM row does not carry — see ``BookingRead``'s docstring. This is
+    what stops a call site from reverting to ``model_validate(booking)`` and
+    silently leaking every caller's ``user_id`` to a plain member.
+    """
+    booking = driver.create_booking(start_at=START, end_at=END)
+
+    with pytest.raises(ValidationError):
+        BookingRead.model_validate(booking)

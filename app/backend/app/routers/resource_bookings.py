@@ -47,6 +47,7 @@ from rules import history_window
 from sqlalchemy.orm import Session
 
 from app.db import (
+    Booking,
     BookingAlreadyCancelledError,
     BookingDriver,
     BookingNotFoundError,
@@ -107,6 +108,29 @@ class ResourceBookingContext:
     @property
     def archived(self) -> bool:
         return self.space_context.space.archived_at is not None
+
+
+def _booking_read(booking: Booking, context: ResourceBookingContext) -> BookingRead:
+    """Build a ``BookingRead`` for ``context``'s caller.
+
+    The one place a ``Booking`` row and the caller's identity meet: ``mine`` is
+    always computed, and ``user_id`` is exposed only to admin and owner, never
+    to a plain member. Every route that returns a ``BookingRead`` goes through
+    this — see ``BookingRead``'s docstring for why a bare ``model_validate``
+    can no longer build one.
+    """
+    can_see_owner = role_at_least(context.space_context.role, MembershipRole.ADMIN)
+    return BookingRead(
+        id=booking.id,
+        resource_id=booking.resource_id,
+        user_id=booking.user_id if can_see_owner else None,
+        mine=booking.user_id == context.user.id,
+        start_at=booking.start_at,
+        end_at=booking.end_at,
+        status=booking.status,
+        created_at=booking.created_at,
+        cancelled_at=booking.cancelled_at,
+    )
 
 
 def resolve_resource(
@@ -209,7 +233,7 @@ def list_resource_bookings(
         resource_id=context.resource_id,
         include_cancelled=include_cancelled,
     )
-    return [BookingRead.model_validate(booking) for booking in bookings]
+    return [_booking_read(booking, context) for booking in bookings]
 
 
 @router.post(
@@ -276,7 +300,7 @@ def create_resource_booking(
             content=BookingConflict(message=CONFLICT_MESSAGE).model_dump(),
         )
 
-    return BookingRead.model_validate(booking)
+    return _booking_read(booking, context)
 
 
 @router.delete(
@@ -362,4 +386,4 @@ def cancel_resource_booking(
             content=BookingAlreadyCancelled(message=ALREADY_CANCELLED_MESSAGE).model_dump(),
         )
 
-    return BookingRead.model_validate(booking)
+    return _booking_read(booking, context)

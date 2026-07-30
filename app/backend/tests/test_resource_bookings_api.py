@@ -185,6 +185,7 @@ def test_owner_can_create_a_booking(
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["user_id"] == owner.id
+    assert body["mine"] is True
     assert body["resource_id"] == resource.id
     assert body["status"] == "confirmed"
 
@@ -192,14 +193,20 @@ def test_owner_can_create_a_booking(
 def test_a_plain_member_can_create_a_booking(
     api: Api, member: User, space: Space, resource: Resource
 ) -> None:
-    """Membership and roles stay at the Space; any member may book any Resource."""
+    """Membership and roles stay at the Space; any member may book any Resource.
+
+    ``user_id`` is ``None`` even though this is the member's own booking:
+    visibility of the owner is gated on the caller's role, not on whose
+    booking it is. ``mine`` is what answers "is this mine" for a plain member.
+    """
     response = api.as_user(member).post(
         _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11))}
     )
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert body["user_id"] == member.id
+    assert body["user_id"] is None
+    assert body["mine"] is True
     assert body["resource_id"] == resource.id
 
 
@@ -370,6 +377,56 @@ def test_get_scopes_to_this_resource_only(
     assert [b["id"] for b in response.json()] == [mine.id]
 
 
+def test_a_plain_member_listing_the_week_sees_no_user_ids_but_correct_mine(
+    api: Api,
+    driver: PostgresBookingDriver,
+    member: User,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    """``user_id`` never reaches a plain member, whoever the booking belongs to;
+    ``mine`` is what tells them theirs from anyone else's.
+    """
+    driver.create_booking(
+        start_at=at(10), end_at=at(11), user_id=member.id, resource_id=resource.id
+    )
+    driver.create_booking(start_at=at(12), end_at=at(13), user_id=owner.id, resource_id=resource.id)
+
+    response = api.as_user(member).get(
+        _url(space, resource), params={"from": iso(at(0)), "to": iso(at(23))}
+    )
+
+    assert response.status_code == 200
+    body = {b["mine"]: b for b in response.json()}
+    assert set(body) == {True, False}
+    assert body[True]["user_id"] is None
+    assert body[False]["user_id"] is None
+
+
+def test_admin_and_owner_listing_the_week_see_user_ids(
+    api: Api,
+    driver: PostgresBookingDriver,
+    member: User,
+    admin: User,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    driver.create_booking(
+        start_at=at(10), end_at=at(11), user_id=member.id, resource_id=resource.id
+    )
+
+    for caller in (admin, owner):
+        response = api.as_user(caller).get(
+            _url(space, resource), params={"from": iso(at(0)), "to": iso(at(23))}
+        )
+        assert response.status_code == 200
+        [body] = response.json()
+        assert body["user_id"] == member.id
+        assert body["mine"] is False
+
+
 # --- Cancel. -----------------------------------------------------------------------
 
 
@@ -528,7 +585,10 @@ def test_an_admin_can_cancel_a_members_booking(
     response = api.as_user(admin).delete(_url(space, resource, f"/{booking.id}"))
 
     assert response.status_code == 200
-    assert response.json()["status"] == "cancelled"
+    body = response.json()
+    assert body["status"] == "cancelled"
+    assert body["mine"] is False
+    assert body["user_id"] == member.id
 
 
 def test_the_owner_can_cancel_a_members_booking(

@@ -97,6 +97,20 @@ tell them a booking they can plainly see does not exist. This is the identical r
 given above for a member who lacks a role: at the point a caller is confirmed to be inside the
 Space, refusing them plainly is the honest answer and 404 has nothing left to hide.
 
+**`BookingRead` carries `mine` for every caller and `user_id` only for admin and owner.** The
+question a plain member needs answered is "may I cancel this", never "whose is it" — `mine`
+(`booking.user_id == caller.id`) is exactly that answer. The week payload is otherwise the one
+response an ordinary member fetches that enumerates the Space's user ids, and no screen renders
+them. Admin and owner keep `user_id` because cancelling someone else's booking without knowing whose
+it is leaves nobody accountable for the decision. Neither field is an attribute of the booking row —
+one depends on who is asking and the other on their role — so a `BookingRead` cannot be built by
+validating an ORM row, and every route returning one goes through a single helper that takes the
+caller. That is what stops a route added later from serving every `user_id` to a member.
+
+What the calendar offers is downstream of this and is **advisory, never the boundary**: the client
+hides a cancel control it can tell the server would refuse, and the cancel handler's ownership check
+above is what actually refuses it.
+
 **Role ordering is an explicit rank table (`_ROLE_RANK`), never enum comparison.** `MembershipRole`
 is a `str` enum, so comparing two roles compares their strings — under which `"admin" < "member" <
 "owner"`, putting member above admin and granting every member admin authority. Declaration order is

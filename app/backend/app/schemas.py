@@ -51,13 +51,31 @@ class BookingCreate(BaseModel):
 
 
 class BookingRead(BaseModel):
-    """A stored booking as returned by the API."""
+    """A stored booking as returned by the API.
+
+    ``mine`` and ``user_id`` answer two different questions and are gated
+    differently. The question a plain member needs answered is "may I cancel
+    this", never "whose is it" — ``mine`` (``booking.user_id ==
+    caller.id``) is exactly that answer and is always present. ``user_id``
+    itself is populated only for admin and owner and is ``None`` for a plain
+    member: the week payload is otherwise the one response an ordinary member
+    fetches that enumerates the Space's user ids, and no screen renders them.
+    Admins keep the owner because an admin cancelling someone else's booking
+    without knowing whose it is cannot be held responsible for it.
+
+    Neither field is an attribute of the ORM row — ``mine`` depends on who is
+    asking and ``user_id``'s visibility depends on their role — so this can no
+    longer be built with a bare ``model_validate(booking)``.
+    ``app.routers.resource_bookings`` builds it through one helper instead, and
+    every call site goes through it.
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     resource_id: int
-    user_id: int
+    user_id: int | None
+    mine: bool
     start_at: datetime
     end_at: datetime
     status: BookingStatus
