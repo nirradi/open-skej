@@ -179,9 +179,9 @@ describe('booking end to end through the app shell', () => {
 
     renderApp()
     await screen.findByTestId('calendar')
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
 
-    selectSlot(2, 8)
+    selectSlot(2, 20)
     await screen.findByTestId('booking-confirm')
     fireEvent.click(screen.getByTestId('booking-confirm'))
 
@@ -200,9 +200,9 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
     renderApp()
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
 
-    selectSlot(2, 8)
+    selectSlot(2, 20)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     // The refetch is what puts it on screen; nothing reloads the document.
@@ -216,9 +216,9 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'rule_denied', message })
 
     renderApp()
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
 
-    selectSlot(2, 8)
+    selectSlot(2, 20)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     const denied = await screen.findByTestId('booking-denied')
@@ -231,9 +231,9 @@ describe('booking end to end through the app shell', () => {
   it('does not open the cancel panel for a range selection', async () => {
     vi.spyOn(api, 'listResourceBookings').mockResolvedValue({ outcome: 'ok', data: [] })
     renderApp()
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
 
-    selectSlot(2, 8)
+    selectSlot(2, 20)
     await screen.findByTestId('booking-confirm')
     // The two panels answer different questions and must not both be asking.
     expect(screen.queryByTestId('cancel-panel')).toBeNull()
@@ -250,9 +250,9 @@ describe('booking end to end through the app shell', () => {
     })
 
     renderApp()
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
 
-    selectSlot(2, 8)
+    selectSlot(2, 20)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     await screen.findByTestId('booking-conflict')
@@ -292,17 +292,17 @@ describe('cancelling end to end through the app shell', () => {
 
     renderApp()
     // 10:00–11:00 is indices 8 and 9 from a 06:00 open at 30-minute slots.
-    await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(true))
+    await waitFor(() => expect((slotOn(2, 20) as HTMLButtonElement).disabled).toBe(true))
 
     await cancelVisibleBooking(existing)
 
     await screen.findByTestId('cancel-success')
     // The refetch — not a reload — is what removes it.
     await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
 
     // And the freed time is genuinely bookable again, not merely un-greyed.
-    selectSlot(2, 8)
+    selectSlot(2, 20)
     expect(await screen.findByTestId('booking-confirm')).toBeTruthy()
   })
 
@@ -345,7 +345,7 @@ describe('cancelling end to end through the app shell', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     // The end state the user wanted holds, so the calendar must show it.
     await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
-    await slotIsSelectable(2, 8)
+    await slotIsSelectable(2, 20)
   })
 
   it('clears a stale block on not_found without alarming the user', async () => {
@@ -379,7 +379,7 @@ describe('cancelling end to end through the app shell', () => {
     // Nothing was cancelled, so nothing may look cancelled — the opposite
     // mistake to the one `already_cancelled` invites.
     expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy()
-    expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(true)
+    expect((slotOn(2, 20) as HTMLButtonElement).disabled).toBe(true)
     expect(api.listResourceBookings).toHaveBeenCalledTimes(1)
   })
 
@@ -393,9 +393,9 @@ describe('cancelling end to end through the app shell', () => {
     fireEvent.click(await screen.findByTestId(bookingTestId(existing.id)))
     await screen.findByTestId('cancel-panel')
 
-    // Index 12 is 12:00, clear of the 10:00–11:00 booking.
-    fireEvent.pointerDown(slotOn(2, 12))
-    fireEvent.pointerOver(slotOn(2, 14))
+    // Index 24 is 12:00, clear of the 10:00–11:00 booking.
+    fireEvent.pointerDown(slotOn(2, 24))
+    fireEvent.pointerOver(slotOn(2, 26))
     fireEvent.pointerUp(window)
 
     const summary = await screen.findByTestId('booking-time')

@@ -17,7 +17,7 @@ import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 
 
 import { getSpace, listResourceBookings, listResources } from '../api'
 import type { ApiOk, Resource, Space } from '../api'
-import { addDays, DAYS_PER_WEEK, horizonEnd, startOfWeek, toDateKey } from '../calendar/week'
+import { addDays, DAYS_PER_WEEK, horizonEnd, slotTestId, startOfWeek, toDateKey } from '../calendar/week'
 import { ResourceCalendarPage } from './ResourceCalendarPage'
 
 vi.mock('../api', () => ({
@@ -180,6 +180,40 @@ describe('scoping the calendar and the panels', () => {
     await waitFor(() => expect(screen.queryByTestId('calendar-loading')).toBeNull())
     expect(screen.getByTestId('calendar-grid')).toBeTruthy()
     expect(screen.getByTestId('booking-panel')).toBeTruthy()
+  })
+})
+
+describe("the Space's schedule", () => {
+  it("greys the grid outside the Space's configured hours", async () => {
+    vi.mocked(getSpace).mockResolvedValue(
+      ok({ ...SPACE, slot_minutes: 30, opens_at: '09:00:00', closes_at: '17:00:00' }),
+    )
+    // Next week's Monday, not this one — this test cares about the
+    // out-of-hours reason, not the past one, and this week's Monday may
+    // already be behind `now` depending on which day the suite runs.
+    const monday = addDays(startOfWeek(new Date()), DAYS_PER_WEEK)
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}?week=${toDateKey(monday)}`)
+
+    // 08:30 (index 17) is one slot before the configured 09:00 opening;
+    // 09:00 (index 18) is the first open slot. Waiting on the first covers
+    // the header fetch resolving and the grid re-rendering with the built
+    // config — the second is safe to read synchronously once it has.
+    await waitFor(() =>
+      expect(screen.getByTestId(slotTestId(monday, 17)).dataset.blocked).toBe('out-of-hours'),
+    )
+    expect(screen.getByTestId(slotTestId(monday, 18)).dataset.blocked).toBeUndefined()
+  })
+
+  it("shows a notice instead of the grid for hours that can't resolve to a window", async () => {
+    // The DEFERRED.md item 17 shape, from this frontend's browser-local
+    // reading of it: closing at-or-before opening cannot describe a window.
+    vi.mocked(getSpace).mockResolvedValue(
+      ok({ ...SPACE, slot_minutes: 30, opens_at: '21:00:00', closes_at: '09:00:00' }),
+    )
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    await waitFor(() => expect(screen.getByTestId('calendar-config-notice')).toBeTruthy())
+    expect(screen.queryByTestId('calendar-grid')).toBeNull()
   })
 })
 

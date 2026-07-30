@@ -36,6 +36,7 @@ import {
   toDateKey,
   type SelectedInterval,
 } from '../calendar'
+import { buildCalendarConfig } from '../config'
 import { NotFoundCard, SpaceAccessGate } from './SpaceAccessGate'
 
 /**
@@ -180,6 +181,34 @@ export function ResourceCalendarPage() {
   const canCancelAnyone =
     header !== null && (header.space.my_role === 'admin' || header.space.my_role === 'owner')
 
+  /**
+   * The grid's layout, built from this Space's own schedule once the header
+   * fetch resolves it. `null` while pending, so `CalendarGrid` renders on its
+   * own fallback (the whole day, unrestricted) rather than waiting on a
+   * second request it does not otherwise need — the same "independent of the
+   * header fetch" property the component's own docblock already claims.
+   *
+   * An `'incoherent'` result (see `coherenceIssue` in `config.ts`) means this
+   * Space's `slot_minutes` / `opens_at` / `closes_at` cannot describe a valid
+   * grid — a bad admin edit, or the `DEFERRED.md` item 17 shape where a
+   * Space's local hours are unusable in the first place. Rather than guess at
+   * a grid from data that cannot produce one, the calendar is replaced with a
+   * notice: the grid must never offer what the server will refuse, and a
+   * best-effort window built from nonsense data is exactly that risk.
+   *
+   * Memoized on `header`: `CalendarGrid` puts this in the dependency array of
+   * both `selectedInterval` and the effect that reports it upward through
+   * `onSelectionChange`, so a fresh object here on every render — even one
+   * describing the same schedule — retriggers that effect, which calls back
+   * into this component's own `setSelection` and re-renders it, rebuilding
+   * this object again. That feedback loop doesn't converge: selecting a
+   * single slot hangs the page in an infinite render loop.
+   */
+  const configResult = useMemo(
+    () => (header !== null ? buildCalendarConfig(header.space) : null),
+    [header],
+  )
+
   // The route pattern makes this unreachable in practice; TypeScript does not
   // know the params are well-formed, and a crash here is not worth asserting
   // around.
@@ -222,16 +251,28 @@ export function ResourceCalendarPage() {
 
       <div className="mt-6 flex flex-col gap-6 lg:flex-row lg:items-start">
         <div className="min-w-0 flex-1">
-          <CalendarGrid
-            publicId={publicId}
-            resourceId={resourceId}
-            now={now}
-            weekStart={weekStart}
-            onWeekChange={handleWeekChange}
-            onSelectionChange={handleSelectionChange}
-            onBookingSelect={handleBookingSelect}
-            refreshToken={refreshToken}
-          />
+          {configResult?.status === 'incoherent' ? (
+            <p
+              role="alert"
+              data-testid="calendar-config-notice"
+              className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800"
+            >
+              This Space&rsquo;s schedule can&rsquo;t be shown: {configResult.message} An admin
+              needs to fix it in Schedule settings before this calendar can be used.
+            </p>
+          ) : (
+            <CalendarGrid
+              publicId={publicId}
+              resourceId={resourceId}
+              now={now}
+              weekStart={weekStart}
+              config={configResult?.status === 'ok' ? configResult.config : undefined}
+              onWeekChange={handleWeekChange}
+              onSelectionChange={handleSelectionChange}
+              onBookingSelect={handleBookingSelect}
+              refreshToken={refreshToken}
+            />
+          )}
         </div>
         <div className="flex flex-col gap-4 lg:w-80 lg:shrink-0">
           <CancelPanel

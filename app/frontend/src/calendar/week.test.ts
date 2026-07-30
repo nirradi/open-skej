@@ -141,17 +141,20 @@ describe('slot horizon predicates', () => {
 
 describe('slotInterval', () => {
   it('spans exactly one slot length', () => {
-    const config = { slotMinutes: 30, openHour: 6, closeHour: 23 }
-    const { start, end } = slotInterval(THIS_WEEK, 0, config)
+    // Slot 0 is always midnight now (the grid renders the full day); index 12
+    // at 30-minute slots is 06:00.
+    const config = { slotMinutes: 30, openMinutes: null, closeMinutes: null }
+    const { start, end } = slotInterval(THIS_WEEK, 12, config)
     expect(start.getHours()).toBe(6)
     expect((end.getTime() - start.getTime()) / 60_000).toBe(30)
   })
 
   it('follows the configured granularity', () => {
-    const { start, end } = slotInterval(THIS_WEEK, 3, {
+    // Index 39 at 10-minute slots, from midnight, is 06:30.
+    const { start, end } = slotInterval(THIS_WEEK, 39, {
       slotMinutes: 10,
-      openHour: 6,
-      closeHour: 23,
+      openMinutes: null,
+      closeMinutes: null,
     })
     expect(start.getHours()).toBe(6)
     expect(start.getMinutes()).toBe(30)

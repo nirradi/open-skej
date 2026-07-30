@@ -46,7 +46,7 @@ import type { Booking } from '../api'
 import {
   calendarConfig,
   formatSlotLabel,
-  slotStartMinutes,
+  isSlotOutOfHours,
   slotsPerDayFor,
   type CalendarConfig,
 } from '../config'
@@ -304,6 +304,12 @@ export function CalendarGrid({
       // data we do not have.
       if (load.status !== 'ok') return 'unavailable'
 
+      // Checked before the time-based reasons below: whether a slot sits
+      // inside the Space's operating hours does not depend on `now`, only on
+      // the config, and greying it is what replaces the old clipped grid —
+      // the row still exists so a booking sitting on it stays visible.
+      if (isSlotOutOfHours(index, resolvedConfig)) return 'out-of-hours'
+
       const day = days[dayIndex]
       const { start, end } = slotInterval(day, index, resolvedConfig)
       if (isSlotInPast(start, now)) return 'past'
@@ -420,7 +426,6 @@ export function CalendarGrid({
 
   const dayHeight = slotsPerDay * SLOT_ROW_HEIGHT_PX
   const pxPerMinute = SLOT_ROW_HEIGHT_PX / resolvedConfig.slotMinutes
-  const openMinutes = slotStartMinutes(0, resolvedConfig)
 
   return (
     <section className="flex flex-col gap-3" data-testid="calendar">
@@ -552,10 +557,12 @@ export function CalendarGrid({
                 })}
 
                 {bookingsByDay[dayIndex].map(({ booking, start, end }) => {
+                  // Minutes from midnight — the grid always renders the full
+                  // day starting there, whatever the Space's own hours are.
                   const startMinutes = (start.getTime() - dayStart.getTime()) / MS_PER_MINUTE
                   const endMinutes = (end.getTime() - dayStart.getTime()) / MS_PER_MINUTE
-                  const top = Math.max(0, (startMinutes - openMinutes) * pxPerMinute)
-                  const bottom = Math.min(dayHeight, (endMinutes - openMinutes) * pxPerMinute)
+                  const top = Math.max(0, startMinutes * pxPerMinute)
+                  const bottom = Math.min(dayHeight, endMinutes * pxPerMinute)
                   // A booking rendered on a day it did not start on is a
                   // continuation, and must not duplicate the canonical testid.
                   const isContinuation = start.getTime() < dayStart.getTime()
