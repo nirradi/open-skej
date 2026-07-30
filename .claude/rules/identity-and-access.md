@@ -236,6 +236,14 @@ its own: it exists only per-Resource, at `/s/{public_id}/resources/{id}`, reache
 lands in a Space and picks one of its Resources. It is behind the same guard as everything else and
 is not this domain's concern beyond that it, too, requires a session to reach.
 
+**The week that calendar shows is in its URL, as `?week=`, and the page owns it.** The grid is handed
+a week and reports where it wants to go; it holds none of its own. That is what makes a refresh, a
+bookmark and a forwarded link all land on the week the sender was looking at, and two sources of
+truth for the visible week is exactly the bug the shape rules out. A malformed or out-of-range value
+falls back to the current week in silence — it is a URL a person can type, so it is not an error they
+can act on. Paging pushes rather than replaces, so Back walks week by week; the single-Resource
+redirect above replaces, and the two differing is what stops Back walking into that redirect.
+
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of
 which of Auth0 or sandbox mode (`SANDBOX_AUTH`'s frontend counterpart, `VITE_SANDBOX_AUTH`) is

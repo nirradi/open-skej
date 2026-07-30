@@ -123,7 +123,17 @@ export function ResourceCalendarPage() {
    */
   const handleWeekChange = useCallback(
     (nextWeekStart: Date) => {
-      setSearchParams({ week: toDateKey(nextWeekStart) })
+      // Sets `week` on the existing params rather than replacing the whole
+      // object with `{ week }`. There is no other query parameter on this
+      // route today, so the two behave identically — and the day one is added
+      // the object form drops it silently, which is a bug that presents as
+      // "paging the calendar forgets something unrelated" and reads as
+      // anything but a line in this callback.
+      setSearchParams((current) => {
+        const next = new URLSearchParams(current)
+        next.set('week', toDateKey(nextWeekStart))
+        return next
+      })
     },
     [setSearchParams],
   )
