@@ -299,6 +299,23 @@ async function request(path: string, init?: RequestInit): Promise<Envelope> {
     return { kind: 'failed', message: NETWORK_FAILURE_MESSAGE, cause }
   }
 
+  // A 401 ends the session only if we actually proved who we were and the
+  // server refused us anyway — a revoked grant, a rotated signing key, a
+  // changed tenant. That is the `'ok'` case, and it is the one a rejected
+  // token provider cannot catch on its own.
+  //
+  // A 401 on an `'none'` request means something quite different: no provider
+  // was installed, so the request went out anonymously and the server is
+  // saying "you never proved anything", not "what you proved has stopped
+  // being true". That happens routinely while the token source is still being
+  // installed at page load, the caller retries and succeeds, and treating it
+  // as the end of the session would turn a recoverable startup race into a
+  // permanent sign-out — which is strictly worse than the bug this store was
+  // added to fix, because clearing browser storage would not even cure it.
+  if (response.status === 401 && authorization.status === 'ok') {
+    markSessionLost()
+  }
+
   // 204 has no body by definition, so parsing one would throw and land the
   // caller in `failed` on a request that entirely succeeded. `DELETE
   // /spaces/{id}/members/{id}` is the live case: removing a member answers 204,
@@ -381,11 +398,6 @@ async function request(path: string, init?: RequestInit): Promise<Envelope> {
 function classifyByStatus(status: number): Envelope | null {
   switch (status) {
     case 401:
-      // A token was sent and the server refused it anyway — a revoked grant,
-      // a rotated signing key, or a changed tenant, none of which a rejected
-      // token provider would have caught on its own. Marked here rather than
-      // only at the other call site because both mean the session is over.
-      markSessionLost()
       return { kind: 'unauthenticated', message: UNAUTHENTICATED_MESSAGE }
     case 403:
       return { kind: 'forbidden', message: FORBIDDEN_MESSAGE }
