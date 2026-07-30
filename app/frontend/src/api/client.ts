@@ -152,6 +152,35 @@ export function setAccessTokenProvider(provider: AccessTokenProvider | null): vo
 }
 
 /**
+ * Uninstalls `provider`, but only if it is still the one installed.
+ *
+ * This exists for a window that only a *conditional* teardown can close.
+ * React runs effects child-first, so on StrictMode's development-only
+ * mount/unmount/remount cycle the order is: the session provider's cleanup,
+ * then every child's effect re-runs, then the session provider's effect
+ * reinstalls. A cleanup that nulls unconditionally therefore leaves the
+ * provider detached for exactly as long as it takes those child effects to
+ * run — and a child that fetches on mount reads `null`, sends its request
+ * with no `Authorization` header, and takes a 401 the server was right to
+ * give it.
+ *
+ * That is not hypothetical: it is the `GET …/preview 401` immediately
+ * followed by `GET …/preview 200` visible on every page load in the E2E
+ * logs. It was harmless while every screen retried on its own, and stopped
+ * being harmless when a route gate started deciding what to render from that
+ * first answer.
+ *
+ * Callers pair this with `queueMicrotask` so the null lands *after* the
+ * synchronous work of the commit, by which point a remount has already
+ * reinstalled a different closure and this becomes a no-op. A genuine
+ * unmount has nothing to reinstall, so the provider is still `provider` and
+ * it is uninstalled as intended.
+ */
+export function clearAccessTokenProviderIf(provider: AccessTokenProvider): void {
+  if (accessTokenProvider === provider) accessTokenProvider = null
+}
+
+/**
  * Whether the most recent request discovered that the session is over — a
  * rejected token provider, or a 401 that reached the server anyway.
  *
