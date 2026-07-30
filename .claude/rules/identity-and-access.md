@@ -278,6 +278,16 @@ Resources, each linking to that Resource's calendar at `/s/{public_id}/resources
 being bounced to the generic Space list, which would cost them a click back to the very link they
 just opened.
 
+**A Space with exactly one active Resource opens it instead of offering a picker of one.** The
+member is navigated to that Resource's calendar — navigated, not rendered through, so the URL ends
+up naming the Resource and a refresh, a bookmark or a forward of that screen all land where the
+sender was. The navigation **replaces** rather than pushes: a pushed entry leaves the Space URL
+behind it, and Back would return to a page that immediately redirects forward again, which is a loop
+with no way out of it. Archived Resources do not count toward the one, which needs no code — the
+Resource listing already excludes them unless asked otherwise. The calendar's "back to the Space"
+control is hidden in this case for the same reason, since it could only lead to a screen that sends
+the visitor straight back.
+
 **Both routes a shared link can name sit outside `ProtectedRoute` and behind one Space door.** That
 guard's "you need an account to see this page" is right for a members-only screen and wrong for a
 link somebody was handed, so `/s/{public_id}` and `/s/{public_id}/resources/{id}` alike require a
