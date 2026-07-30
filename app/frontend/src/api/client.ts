@@ -44,8 +44,16 @@ const NETWORK_FAILURE_MESSAGE = "We couldn't reach the server. Check your connec
 
 const UNEXPECTED_FAILURE_MESSAGE = 'Something went wrong on our end. Please try again.'
 
-/** Copy for a 401, or for a silent-auth failure that never reached the server. */
-const UNAUTHENTICATED_MESSAGE = 'Your session has expired. Please sign in again.'
+/**
+ * Copy for a 401, or for a silent-auth failure that never reached the server.
+ *
+ * States the fact, not a cause: a lapsed refresh token, a revoked grant, a
+ * rotated signing key and a changed tenant all end here, and whoever is
+ * looking at this screen has the same one move in every case. Diagnosing
+ * which one happened belongs in the console (`authorizationHeader`'s `catch`),
+ * not in copy aimed at a person who is simply signed out.
+ */
+const UNAUTHENTICATED_MESSAGE = "You're not signed in. Sign in to continue."
 
 /** Copy for a 403 — the caller is known, and still not allowed. */
 const FORBIDDEN_MESSAGE = "You don't have permission to do that."
@@ -144,6 +152,60 @@ export function setAccessTokenProvider(provider: AccessTokenProvider | null): vo
 }
 
 /**
+ * Whether the most recent request discovered that the session is over — a
+ * rejected token provider, or a 401 that reached the server anyway.
+ *
+ * ## The seam runs the other way from `setAccessTokenProvider`
+ *
+ * That one is React handing this module a thing it needs; this is the
+ * reverse — this module publishing a fact React needs — and neither imports
+ * the other, for the same reason: `Auth0SessionProvider` and
+ * `SandboxAuthProvider` read this with `useSyncExternalStore` and force their
+ * `Session.status` to `unauthenticated` whatever their own underlying state
+ * says. That underlying state (`isAuthenticated`, `signedIn`) is exactly what
+ * kept answering "signed in" after the token backing it stopped working —
+ * the bug this store exists to close by giving the session layer something
+ * to observe at all.
+ *
+ * ## Only `clearSessionLost` turns it back off, and only `login()` calls that
+ *
+ * Clearing it on the next successful request, or on a timer, would re-arm
+ * silent auth the instant a guarded screen fell through to the login
+ * controls — the exact loop this module must not cause. A flag only an
+ * explicit sign-in can clear is what keeps "the session ended" a one-way door
+ * until a person walks back through it.
+ */
+let sessionLost = false
+const sessionLostListeners = new Set<() => void>()
+
+function setSessionLost(value: boolean): void {
+  if (sessionLost === value) return
+  sessionLost = value
+  for (const listener of sessionLostListeners) listener()
+}
+
+/** Marks the session as over. Called only from the two failure sites below. */
+function markSessionLost(): void {
+  setSessionLost(true)
+}
+
+/** The one way `sessionLost` clears. Called by `login()`, and nowhere else. */
+export function clearSessionLost(): void {
+  setSessionLost(false)
+}
+
+/** `useSyncExternalStore`'s snapshot getter for {@link sessionLost}. */
+export function getSessionLostSnapshot(): boolean {
+  return sessionLost
+}
+
+/** `useSyncExternalStore`'s subscribe function: registers `listener`, returns the unsubscribe. */
+export function subscribeSessionLost(listener: () => void): () => void {
+  sessionLostListeners.add(listener)
+  return () => sessionLostListeners.delete(listener)
+}
+
+/**
  * Resolves the `Authorization` header for a request.
  *
  * Three-way result, because "no provider" and "provider failed" mean opposite
@@ -159,7 +221,12 @@ async function authorizationHeader(): Promise<
   if (!accessTokenProvider) return { status: 'none' }
   try {
     return { status: 'ok', value: `Bearer ${await accessTokenProvider()}` }
-  } catch {
+  } catch (cause) {
+    // The user-facing side of this is deliberately generic — see
+    // `UNAUTHENTICATED_MESSAGE` — so the actual reason (a lapsed refresh
+    // token, a revoked grant, a rotated key) goes to the console instead of
+    // being discarded.
+    console.error('Access token provider rejected; treating the session as ended.', cause)
     return { status: 'failed' }
   }
 }
@@ -210,7 +277,11 @@ async function request(path: string, init?: RequestInit): Promise<Envelope> {
   const authorization = await authorizationHeader()
   if (authorization.status === 'failed') {
     // No request is sent: we already know we cannot prove who we are, and an
-    // anonymous retry would only produce a 401 one round trip later.
+    // anonymous retry would only produce a 401 one round trip later. The
+    // session layer is told directly — see `markSessionLost` — because this
+    // is the one place a lapsed session is discovered before it ever reaches
+    // the server.
+    markSessionLost()
     return { kind: 'unauthenticated', message: UNAUTHENTICATED_MESSAGE }
   }
 
@@ -310,6 +381,11 @@ async function request(path: string, init?: RequestInit): Promise<Envelope> {
 function classifyByStatus(status: number): Envelope | null {
   switch (status) {
     case 401:
+      // A token was sent and the server refused it anyway — a revoked grant,
+      // a rotated signing key, or a changed tenant, none of which a rejected
+      // token provider would have caught on its own. Marked here rather than
+      // only at the other call site because both mean the session is over.
+      markSessionLost()
       return { kind: 'unauthenticated', message: UNAUTHENTICATED_MESSAGE }
     case 403:
       return { kind: 'forbidden', message: FORBIDDEN_MESSAGE }

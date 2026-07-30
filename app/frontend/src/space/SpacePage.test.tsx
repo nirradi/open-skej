@@ -373,7 +373,7 @@ describe('when the preview cannot be loaded', () => {
     // the user could have fixed in one click.
     vi.mocked(previewSpace).mockResolvedValue({
       outcome: 'unauthenticated',
-      message: 'Your session has expired. Please sign in again.',
+      message: "You're not signed in. Sign in to continue.",
     })
 
     renderRoute()

@@ -16,7 +16,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { API_BASE_URL, authenticatedRequest, getCurrentUser, setAccessTokenProvider } from './client'
+import {
+  API_BASE_URL,
+  authenticatedRequest,
+  clearSessionLost,
+  getCurrentUser,
+  setAccessTokenProvider,
+} from './client'
 
 /** Minimal stand-in for `Response`; the client only reads `ok`, `status`, `json`. */
 function jsonResponse(status: number, body: unknown): Response {
@@ -55,6 +61,10 @@ afterEach(() => {
   // The provider is module-level state; leaving one installed would silently
   // authenticate the next test file's requests.
   setAccessTokenProvider(null)
+  // Several tests here deliberately trigger the `unauthenticated` outcome,
+  // which now marks the session-lost store as a side effect — reset it so
+  // that side effect does not leak into a later test in this file.
+  clearSessionLost()
 })
 
 /** The headers the client actually sent on its first call. */

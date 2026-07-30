@@ -12,7 +12,7 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { listResourceBookings, setAccessTokenProvider } from '../api'
+import { clearSessionLost, listResourceBookings, setAccessTokenProvider } from '../api'
 import { SANDBOX_SIGNED_IN_STORAGE_KEY, SandboxAuthProvider } from './SandboxAuthProvider'
 import { SANDBOX_SUB_STORAGE_KEY } from './sandboxToken'
 import { useSession } from './session'
@@ -38,6 +38,10 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
   setAccessTokenProvider(null)
+  // 'rejects outgoing requests...' below marks the session-lost store as a
+  // side effect of the `unauthenticated` outcome it asserts; reset it so a
+  // later test's status assertion cannot inherit it.
+  clearSessionLost()
 })
 
 /** Reads `useSession().status` onto the DOM and offers buttons that call `login`/`logout`. */
