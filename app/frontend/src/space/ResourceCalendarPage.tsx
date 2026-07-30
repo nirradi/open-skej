@@ -15,7 +15,11 @@
  * The Space name and Resource name shown in the header are fetched for
  * display only — every request the calendar and the panels make is
  * independently authorized server-side through `require_space_role`, so a
- * stale or failed header fetch changes nothing about what is bookable.
+ * stale or failed header fetch changes nothing about what is bookable. The
+ * same fetch is also where `CancelPanel` gets the "may cancel anyone's
+ * booking" flag it needs alongside `Booking.mine`: while it is pending or
+ * failed the flag reads `false`, offering no more than a plain member could
+ * already do, and it only ever widens once `space.my_role` is actually known.
  */
 
 import { useCallback, useEffect, useState } from 'react'
@@ -74,6 +78,13 @@ export function ResourceCalendarPage() {
     setRefreshToken((token) => token + 1)
   }, [])
 
+  // `booking.mine` alone cannot tell an admin's own booking apart from a
+  // member's, so `CancelPanel` also needs the caller's role — computed here,
+  // the same idiom `AdminPage`'s `SpaceAdmin` uses, and `false` until the
+  // header fetch above actually resolves with the Space.
+  const canCancelAnyone =
+    header !== null && (header.space.my_role === 'admin' || header.space.my_role === 'owner')
+
   // The route pattern makes this unreachable in practice; TypeScript does not
   // know the params are well-formed, and a crash here is not worth asserting
   // around.
@@ -119,6 +130,7 @@ export function ResourceCalendarPage() {
             publicId={publicId}
             resourceId={resourceId}
             booking={selectedBooking}
+            canCancelAnyone={canCancelAnyone}
             onCalendarChanged={handleCalendarChanged}
           />
           <BookingPanel

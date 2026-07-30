@@ -28,12 +28,16 @@ const booking: Booking = {
   id: 42,
   resource_id: RESOURCE_ID,
   user_id: 1,
+  mine: true,
   start_at: new Date(2026, 6, 24, 8, 0).toISOString(),
   end_at: new Date(2026, 6, 24, 9, 30).toISOString(),
   status: 'confirmed',
   created_at: '2026-07-20T10:00:00Z',
   cancelled_at: null,
 }
+
+/** A booking belonging to somebody else — `user_id` mirrors what an admin sees. */
+const someoneElsesBooking: Booking = { ...booking, mine: false, user_id: 7 }
 
 const cancelled: Booking = { ...booking, status: 'cancelled', cancelled_at: '2026-07-20T11:00:00Z' }
 
@@ -50,12 +54,13 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function renderPanel(target: Booking | null = booking) {
+function renderPanel(target: Booking | null = booking, canCancelAnyone = false) {
   return render(
     <CancelPanel
       publicId={PUBLIC_ID}
       resourceId={RESOURCE_ID}
       booking={target}
+      canCancelAnyone={canCancelAnyone}
       onCalendarChanged={onCalendarChanged}
     />,
   )
@@ -78,6 +83,36 @@ describe('the panel before anything is asked of it', () => {
     expect(screen.getByTestId('cancel-time').textContent).toContain('08:00')
     expect(screen.getByTestId('cancel-time').textContent).toContain('09:30')
     expect(screen.getByTestId('cancel-duration').textContent).toBe('1 hour 30 minutes')
+  })
+})
+
+describe('who may cancel', () => {
+  it("offers the control for the caller's own booking, headed \"Your booking\"", () => {
+    renderPanel(booking, false)
+    expect(screen.getByTestId('cancel-heading').textContent).toBe('Your booking')
+    expect(screen.getByTestId('cancel-start')).toBeTruthy()
+    expect(screen.queryByTestId('cancel-not-mine-notice')).toBeNull()
+  })
+
+  it("offers the control for someone else's booking when the caller is admin/owner, without claiming it is theirs", () => {
+    renderPanel(someoneElsesBooking, true)
+    expect(screen.getByTestId('cancel-heading').textContent).not.toBe('Your booking')
+    expect(screen.getByTestId('cancel-start')).toBeTruthy()
+    expect(screen.queryByTestId('cancel-not-mine-notice')).toBeNull()
+  })
+
+  it("offers no confirm control for someone else's booking when the caller is a plain member, and says why", () => {
+    renderPanel(someoneElsesBooking, false)
+    expect(screen.queryByTestId('cancel-start')).toBeNull()
+    expect(screen.queryByTestId('cancel-confirming')).toBeNull()
+    const notice = screen.getByTestId('cancel-not-mine-notice')
+    expect(notice.textContent).toContain('taken')
+    expect(notice.textContent).toContain('admin')
+  })
+
+  it('never sends a cancel request when a plain member has no control to click', () => {
+    renderPanel(someoneElsesBooking, false)
+    expect(cancelResourceBooking).not.toHaveBeenCalled()
   })
 })
 
@@ -431,6 +466,7 @@ describe('when the selection moves', () => {
         publicId={PUBLIC_ID}
         resourceId={RESOURCE_ID}
         booking={{ ...booking, id: 43 }}
+        canCancelAnyone={false}
         onCalendarChanged={onCalendarChanged}
       />,
     )
@@ -451,6 +487,7 @@ describe('when the selection moves', () => {
         publicId={PUBLIC_ID}
         resourceId={RESOURCE_ID}
         booking={null}
+        canCancelAnyone={false}
         onCalendarChanged={onCalendarChanged}
       />,
     )

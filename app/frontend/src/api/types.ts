@@ -15,11 +15,23 @@ export type BookingStatus = 'confirmed' | 'cancelled'
  * parsed into `Date`s. The field names are snake_case for the same reason: this
  * is the wire shape verbatim, so a mismatch with the backend is a visible diff
  * against `schemas.py` rather than something hidden behind a mapping layer.
+ *
+ * `mine` and `user_id` answer two different questions and are gated
+ * differently. The question a plain member needs answered is "may I cancel
+ * this", never "whose is it" — `mine` is exactly that answer and is always
+ * present. `user_id` itself is populated only for admin and owner and is
+ * `null` for a plain member: the week payload is otherwise the one response an
+ * ordinary member fetches that enumerates the Space's user ids, and no screen
+ * renders them. Admins keep the owner because an admin cancelling someone
+ * else's booking without knowing whose it is cannot be held responsible for
+ * it.
  */
 export interface Booking {
   id: number
   resource_id: number
-  user_id: number
+  user_id: number | null
+  /** Whether this booking belongs to the caller. Always present. */
+  mine: boolean
   start_at: string
   end_at: string
   status: BookingStatus

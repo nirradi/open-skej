@@ -39,10 +39,12 @@
  *   the confirm control is hidden rather than offered again. Distinct from
  *   `forbidden` even though both are 403 — this one names a rule about *this*
  *   cancellation specifically, and the server's own copy says so, so it is
- *   shown rather than folded into the generic access-floor failure. The button
- *   that produced it stays visible on other bookings: 5.3, not this task, is
- *   what stops the calendar from offering a cancel it knows the server will
- *   refuse.
+ *   shown rather than folded into the generic access-floor failure. Reaching
+ *   this result at all means the `mine` / `canCancelAnyone` check below was
+ *   working from a stale flag — a header fetch that landed after the caller's
+ *   role changed underneath them, say — because that check is what stops the
+ *   confirm control from being offered on a booking the server will refuse to
+ *   let this caller cancel.
  * - **`unauthenticated` / `forbidden`** — the access floor every authenticated
  *   route carries. Neither is a rule about *this* cancellation, so both render
  *   as the same generic failure `failed` does.
@@ -59,6 +61,7 @@ import { useCallback, useRef, useState } from 'react'
 import type { Booking } from '../api'
 import { cancelResourceBooking } from '../api'
 import { summariseInterval } from './summary'
+import { TAKEN_NOT_YOURS_MESSAGE } from '../ui/messages'
 
 /** What the panel is currently showing below its controls. */
 export type CancelResult =
@@ -90,11 +93,29 @@ export interface CancelPanelProps {
   resourceId: number
   /** The booking to cancel, or `null` when none is selected. */
   booking: Booking | null
+  /**
+   * Whether the caller may cancel a booking that is not theirs — true for an
+   * admin or owner of the Space. `booking.mine` alone cannot decide whether to
+   * offer the control: it is `false` for an admin looking at a member's
+   * booking too, and an admin should still be offered the cancel.
+   *
+   * This is advisory, the same way every other client-side gate in this app
+   * is: it only decides whether the button is drawn, never whether a cancel
+   * succeeds. The server re-checks on every request, and the `not_yours`
+   * branch above is what a caller sees if this flag was stale.
+   */
+  canCancelAnyone: boolean
   /** Called after a change the calendar must reflect (any settled cancellation). */
   onCalendarChanged: () => void
 }
 
-export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }: CancelPanelProps) {
+export function CancelPanel({
+  publicId,
+  resourceId,
+  booking,
+  canCancelAnyone,
+  onCalendarChanged,
+}: CancelPanelProps) {
   const [result, setResult] = useState<CancelResult>({ kind: 'idle' })
   const [confirming, setConfirming] = useState(false)
 
@@ -250,13 +271,19 @@ export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }
     end: new Date(booking.end_at),
   })
   const cancelling = result.kind === 'cancelling'
+  // `booking.mine` alone cannot decide this: it is false for an admin looking
+  // at a member's booking too. `canCancelAnyone` is what tells an admin's
+  // "not mine" apart from a plain member's.
+  const mayCancel = booking.mine || canCancelAnyone
 
   return (
     <aside
       className="rounded-lg border border-slate-200 bg-white p-4 text-sm"
       data-testid="cancel-panel"
     >
-      <h2 className="text-base font-semibold text-slate-900">Your booking</h2>
+      <h2 className="text-base font-semibold text-slate-900" data-testid="cancel-heading">
+        {booking.mine ? 'Your booking' : 'This booking'}
+      </h2>
 
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-slate-700">
         <dt className="text-slate-500">Day</dt>
@@ -269,16 +296,29 @@ export function CancelPanel({ publicId, resourceId, booking, onCalendarChanged }
         <dd data-testid="cancel-duration">{summary.duration}</dd>
       </dl>
 
-      {!confirming && !cancelling && result.kind !== 'started' && result.kind !== 'not_yours' && (
-        <button
-          type="button"
-          data-testid="cancel-start"
-          onClick={() => setConfirming(true)}
-          className="mt-4 rounded border border-rose-300 px-4 py-2 font-medium text-rose-700 hover:bg-rose-50"
+      {!mayCancel && (
+        <p
+          className="mt-4 rounded border border-slate-200 bg-slate-50 p-3 text-slate-700"
+          data-testid="cancel-not-mine-notice"
         >
-          Cancel this booking
-        </button>
+          {TAKEN_NOT_YOURS_MESSAGE}
+        </p>
       )}
+
+      {mayCancel &&
+        !confirming &&
+        !cancelling &&
+        result.kind !== 'started' &&
+        result.kind !== 'not_yours' && (
+          <button
+            type="button"
+            data-testid="cancel-start"
+            onClick={() => setConfirming(true)}
+            className="mt-4 rounded border border-rose-300 px-4 py-2 font-medium text-rose-700 hover:bg-rose-50"
+          >
+            Cancel this booking
+          </button>
+        )}
 
       {(confirming || cancelling) && (
         <div className="mt-4" data-testid="cancel-confirming">

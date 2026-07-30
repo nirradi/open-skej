@@ -531,16 +531,29 @@ export function CalendarGrid({
                       }
                       data-booking-id={booking.id}
                       data-selected={isSelected || undefined}
+                      data-mine={booking.mine || undefined}
                       aria-pressed={isSelected}
-                      aria-label={`Booked ${formatClockTime(start)} to ${formatClockTime(end)}`}
+                      aria-label={
+                        booking.mine
+                          ? `Booked ${formatClockTime(start)} to ${formatClockTime(end)}`
+                          : `Booked by someone else, ${formatClockTime(start)} to ${formatClockTime(end)}`
+                      }
                       // Interactive as of 1.8, and safe to be: see the note at
                       // the top of this file on why intercepting these pointer
-                      // events cannot cost the grid a drag.
+                      // events cannot cost the grid a drag. Not-mine bookings
+                      // stay clickable too — selection is how an admin sees
+                      // when it runs before acting on it, and the ownership
+                      // check that actually gates cancelling lives server-side
+                      // and in `CancelPanel`, not here.
                       className={[
                         'absolute inset-x-0.5 overflow-hidden rounded px-1 text-left text-[10px] leading-tight text-white',
-                        isSelected
-                          ? 'bg-indigo-700 ring-2 ring-indigo-900'
-                          : 'bg-indigo-500 hover:bg-indigo-600',
+                        booking.mine
+                          ? isSelected
+                            ? 'bg-indigo-700 ring-2 ring-indigo-900'
+                            : 'bg-indigo-500 hover:bg-indigo-600'
+                          : isSelected
+                            ? 'bg-slate-600 ring-2 ring-slate-800'
+                            : 'bg-slate-400 hover:bg-slate-500',
                       ].join(' ')}
                       style={{ top, height: Math.max(0, bottom - top) }}
                       onClick={() => toggleBooking(booking.id)}

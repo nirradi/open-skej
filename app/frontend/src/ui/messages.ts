@@ -48,3 +48,12 @@ export function messageFor(result: FailedOutcome): string {
 
   return result.message
 }
+
+/**
+ * Shown by `CancelPanel` for a booking that is not the caller's and not
+ * theirs to cancel — a plain member looking at someone else's block. There is
+ * no confirm control to pair it with: the caller has no remedy here, only an
+ * admin does.
+ */
+export const TAKEN_NOT_YOURS_MESSAGE =
+  'This slot is already taken by someone else in the Space. If it needs to be freed, ask an admin to cancel it.'
