@@ -2,11 +2,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
 import { AdminPage } from './admin'
 import { AccountPage, PostLoginRedirect, ProtectedRoute } from './auth'
-import { assertConfigIsCoherent } from './config'
 import { ResourceCalendarRoute, SpaceListPage, SpacePage } from './space'
-
-// Fail at boot rather than rendering a subtly wrong grid.
-assertConfigIsCoherent()
 
 /**
  * The application shell: providers are above us, routes are here.

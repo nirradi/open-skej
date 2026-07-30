@@ -98,7 +98,7 @@ export function canGoToNextWeek(weekStart: Date, now: Date): boolean {
 }
 
 /** Why a slot cannot be selected, or `null` when it can. */
-export type SlotBlockedReason = 'past' | 'beyond-horizon' | 'booked' | 'unavailable'
+export type SlotBlockedReason = 'past' | 'beyond-horizon' | 'booked' | 'unavailable' | 'out-of-hours'
 
 /**
  * Whether a slot has already started.

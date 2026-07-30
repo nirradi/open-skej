@@ -31,8 +31,10 @@ const NOW = new Date(2026, 6, 22, 14, 30)
 /** The Monday of NOW's week. */
 const MONDAY = startOfWeek(NOW)
 
-const THIRTY: CalendarConfig = { slotMinutes: 30, openHour: 6, closeHour: 23 }
+const THIRTY: CalendarConfig = { slotMinutes: 30, openMinutes: null, closeMinutes: null }
 const TEN: CalendarConfig = { ...THIRTY, slotMinutes: 10 }
+/** 09:00-17:00, 30-minute slots — for the tests that need a real hours window. */
+const NINE_TO_FIVE: CalendarConfig = { slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 17 * 60 }
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 const RESOURCE_ID = 1
@@ -118,26 +120,28 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('the grid is driven by config.ts', () => {
-  it('renders one row per configured slot at 30 minutes', async () => {
+  it('renders one row per day for every 30-minute slot', async () => {
     await renderGrid({ config: THIRTY })
-    expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('34')
+    // The grid always spans the full day (task 5.9) — 24 hours at 30 minutes
+    // is 48 rows, whatever a Space's own hours say.
+    expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('48')
     // The last configured slot exists and the one after it does not — a grid
     // that rendered a fixed count would fail one of these two.
-    expect(slot(0, 33)).toBeTruthy()
-    expect(screen.queryByTestId(slotTestId(MONDAY, 34))).toBeNull()
+    expect(slot(0, 47)).toBeTruthy()
+    expect(screen.queryByTestId(slotTestId(MONDAY, 48))).toBeNull()
   })
 
   it('renders one row per configured slot at 10 minutes with no other change', async () => {
     await renderGrid({ config: TEN })
-    expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('102')
-    expect(slot(0, 101)).toBeTruthy()
-    expect(screen.queryByTestId(slotTestId(MONDAY, 102))).toBeNull()
+    expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('144')
+    expect(slot(0, 143)).toBeTruthy()
+    expect(screen.queryByTestId(slotTestId(MONDAY, 144))).toBeNull()
   })
 
-  it('labels slots from the configured opening hour', async () => {
+  it('labels slots starting at midnight, whatever the configured hours', async () => {
     await renderGrid({ config: TEN })
-    expect(slot(0, 0).getAttribute('aria-label')).toContain('06:00')
-    expect(slot(0, 6).getAttribute('aria-label')).toContain('07:00')
+    expect(slot(0, 0).getAttribute('aria-label')).toContain('00:00')
+    expect(slot(0, 6).getAttribute('aria-label')).toContain('01:00')
   })
 
   it('renders seven day columns', async () => {
@@ -148,10 +152,43 @@ describe('the grid is driven by config.ts', () => {
   })
 })
 
+describe('out-of-hours slots', () => {
+  it('greys slots before opening and from closing onward, without disappearing', async () => {
+    await renderGrid({ config: NINE_TO_FIVE })
+    // 08:30 is one slot before opening; 09:00 is the first open slot.
+    expect(slot(4, 17).dataset.blocked).toBe('out-of-hours')
+    expect(slot(4, 17).disabled).toBe(true)
+    expect(slot(4, 18).dataset.blocked).toBeUndefined()
+    // 17:00 is closing — the slot starting there is already closed, matching
+    // "a booking may end exactly at closing", never start there.
+    expect(slot(4, 34).dataset.blocked).toBe('out-of-hours')
+  })
+
+  it('still renders the full day rather than clipping it to the open window', async () => {
+    await renderGrid({ config: NINE_TO_FIVE })
+    expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('48')
+    expect(slot(4, 0)).toBeTruthy()
+    expect(slot(4, 47)).toBeTruthy()
+  })
+
+  it('keeps a booking on screen even though later-narrowed hours now grey its row', async () => {
+    // A booking made at 07:00, before an admin narrowed the Space to 09:00-17:00.
+    // The row it sits on is greyed, not gone — it must still show the booking
+    // that is genuinely still on the calendar.
+    const day = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4)
+    const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 7, 0)
+    resolveWith([booking(21, start, new Date(start.getTime() + 30 * 60_000))])
+    await renderGrid({ config: NINE_TO_FIVE })
+
+    expect(screen.getByTestId('booking-21')).toBeTruthy()
+    expect(slot(4, 14).dataset.blocked).toBe('out-of-hours')
+  })
+})
+
 describe('past slots', () => {
   it('render disabled rather than hidden, so the week does not reflow', async () => {
     await renderGrid()
-    // Monday 06:00 is three days behind NOW but still present in the grid.
+    // Monday 00:00 is three days behind NOW but still present in the grid.
     const monday = slot(0, 0)
     expect(monday).toBeTruthy()
     expect(monday.disabled).toBe(true)
@@ -160,13 +197,13 @@ describe('past slots', () => {
 
   it('disables earlier slots on today but not later ones', async () => {
     await renderGrid()
-    // NOW is 14:30 on Wednesday (day offset 2). Index 16 is 14:00, index 18 is
+    // NOW is 14:30 on Wednesday (day offset 2). Index 28 is 14:00, index 30 is
     // 15:00. Asserting both directions makes this non-vacuous: a component that
     // disabled everything, or nothing, fails one half.
-    expect(slot(2, 16).disabled).toBe(true)
-    expect(slot(2, 16).dataset.blocked).toBe('past')
-    expect(slot(2, 18).disabled).toBe(false)
-    expect(slot(2, 18).dataset.blocked).toBeUndefined()
+    expect(slot(2, 28).disabled).toBe(true)
+    expect(slot(2, 28).dataset.blocked).toBe('past')
+    expect(slot(2, 30).disabled).toBe(false)
+    expect(slot(2, 30).dataset.blocked).toBeUndefined()
   })
 
   it('leaves a future day entirely enabled', async () => {
@@ -275,11 +312,12 @@ describe('navigation bounds', () => {
       (screen.getByTestId(slotTestId(day, index)) as HTMLButtonElement).dataset.blocked
 
     // 14:00 on the horizon day is inside the horizon, 15:00 is past it.
-    expect(at(horizonDay, 16)).toBeUndefined()
-    expect(at(horizonDay, 18)).toBe('beyond-horizon')
-    // The day before is bookable right up to closing — the negative control
-    // proving the assertion above is not just "everything late is blocked".
-    expect(at(new Date(2026, 8, 19), 33)).toBeUndefined()
+    expect(at(horizonDay, 28)).toBeUndefined()
+    expect(at(horizonDay, 30)).toBe('beyond-horizon')
+    // The day before is bookable right up to the end of the day — the
+    // negative control proving the assertion above is not just "everything
+    // late is blocked".
+    expect(at(new Date(2026, 8, 19), 47)).toBeUndefined()
   })
 })
 
@@ -291,13 +329,13 @@ describe('existing bookings', () => {
     await renderGrid()
 
     expect(screen.getByTestId('booking-7')).toBeTruthy()
-    // 09:00–10:30 at 30-minute slots is indices 6, 7, 8 from a 06:00 open.
-    expect(slot(4, 6).dataset.blocked).toBe('booked')
-    expect(slot(4, 7).dataset.blocked).toBe('booked')
-    expect(slot(4, 8).dataset.blocked).toBe('booked')
+    // 09:00–10:30 at 30-minute slots, from midnight, is indices 18, 19, 20.
+    expect(slot(4, 18).dataset.blocked).toBe('booked')
+    expect(slot(4, 19).dataset.blocked).toBe('booked')
+    expect(slot(4, 20).dataset.blocked).toBe('booked')
     // Half-open: the slot starting exactly at the booking's end is free.
-    expect(slot(4, 9).dataset.blocked).toBeUndefined()
-    expect(slot(4, 5).dataset.blocked).toBeUndefined()
+    expect(slot(4, 21).dataset.blocked).toBeUndefined()
+    expect(slot(4, 17).dataset.blocked).toBeUndefined()
   })
 
   it('renders a not-mine booking visually distinct, with an aria-label that says so', async () => {
@@ -334,7 +372,7 @@ describe('existing bookings', () => {
 })
 
 describe('selecting a booking to cancel it', () => {
-  /** A one-hour booking on Friday at 14:00 — indices 16 and 17 at 30 minutes. */
+  /** A one-hour booking on Friday at 14:00 — indices 28 and 29 at 30 minutes. */
   const FRIDAY = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4)
   const START = new Date(FRIDAY.getFullYear(), FRIDAY.getMonth(), FRIDAY.getDate(), 14, 0)
 
@@ -415,7 +453,7 @@ describe('selecting a booking to cancel it', () => {
     await waitFor(() => expect(screen.queryByTestId('booking-11')).toBeNull())
 
     expect(onBookingSelect.mock.calls.at(-1)?.[0]).toBeNull()
-    expect(slot(4, 16).disabled).toBe(false)
+    expect(slot(4, 28).disabled).toBe(false)
   })
 
   it('drops the selected booking on a refresh even if it is still there', async () => {
@@ -668,11 +706,11 @@ describe('selection', () => {
     resolveWith([booking(3, start, new Date(start.getTime() + 30 * 60_000))])
     await renderGrid()
 
-    // Index 8 is 10:00, the booked one. Dragging 5 → 12 must stop at 7.
-    fireEvent.pointerDown(slot(4, 5))
-    fireEvent.pointerOver(slot(4, 12))
+    // Index 20 is 10:00, the booked one. Dragging 17 → 24 must stop at 19.
+    fireEvent.pointerDown(slot(4, 17))
+    fireEvent.pointerOver(slot(4, 24))
     fireEvent.pointerUp(window)
-    expect(selectedIndices(4)).toEqual([5, 6, 7])
+    expect(selectedIndices(4)).toEqual([17, 18, 19])
   })
 
   it('ignores a drag onto another day column', async () => {
@@ -699,11 +737,12 @@ describe('selection', () => {
     fireEvent.pointerOver(slot(4, 5))
     fireEvent.pointerUp(window)
 
+    // Indices 4 and 5 at 30-minute slots, from midnight, are 02:00 and 02:30.
     const interval = onSelectionChange.mock.calls.at(-1)?.[0] as { start: Date; end: Date }
-    expect(interval.start.getHours()).toBe(8)
+    expect(interval.start.getHours()).toBe(2)
     expect(interval.start.getMinutes()).toBe(0)
     // Two 30-minute slots, so the range ends at the *end* of the second.
-    expect(interval.end.getHours()).toBe(9)
+    expect(interval.end.getHours()).toBe(3)
     expect(interval.end.getMinutes()).toBe(0)
   })
 

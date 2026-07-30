@@ -244,6 +244,23 @@ falls back to the current week in silence — it is a URL a person can type, so 
 can act on. Paging pushes rather than replaces, so Back walks week by week; the single-Resource
 redirect above replaces, and the two differing is what stops Back walking into that redirect.
 
+**The grid's layout comes from the Space; the grid always renders the whole day.** `slot_minutes`,
+`opens_at` and `closes_at` are read from the Space and turned into the calendar's configuration at
+runtime — there are no compile-time slot or opening-hour constants, because an admin edits these and
+a build-time value could only ever be a stale copy. Hours outside the Space's window are **greyed,
+never absent**: clipping the day to `[opens_at, closes_at)` would leave a booking made before the
+hours were narrowed with no row to sit on, so it would vanish from a calendar it is still on. Null
+hours mean the availability rule is not enforced, so that Space renders the whole day bookable rather
+than falling back to an invented window. The greying is the same advisory line everything else on
+this screen draws: it must never offer what the server would refuse, and it is never what refuses a
+booking.
+
+**A Space whose schedule cannot describe a grid degrades to a notice on that Space's calendar.** The
+coherence check — a slot length that does not tile the day or land the hours on a boundary, a close
+at or before an open — runs where the configuration is built, not at boot. It once threw at import
+time, which was right for a constant nobody could mistype and is wrong for data an admin typed: one
+bad Space would white-screen the app for everyone, including the members of every other Space.
+
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of
 which of Auth0 or sandbox mode (`SANDBOX_AUTH`'s frontend counterpart, `VITE_SANDBOX_AUTH`) is
