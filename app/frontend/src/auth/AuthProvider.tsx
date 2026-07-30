@@ -5,23 +5,25 @@ import { Auth0SessionProvider } from './Auth0SessionProvider'
 import { SandboxAuthProvider } from './SandboxAuthProvider'
 import { AuthModeContext } from './authConfigContext'
 import { readAuth0Config } from './config'
+import { setPostLoginRedirect } from './postLoginRedirectStore'
 import { readSandboxConfig } from './sandboxConfig'
 
 /**
- * Restores the URL the user was on before they were sent to Auth0.
+ * Stashes the URL the user was on before they were sent to Auth0, for
+ * `PostLoginRedirect` to apply once the router exists to apply it to.
  *
- * Auth0 returns to `redirect_uri` with `?code=&state=` appended, which must not
- * survive into the address bar: it is noise, it breaks a refresh (the code is
- * single-use), and it is the sort of thing that ends up pasted into a bug
- * report. `replaceState` rather than `pushState` so the back button does not
- * walk into a spent authorization code.
- *
- * `history` directly rather than the router's navigate, because this runs
- * outside `<BrowserRouter>` — the provider wraps the router, not the reverse,
- * since a route may need to know whether anyone is signed in.
+ * This runs outside `<BrowserRouter>` — the provider wraps the router, not
+ * the reverse, since a route may need to know whether anyone is signed in —
+ * and by the time the SDK calls it, `BrowserRouter` has already mounted at
+ * the callback URL (`/`). `window.history.replaceState` used to be called
+ * here directly, but that only rewrites the address bar; it tells React
+ * Router nothing, so the URL read `/s/{public_id}` while `SpaceListPage`
+ * stayed on screen. Publishing to the store and letting a router-aware
+ * consumer navigate is what makes the rendered route agree with the address
+ * bar — see `postLoginRedirectStore.ts` for why a store rather than a prop.
  */
 function onRedirectCallback(appState?: AppState) {
-  window.history.replaceState({}, document.title, appState?.returnTo ?? window.location.pathname)
+  setPostLoginRedirect(appState?.returnTo ?? window.location.pathname)
 }
 
 /**

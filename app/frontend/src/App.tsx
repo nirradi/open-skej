@@ -1,7 +1,7 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
 import { AdminPage } from './admin'
-import { AccountPage, ProtectedRoute } from './auth'
+import { AccountPage, PostLoginRedirect, ProtectedRoute } from './auth'
 import { assertConfigIsCoherent } from './config'
 import { ResourceCalendarPage, SpaceListPage, SpacePage } from './space'
 
@@ -29,6 +29,14 @@ assertConfigIsCoherent()
 function App() {
   return (
     <BrowserRouter>
+      {/*
+        Applies the destination `AuthProvider`'s `onRedirectCallback` stashed
+        for the deep link that sent the user to Auth0 in the first place.
+        Must be inside `BrowserRouter` (it calls `useNavigate()`) and does
+        not itself render a route — see `PostLoginRedirect` for why this has
+        to be a subscriber rather than a one-time read.
+      */}
+      <PostLoginRedirect />
       <Routes>
         <Route
           path="/"

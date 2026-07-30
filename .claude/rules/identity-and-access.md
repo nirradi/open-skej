@@ -291,6 +291,19 @@ properties follow from that and are load-bearing:
   afterwards would have lost the only handle to that Space that exists. The round trip survives
   signup as well as login — a brand-new identity is just as often behind a forwarded link as a
   returning one, and `get_current_user` provisions it just-in-time on the same first call either way.
+
+  **The router owns the destination, not the address bar.** Auth0's redirect callback runs outside
+  the React tree entirely, and by the time it fires `BrowserRouter` has already mounted at the
+  callback URL — so rewriting `window.history` there changes what the address bar says and tells the
+  router nothing, leaving the URL naming one screen while another is rendered. The callback therefore
+  publishes the destination to a module-level store and a component inside the router subscribes and
+  navigates. It must *subscribe* rather than read once on mount, because the callback fires after that
+  mount; a one-time read sees nothing. That single navigate also strips Auth0's `?code=&state=`, which
+  must not survive into the address bar — it is single-use, it breaks a refresh, and it gets pasted
+  into bug reports — and it replaces rather than pushes, so back does not walk into a spent code.
+
+  This is the same shape the session-lost store above uses, for the same underlying reason: a fact
+  discovered outside React that a component below the router has to act on.
 * **404 copy names the link, never the Space.** "That link doesn't work" — never "you don't have
   access to this Space", which would confirm the id is live and turn the capability URL into the
   oracle the 404 exists to prevent. This is the one piece of copy on the route that is a security
