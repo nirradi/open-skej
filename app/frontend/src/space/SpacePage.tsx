@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, Navigate, useParams } from 'react-router-dom'
 
 import { listResources, type Resource, type SpacePreview } from '../api'
 import { messageFor } from '../ui/messages'
@@ -54,6 +54,13 @@ type ResourceLoad =
  * A Space with no Resource is representable in the schema but never produced
  * by the product (creating a Space auto-creates one), so the empty state
  * below is a defensive rendering, not a reachable one.
+ *
+ * A Space with exactly one active Resource skips the picker and navigates
+ * straight to that Resource's calendar (decisions table: "A single-Resource
+ * Space redirects to that Resource, never renders through to it"). `listResources`
+ * already excludes archived Resources unless `includeArchived` is passed, which
+ * it is not here, so the one Resource counted is already the one active Resource
+ * — no second filter is added on top of it.
  */
 function SpaceMemberView({ publicId, preview }: { publicId: string; preview: SpacePreview }) {
   const [load, setLoad] = useState<ResourceLoad>(null)
@@ -75,6 +82,13 @@ function SpaceMemberView({ publicId, preview }: { publicId: string; preview: Spa
       cancelled = true
     }
   }, [publicId])
+
+  if (load?.kind === 'ok' && load.resources.length === 1) {
+    // `replace`, not push: a pushed entry leaves `/s/{publicId}` behind it in
+    // history, so Back returns to a Space page that immediately redirects
+    // forward again — an inescapable loop between the two URLs.
+    return <Navigate to={`/s/${publicId}/resources/${load.resources[0].id}`} replace />
+  }
 
   return (
     <main className={PAGE_CLASS}>

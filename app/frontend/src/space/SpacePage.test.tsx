@@ -26,7 +26,7 @@
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { MemoryRouter, Route, Routes } from 'react-router-dom'
+import { MemoryRouter, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 
 import { listResources, previewSpace, requestAccess } from '../api'
 import type { AccessRequest, ApiOk, PreviewStatus, Resource, SpacePreview } from '../api'
@@ -81,6 +81,13 @@ const RESOURCE: Resource = {
   archived_at: null,
 }
 
+const RESOURCE_2: Resource = {
+  id: 8,
+  name: 'Court 2',
+  created_at: '2026-07-01T00:00:00Z',
+  archived_at: null,
+}
+
 /** Renders the route at `/s/{PUBLIC_ID}`. */
 function renderRoute(mode: AuthMode = MODE_CONFIGURED, status: SessionStatus = 'authenticated') {
   return render(
@@ -104,10 +111,56 @@ async function renderWithStatus(status: PreviewStatus) {
   return screen.findByTestId(status === 'member' ? 'resource-list' : 'space-preview')
 }
 
+/**
+ * Stands in for the real Resource calendar. This suite is not the
+ * calendar's own — it only needs to know the redirect landed at the right
+ * URL, not what renders once it gets there.
+ */
+function ResourceRouteStub() {
+  const { publicId, resourceId } = useParams<{ publicId: string; resourceId: string }>()
+  return <p data-testid="resource-calendar">{`${publicId}/${resourceId}`}</p>
+}
+
+/** Drives the in-memory router's Back the same way a browser Back would. */
+function BackButton() {
+  const navigate = useNavigate()
+  return (
+    <button data-testid="go-back" onClick={() => navigate(-1)}>
+      back
+    </button>
+  )
+}
+
+/**
+ * Renders the same route stack `App.tsx` mounts around `/s/{public_id}`, plus
+ * a `go-back` control, so the single-Resource redirect can be driven all the
+ * way through and Back can be exercised against the router's real history
+ * stack rather than asserted on indirectly.
+ */
+function renderWithResourceRoute(initialEntries: string[], initialIndex: number) {
+  return render(
+    <AuthModeContext value={MODE_CONFIGURED}>
+      <SessionContext value={sessionState('authenticated')}>
+        <MemoryRouter initialEntries={initialEntries} initialIndex={initialIndex}>
+          <BackButton />
+          <Routes>
+            <Route path="/" element={<p data-testid="space-list">Your Spaces</p>} />
+            <Route path="/s/:publicId" element={<SpacePage />} />
+            <Route path="/s/:publicId/resources/:resourceId" element={<ResourceRouteStub />} />
+          </Routes>
+        </MemoryRouter>
+      </SessionContext>
+    </AuthModeContext>,
+  )
+}
+
 beforeEach(() => {
   vi.mocked(previewSpace).mockResolvedValue(ok(makePreview()))
   vi.mocked(requestAccess).mockResolvedValue(ok(CREATED_REQUEST))
-  vi.mocked(listResources).mockResolvedValue(ok([RESOURCE]))
+  // Two Resources by default: the picker tests below are about the picker,
+  // not the single-Resource redirect, which gets its own describe block and
+  // its own override to one Resource.
+  vi.mocked(listResources).mockResolvedValue(ok([RESOURCE, RESOURCE_2]))
 })
 
 afterEach(() => {
@@ -247,6 +300,38 @@ describe('the four statuses', () => {
 
     await screen.findByTestId('space-preview')
     expect(screen.queryByTestId('space-description')).toBeNull()
+  })
+})
+
+describe('a Space with exactly one active Resource', () => {
+  beforeEach(() => {
+    vi.mocked(previewSpace).mockResolvedValue(ok(makePreview({ status: 'member' })))
+    vi.mocked(listResources).mockResolvedValue(ok([RESOURCE]))
+  })
+
+  it("navigates straight to that Resource's calendar instead of rendering the picker", async () => {
+    renderWithResourceRoute([`/s/${PUBLIC_ID}`], 0)
+
+    const calendar = await screen.findByTestId('resource-calendar')
+    expect(calendar.textContent).toBe(`${PUBLIC_ID}/${RESOURCE.id}`)
+    expect(screen.queryByTestId('resource-list')).toBeNull()
+  })
+
+  it('replaces the Space entry rather than pushing, so Back does not loop through it', async () => {
+    // Two entries before the redirect: `/` then `/s/{publicId}`. A `push`
+    // redirect would grow the stack to three, and Back from the calendar
+    // would land on `/s/{publicId}` — which redirects forward again
+    // immediately, the loop `replace` exists to prevent. With `replace` the
+    // Space entry is overwritten in place, so Back from here goes to `/`.
+    renderWithResourceRoute(['/', `/s/${PUBLIC_ID}`], 1)
+
+    await screen.findByTestId('resource-calendar')
+
+    fireEvent.click(screen.getByTestId('go-back'))
+
+    expect(await screen.findByTestId('space-list')).toBeTruthy()
+    expect(screen.queryByTestId('resource-calendar')).toBeNull()
+    expect(screen.queryByTestId('resource-list')).toBeNull()
   })
 })
 

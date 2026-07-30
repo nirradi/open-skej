@@ -54,6 +54,13 @@ const RESOURCE: Resource = {
   archived_at: null,
 }
 
+const OTHER_RESOURCE: Resource = {
+  id: RESOURCE_ID + 1,
+  name: 'Court 2',
+  created_at: '2026-07-01T00:00:00Z',
+  archived_at: null,
+}
+
 function ok<T>(data: T): ApiOk<T> {
   return { outcome: 'ok', data }
 }
@@ -72,7 +79,10 @@ function renderAt(path: string) {
 beforeEach(() => {
   vi.mocked(listResourceBookings).mockResolvedValue(ok([]))
   vi.mocked(getSpace).mockResolvedValue(ok(SPACE))
-  vi.mocked(listResources).mockResolvedValue(ok([RESOURCE]))
+  // Two active Resources by default, so the generic header tests exercise
+  // the "there is a real picker to go back to" case; the back-link tests
+  // below override this to one Resource for the opposite case.
+  vi.mocked(listResources).mockResolvedValue(ok([RESOURCE, OTHER_RESOURCE]))
 })
 
 afterEach(() => {
@@ -109,11 +119,30 @@ describe('the header', () => {
     expect(screen.getByTestId('resource-calendar-heading').textContent).toBe('Calendar')
   })
 
-  it('links back to the Space', () => {
+  it('links back to the Space while there is a real picker to return to', () => {
     renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
 
     const back = screen.getByTestId('resource-calendar-back')
     expect(back.getAttribute('href')).toBe(`/s/${PUBLIC_ID}`)
+  })
+
+  it('shows the back link before the header has resolved', () => {
+    vi.mocked(getSpace).mockReturnValue(new Promise(() => {}))
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    expect(screen.getByTestId('resource-calendar-back')).toBeTruthy()
+  })
+
+  it('hides the back link once this is confirmed the Space\'s only active Resource', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([RESOURCE]))
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('resource-calendar-heading').textContent).toBe(
+        'Tennis Court — Court 1',
+      ),
+    )
+    expect(screen.queryByTestId('resource-calendar-back')).toBeNull()
   })
 })
 
