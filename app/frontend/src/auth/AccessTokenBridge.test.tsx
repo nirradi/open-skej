@@ -105,6 +105,15 @@ describe('AccessTokenBridge', () => {
     await screen.findByTestId('child')
     unmount()
 
+    // The uninstall is deferred by one microtask, so it lands *after* the
+    // synchronous work of the commit that unmounted this. That is what stops
+    // a StrictMode remount — whose child effects re-run between this cleanup
+    // and the reinstall — from firing its refetch with no token. See
+    // `clearAccessTokenProviderIf`. A request begun in the same synchronous
+    // block as the unmount therefore still carries one, which is both
+    // harmless and arguably right: the session existed when it was started.
+    await Promise.resolve()
+
     await authenticatedRequest('/me')
 
     const headers = fetchMock.mock.calls[0]?.[1]?.headers as Record<string, string>

@@ -8,9 +8,11 @@
  * panel changed something is what tells the grid to refetch, rather than a
  * second mechanism for the second panel.
  *
- * Reached only through `ProtectedRoute` in `App.tsx`: only a member ever
- * holds a Resource id (they come from `listResources` on the Space page a
- * member lands on), so this component does no auth gating of its own.
+ * Reached only through `ResourceCalendarRoute` below, which is what `App.tsx`
+ * mounts: this component itself does no auth gating and assumes a member is
+ * already confirmed, since `ResourceCalendarRoute` renders it as
+ * `SpaceAccessGate`'s children — the branch that only runs once the caller's
+ * `previewSpace` status is `member`.
  *
  * The Space name and Resource name shown in the header are fetched for
  * display only — every request the calendar and the panels make is
@@ -28,6 +30,47 @@ import { Link, useParams } from 'react-router-dom'
 import { getSpace, listResources, type Booking, type Resource, type Space } from '../api'
 import { BookingPanel, CancelPanel } from '../booking'
 import { CalendarGrid, type SelectedInterval } from '../calendar'
+import { NotFoundCard, SpaceAccessGate } from './SpaceAccessGate'
+
+/**
+ * `/s/{public_id}/resources/{resource_id}`'s own door, mounted directly by
+ * `App.tsx` in place of `ProtectedRoute`.
+ *
+ * A Resource link is forwarded exactly like a Space link — the person opening
+ * it may hold no membership, no account, and have never seen `/s/{public_id}`
+ * at all — so it gets the identical treatment: `SpaceAccessGate` shared with
+ * `SpacePage`, admission decided at the Space (a Resource carries no
+ * capability of its own — `.claude/rules/identity-and-access.md`), and the
+ * calendar rendered only once the gate confirms membership.
+ *
+ * **Renders the preview at this Resource URL rather than redirecting to
+ * `/s/{public_id}`.** That is what makes "on approval they land on the
+ * Resource they were sent" true with no extra machinery: the URL a visitor
+ * is sitting on already names the Resource, so once their membership exists
+ * the same URL resolves straight to the calendar below. A redirect to the
+ * Space page would throw that away and land them back on the picker.
+ *
+ * `returnTo` is this route's own full path, not `/s/{public_id}` — passed
+ * explicitly for the same reason `SpaceAccessGate` requires it as a prop
+ * rather than defaulting it: stating it here is what a later change to how
+ * this route is mounted cannot silently break.
+ */
+export function ResourceCalendarRoute() {
+  const { publicId, resourceId } = useParams<{ publicId: string; resourceId: string }>()
+
+  // The route pattern makes this unreachable; TypeScript does not know that,
+  // and a crash on an entry point a stranger can reach is not worth the
+  // assertion.
+  if (!publicId || !resourceId) {
+    return <NotFoundCard />
+  }
+
+  return (
+    <SpaceAccessGate publicId={publicId} returnTo={`/s/${publicId}/resources/${resourceId}`}>
+      {() => <ResourceCalendarPage />}
+    </SpaceAccessGate>
+  )
+}
 
 type HeaderLoad = { space: Space; resource: Resource | null } | null
 

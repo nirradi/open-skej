@@ -23,6 +23,8 @@ export {
   removeMember,
   requestAccess,
   revokeInvitation,
+  accessTokenProviderEpoch,
+  clearAccessTokenProviderIf,
   setAccessTokenProvider,
   subscribeSessionLost,
   updateMemberRole,

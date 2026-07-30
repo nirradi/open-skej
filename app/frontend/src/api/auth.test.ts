@@ -19,6 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   API_BASE_URL,
   authenticatedRequest,
+  accessTokenProviderEpoch,
+  clearAccessTokenProviderIf,
   clearSessionLost,
   getCurrentUser,
   getSessionLostSnapshot,
@@ -210,6 +212,51 @@ describe('a token provider that fails', () => {
     // "sign in again" for a dropped Wi-Fi connection would be actively unhelpful.
     expect(authFailure.outcome).toBe('unauthenticated')
     expect(networkFailure.outcome).toBe('failed')
+  })
+})
+
+describe('a deferred teardown survives a reinstall of the same provider', () => {
+  /**
+   * The StrictMode remount contract, at the level it actually broke.
+   *
+   * React runs effects child-first, so on a remount the session provider's
+   * cleanup lands *before* every child's effect re-runs and before its own
+   * reinstall. A teardown that nulls the provider there sends those refetches
+   * out with no `Authorization` header, and the server is right to 401 them.
+   *
+   * This got past two attempts. The first nulled unconditionally. The second
+   * compared the *provider* — which works for `AccessTokenBridge`, whose
+   * closure is fresh each time, and silently fails for `SandboxAuthProvider`,
+   * which reinstalls the very same module-level function, so "still mine" was
+   * indistinguishable from "reinstalled since". Hence an install counter, and
+   * hence this test using one stable reference: with a fresh closure per
+   * install it would pass either way and prove nothing.
+   */
+  const stableProvider = async () => 'a-jwt'
+
+  it('does not uninstall when the same reference has been reinstalled since', async () => {
+    setAccessTokenProvider(stableProvider)
+    const epoch = accessTokenProviderEpoch()
+
+    // The remount: cleanup captured `epoch` above, the effect reinstalls, and
+    // only then does the deferred clear run.
+    setAccessTokenProvider(stableProvider)
+    clearAccessTokenProviderIf(epoch)
+
+    fetchMock.mockResolvedValue(jsonResponse(200, { id: 1 }))
+    await authenticatedRequest('/me')
+
+    expect(sentHeaders().Authorization).toBe('Bearer a-jwt')
+  })
+
+  it('still uninstalls when nothing reinstalled', async () => {
+    setAccessTokenProvider(stableProvider)
+    clearAccessTokenProviderIf(accessTokenProviderEpoch())
+
+    fetchMock.mockResolvedValue(jsonResponse(200, { id: 1 }))
+    await authenticatedRequest('/me')
+
+    expect(sentHeaders()).not.toHaveProperty('Authorization')
   })
 })
 

@@ -49,9 +49,20 @@ const AUTHENTICATED_SESSION: Session = {
  * `getSpace` / `listResources` back `ResourceCalendarPage`'s header context
  * only — display, not access control — so they are stubbed to resolve
  * quickly rather than left to reach a real (and here, absent) server.
+ * `previewSpace` backs `SpaceAccessGate`, which now sits in front of this
+ * route: it must resolve `member` before the calendar renders at all.
  */
 function renderApp() {
   window.history.pushState({}, '', `/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+  vi.spyOn(api, 'previewSpace').mockResolvedValue({
+    outcome: 'ok',
+    data: {
+      public_id: PUBLIC_ID,
+      name: 'Tennis Court',
+      description: null,
+      status: 'member',
+    },
+  })
   vi.spyOn(api, 'getSpace').mockResolvedValue({
     outcome: 'ok',
     data: {
@@ -128,6 +139,28 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+/**
+ * Waits until a slot is not merely *rendered* but actually **selectable**.
+ *
+ * The grid disables every slot until the week's bookings have settled, so it
+ * can never be clicked into a double booking against a calendar it has not
+ * loaded yet. `waitFor(() => expect(slotOn(...)).toBeTruthy())` — what these
+ * tests used to do — is satisfied the instant the grid paints, which is
+ * *before* that. The pointer events then land on a disabled button, nothing
+ * is selected, and the failure surfaces much later as a missing
+ * `booking-confirm`, which reads as a broken booking panel rather than a
+ * precondition that was never met.
+ *
+ * That was a latent weakness these tests got away with while the calendar
+ * mounted immediately. `SpaceAccessGate` now resolves membership before the
+ * calendar renders at all, which delays the settle past where the old
+ * precondition returned, and three tests started failing for a reason that
+ * had nothing to do with what they assert.
+ */
+async function slotIsSelectable(dayOffset: number, index: number) {
+  await waitFor(() => expect((slotOn(dayOffset, index) as HTMLButtonElement).disabled).toBe(false))
+}
+
 /** Selects one slot by driving the pointer events the grid actually listens for. */
 function selectSlot(dayOffset: number, index: number) {
   const cell = slotOn(dayOffset, index)
@@ -146,7 +179,7 @@ describe('booking end to end through the app shell', () => {
 
     renderApp()
     await screen.findByTestId('calendar')
-    await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
+    await slotIsSelectable(2, 8)
 
     selectSlot(2, 8)
     await screen.findByTestId('booking-confirm')
@@ -167,7 +200,7 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
     renderApp()
-    await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
+    await slotIsSelectable(2, 8)
 
     selectSlot(2, 8)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
@@ -183,7 +216,7 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'rule_denied', message })
 
     renderApp()
-    await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
+    await slotIsSelectable(2, 8)
 
     selectSlot(2, 8)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
@@ -198,7 +231,7 @@ describe('booking end to end through the app shell', () => {
   it('does not open the cancel panel for a range selection', async () => {
     vi.spyOn(api, 'listResourceBookings').mockResolvedValue({ outcome: 'ok', data: [] })
     renderApp()
-    await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
+    await slotIsSelectable(2, 8)
 
     selectSlot(2, 8)
     await screen.findByTestId('booking-confirm')
@@ -217,7 +250,7 @@ describe('booking end to end through the app shell', () => {
     })
 
     renderApp()
-    await waitFor(() => expect(slotOn(2, 8)).toBeTruthy())
+    await slotIsSelectable(2, 8)
 
     selectSlot(2, 8)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
@@ -266,7 +299,7 @@ describe('cancelling end to end through the app shell', () => {
     await screen.findByTestId('cancel-success')
     // The refetch — not a reload — is what removes it.
     await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
-    await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(false))
+    await slotIsSelectable(2, 8)
 
     // And the freed time is genuinely bookable again, not merely un-greyed.
     selectSlot(2, 8)
@@ -312,7 +345,7 @@ describe('cancelling end to end through the app shell', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     // The end state the user wanted holds, so the calendar must show it.
     await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
-    await waitFor(() => expect((slotOn(2, 8) as HTMLButtonElement).disabled).toBe(false))
+    await slotIsSelectable(2, 8)
   })
 
   it('clears a stale block on not_found without alarming the user', async () => {

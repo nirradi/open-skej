@@ -149,6 +149,55 @@ let accessTokenProvider: AccessTokenProvider | null = null
  */
 export function setAccessTokenProvider(provider: AccessTokenProvider | null): void {
   accessTokenProvider = provider
+  installEpoch += 1
+}
+
+/**
+ * Counts installs, so a deferred teardown can tell "still mine" from
+ * "somebody reinstalled since".
+ *
+ * Comparing the *provider* would be the obvious way to answer that and is
+ * wrong: `SandboxAuthProvider` installs `getSandboxAccessToken`, a
+ * module-level function, so the reference it reinstalls on a remount is
+ * identical to the one it tore down and an identity check cannot see the
+ * difference. `AccessTokenBridge` happens to install a fresh closure each
+ * time and would have got away with it — which is exactly the kind of
+ * asymmetry that makes a bug look mode-specific and unrelated to its cause.
+ * A counter is indifferent to what is being installed.
+ */
+let installEpoch = 0
+
+export function accessTokenProviderEpoch(): number {
+  return installEpoch
+}
+
+/**
+ * Uninstalls `provider`, but only if it is still the one installed.
+ *
+ * This exists for a window that only a *conditional* teardown can close.
+ * React runs effects child-first, so on StrictMode's development-only
+ * mount/unmount/remount cycle the order is: the session provider's cleanup,
+ * then every child's effect re-runs, then the session provider's effect
+ * reinstalls. A cleanup that nulls unconditionally therefore leaves the
+ * provider detached for exactly as long as it takes those child effects to
+ * run — and a child that fetches on mount reads `null`, sends its request
+ * with no `Authorization` header, and takes a 401 the server was right to
+ * give it.
+ *
+ * That is not hypothetical: it is the `GET …/preview 401` immediately
+ * followed by `GET …/preview 200` visible on every page load in the E2E
+ * logs. It was harmless while every screen retried on its own, and stopped
+ * being harmless when a route gate started deciding what to render from that
+ * first answer.
+ *
+ * Callers pair this with `queueMicrotask` so the null lands *after* the
+ * synchronous work of the commit, by which point a remount has already
+ * reinstalled a different closure and this becomes a no-op. A genuine
+ * unmount has nothing to reinstall, so the provider is still `provider` and
+ * it is uninstalled as intended.
+ */
+export function clearAccessTokenProviderIf(epoch: number): void {
+  if (installEpoch === epoch) accessTokenProvider = null
 }
 
 /**

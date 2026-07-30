@@ -106,7 +106,7 @@ interface SpaceAResource {
  */
 const discoveryCache = new WeakMap<APIRequestContext, Promise<SpaceAResource>>()
 
-function discoverSpaceAResource(api: APIRequestContext): Promise<SpaceAResource> {
+export function discoverSpaceAResource(api: APIRequestContext): Promise<SpaceAResource> {
   let cached = discoveryCache.get(api)
   if (!cached) {
     cached = (async (): Promise<SpaceAResource> => {

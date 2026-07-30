@@ -276,10 +276,24 @@ roles at or below the actor's own, which is a convenience — the server's 403 i
 access request; a member lands **in the Space** — its name, description, and a picker onto its
 Resources, each linking to that Resource's calendar at `/s/{public_id}/resources/{id}` — rather than
 being bounced to the generic Space list, which would cost them a click back to the very link they
-just opened. It is **the only route outside `ProtectedRoute`**, because it must still serve the
-person who is not yet a member, for whom `ProtectedRoute`'s "you need an account to see this page"
-copy would be wrong — so it requires a session by its own gate rather than that shared one. Four
-properties follow from that and are load-bearing:
+just opened.
+
+**Both routes a shared link can name sit outside `ProtectedRoute` and behind one Space door.** That
+guard's "you need an account to see this page" is right for a members-only screen and wrong for a
+link somebody was handed, so `/s/{public_id}` and `/s/{public_id}/resources/{id}` alike require a
+session by their own gate instead. A Resource link is forwarded exactly like a Space link and its
+holder may have no membership and no account, and since admission is Space-level a Resource id is not
+a second capability to protect — so the stranger gets the identical door: the same sign-in card, the
+same preview, the same access request. One component serves both, with each route supplying only its
+own `returnTo` and what to render once the caller turns out to be a member.
+
+**The Resource route renders that door at its own URL and never redirects to `/s/{public_id}`.** The
+URL the visitor is sitting on already names the Resource, so once the membership exists the same URL
+resolves straight to the calendar — which is what makes an approved request land them on the Resource
+they were sent rather than on the Space's picker, with no further machinery. Redirecting would throw
+away the only thing that carries them there.
+
+Four properties follow and are load-bearing:
 
 * **It checks its own auth mode before any session hook runs.** With neither Auth0 nor sandbox mode
   configured there is no session provider in the tree at all, and reading one in that state throws.

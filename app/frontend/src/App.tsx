@@ -3,7 +3,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 import { AdminPage } from './admin'
 import { AccountPage, PostLoginRedirect, ProtectedRoute } from './auth'
 import { assertConfigIsCoherent } from './config'
-import { ResourceCalendarPage, SpaceListPage, SpacePage } from './space'
+import { ResourceCalendarRoute, SpaceListPage, SpacePage } from './space'
 
 // Fail at boot rather than rendering a subtly wrong grid.
 assertConfigIsCoherent()
@@ -47,21 +47,17 @@ function App() {
           }
         />
         {/*
-          Only a member ever holds a Resource id — it comes from
-          `listResources` on the Space page a member lands on — so
-          `ProtectedRoute` is the right guard here too: the mode/session/
-          unconfigured handling is identical to every other authed route, and
-          `require_space_role` behind every request this page makes is the
-          real boundary regardless.
+          Not wrapped in `ProtectedRoute`. A Resource link is forwarded
+          exactly like a Space link — the person opening it may hold no
+          membership and no account, and `ProtectedRoute`'s "You need an
+          account to see this page" is wrong for them, same as it is wrong on
+          `/s/:publicId` below. `ResourceCalendarRoute` mounts the same
+          `SpaceAccessGate` that route uses, with its own `returnTo` and its
+          own children — the calendar, once the caller turns out to be a
+          member. Admission is decided at the Space either way: a Resource
+          carries no capability of its own.
         */}
-        <Route
-          path="/s/:publicId/resources/:resourceId"
-          element={
-            <ProtectedRoute>
-              <ResourceCalendarPage />
-            </ProtectedRoute>
-          }
-        />
+        <Route path="/s/:publicId/resources/:resourceId" element={<ResourceCalendarRoute />} />
         <Route
           path="/account"
           element={
