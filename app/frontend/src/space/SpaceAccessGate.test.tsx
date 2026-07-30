@@ -58,11 +58,21 @@ function stubPreview(status: 'none' | 'pending' | 'denied' | 'member') {
   })
 }
 
-/** The header/calendar fetches behind the member branch; display only. */
+/**
+ * The header/calendar fetches behind the member branch; display only.
+ *
+ * Two Resources, not one: task 5.7 redirects a single-Resource Space straight
+ * to its calendar, and these tests are about the door (`SpaceAccessGate`),
+ * not that redirect — a one-Resource stub here would send the Space-link
+ * tests straight past the picker this suite is asserting on.
+ */
 function stubMemberScreens() {
   vi.spyOn(api, 'listResources').mockResolvedValue({
     outcome: 'ok',
-    data: [{ id: RESOURCE_ID, name: 'Court 1', created_at: '2026-07-01T00:00:00Z', archived_at: null }],
+    data: [
+      { id: RESOURCE_ID, name: 'Court 1', created_at: '2026-07-01T00:00:00Z', archived_at: null },
+      { id: RESOURCE_ID + 1, name: 'Court 2', created_at: '2026-07-01T00:00:00Z', archived_at: null },
+    ],
   })
   vi.spyOn(api, 'getSpace').mockResolvedValue({
     outcome: 'ok',

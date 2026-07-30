@@ -72,7 +72,7 @@ export function ResourceCalendarRoute() {
   )
 }
 
-type HeaderLoad = { space: Space; resource: Resource | null } | null
+type HeaderLoad = { space: Space; resource: Resource | null; resourceCount: number } | null
 
 export function ResourceCalendarPage() {
   const { publicId, resourceId: resourceIdParam } = useParams<{
@@ -98,7 +98,8 @@ export function ResourceCalendarPage() {
           resourcesResult.outcome === 'ok'
             ? (resourcesResult.data.find((candidate) => candidate.id === resourceId) ?? null)
             : null
-        setHeader({ space: spaceResult.data, resource })
+        const resourceCount = resourcesResult.outcome === 'ok' ? resourcesResult.data.length : 0
+        setHeader({ space: spaceResult.data, resource, resourceCount })
       },
     )
 
@@ -143,13 +144,23 @@ export function ResourceCalendarPage() {
 
   return (
     <main className="min-h-screen bg-slate-50 p-8 text-slate-800">
-      <Link
-        to={`/s/${publicId}`}
-        className="text-sm font-medium text-slate-600 hover:underline"
-        data-testid="resource-calendar-back"
-      >
-        ← Back to Space
-      </Link>
+      {/*
+        Hidden once the header confirms this Space has exactly one active
+        Resource: 5.7 already redirects that Space straight here, so this
+        link would only bounce the visitor back to a picker that immediately
+        redirects them to this same page — a control that visibly does
+        nothing. Shown before the header resolves and whenever there is a
+        real picker (0, 2+ Resources) to return to.
+      */}
+      {(header === null || header.resourceCount !== 1) && (
+        <Link
+          to={`/s/${publicId}`}
+          className="text-sm font-medium text-slate-600 hover:underline"
+          data-testid="resource-calendar-back"
+        >
+          ← Back to Space
+        </Link>
+      )}
 
       <h1
         className="mt-2 text-2xl font-semibold text-slate-900"
