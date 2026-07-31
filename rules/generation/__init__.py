@@ -21,11 +21,16 @@ from .llm import (
     DEFAULT_CLI_EXECUTABLE,
     DEFAULT_CLI_TIMEOUT_SECONDS,
     DEFAULT_MODEL,
+    DEFAULT_OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     ClaudeCliClient,
     LLMClient,
     LLMResponse,
+    OllamaClient,
+    build_chat_request,
     build_command,
     interpret_cli_result,
+    interpret_ollama_result,
 )
 from .loop import (
     DEFAULT_OUTPUT_DIR,
@@ -72,4 +77,9 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_CLI_EXECUTABLE",
     "DEFAULT_CLI_TIMEOUT_SECONDS",
+    "OllamaClient",
+    "build_chat_request",
+    "interpret_ollama_result",
+    "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
 ]

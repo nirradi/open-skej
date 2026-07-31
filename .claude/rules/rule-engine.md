@@ -354,13 +354,52 @@ class and reports it as the rule being wrong.
 
 Opus is the default deliberately: a subtly wrong rule silently mis-enforces real bookings, and every
 Tester retry costs a full generate-plus-test cycle, so the cheaper model is not obviously cheaper end
-to end. `benchmark.py` runs Opus 4.8 and Haiku 4.5 side by side on the golden examples. **If Haiku
-4.5 matches the success rate, flip the default and rewrite this paragraph.** Settle it with the
-benchmark, not by assumption.
+to end. `benchmark.py` compares models on the golden examples, and what it can
+compare is bounded by which clients exist: `OllamaClient` serves it, `ClaudeCliClient` cannot (the
+harness preamble above), and no SDK-backed client ships — so a local model is what the numbers
+currently describe. **When a benchmark run settles which model holds the contract, flip the default
+and rewrite this paragraph.** Settle it with the benchmark, not by assumption.
 
 ## Benchmarking
 
-`benchmark.py` is a CLI feeding five golden examples ("max 1 hour", "only on weekends", "max 2 times
-a week", …) through the generation loop and logging success rate, token usage, and latency. It exists
-to tune the system prompts before any of this is wired to the web UI — prompt changes are judged by
-its numbers, not by inspection.
+`rules/benchmark.py` is a CLI feeding five golden examples ("max 1 hour", "only on weekends", "max 2
+times a week", …) through the generation loop and reporting what happened, as JSON and as a terminal
+summary. It exists to tune the system prompts before any of this is wired to the web UI — prompt
+changes are judged by its numbers, not by inspection. `--client ollama|claude-cli` and a repeatable
+`--model` are what let one invocation compare backends and models side by side.
+
+It sits at the top level of `rules/`, outside both packages, and `pyproject.toml` distributes only
+`rules` — so a benchmark is no more importable by the booking API than `generation` is.
+
+**It is invoked by hand and never runs in CI.** It makes live model calls, and `testpaths = ["tests"]`
+is what keeps `pytest` away from it. What *is* unit-tested is report assembly from synthetic
+`LoopResult`s.
+
+**The per-attempt outcome is what the report is for, not the success rate.** `RULE_REJECTED` on
+attempt 1 and `TESTS_FAILED` on attempt 1 say different things about which constraint in the system
+prompt a model broke — the dunder ban, the free-name rule, the datetime import — and which one broke
+is what tunes the prompt. A single success-rate number erases exactly that, so every attempt's
+outcome is kept in order.
+
+**Token usage comes from a recording wrapper around the `LLMClient`, not from a change to the loop.**
+`run_generation_loop` returns strings and discards each `LLMResponse`; threading metadata out of it
+would give the engine's retry loop a benchmark's concern to carry forever. The wrapper sits at the
+same seam the loop already calls through. Sums follow the metadata fields' own convention — present
+values sum, and all-absent is `None` rather than `0`, so a local model's unknown price is not
+reported as free.
+
+**An `LLMCallError` aborts the rest of that model's run.** The loop does not retry one because
+another prompt does not fix an unreachable daemon or an unpulled model id; the same reasoning holds
+one level up, where four more examples would rediscover the same outage and bury the cause under
+repetitions of itself. The remaining examples are recorded as skipped, and a different `--model`
+still gets its own full run.
+
+**Exit status distinguishes a result from a non-run.** A model that exhausts its retries exits `0` —
+"this model cannot hold the contract" is an answer this benchmark exists to get. A backend that could
+not be reached exits non-zero, because otherwise an unreachable daemon looks like a run whose numbers
+mean something. For the same reason the report records the parameters it ran under, and records
+`seed` and `temperature` as unset for a client that never received them: two reports agreeing on a
+sampling parameter neither applied is worse than two reports that say nothing about it.
+
+Ollama is passed a fixed `seed` and `temperature` so two runs are comparable — a benchmark whose
+rerun differs for unrecorded reasons cannot settle the question it was built to settle.
