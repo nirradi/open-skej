@@ -93,11 +93,23 @@ def test_options_are_merged_in_when_given():
     assert body["options"] == {"seed": 1, "temperature": 0}
 
 
-def test_base_url_trailing_slash_does_not_double_up():
+def test_base_url_is_joined_verbatim_stripping_is_the_clients_job():
     url, _ = build_chat_request("http://localhost:11434/", system="s", prompt="p", model="m")
     # build_chat_request itself does not strip trailing slashes — that is OllamaClient's job on
     # the base_url it is constructed with — so this pins the raw join it is responsible for.
     assert url == "http://localhost:11434//api/chat"
+
+
+def test_client_strips_a_trailing_slash_from_its_base_url(monkeypatch):
+    captured = {}
+
+    def fake_send(url, body, *, timeout_seconds, base_url):
+        captured["url"] = url
+        return 200, SUCCESS_BODY
+
+    monkeypatch.setattr(llm_module, "_send_chat_request", fake_send)
+    OllamaClient(base_url="http://localhost:11434/").complete(system="s", prompt="p", model="m")
+    assert captured["url"] == "http://localhost:11434/api/chat"
 
 
 # --------------------------------------------------------------------------------------------
