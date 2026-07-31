@@ -80,6 +80,34 @@ cp app/frontend/.env.example app/frontend/.env
 
 ## Running locally
 
+### The whole stack in one command
+
+```bash
+scripts/dev-sandbox.sh
+```
+
+Drops the Postgres volume, brings the database back up, migrates it, plants the deterministic
+fixtures from `app/backend/app/sandbox_seed.py` (two Spaces on different schedules, four identities,
+a pending access request and invitation, an archived Space, a couple of future bookings), starts both
+servers detached, and prints the freshly generated Space links — a `public_id` is regenerated on
+every seed, so the script reads it back out of the database rather than restating it.
+
+It runs the stack in **sandbox auth mode**, because the seeded identities are `sandbox|*` subs that
+no real tenant can issue: no hosted login page, and an identity is chosen in the browser console with
+`localStorage.setItem('skej.sandbox.sub', 'sandbox|member')` before pressing sign-in. Any `AUTH0_*` /
+`VITE_AUTH0_*` values in your `.env` files are overridden to empty **for those two child processes
+only** — both sides refuse to start trusting a real tenant and the sandbox key at once, and neither
+file is touched.
+
+`--keep-data` skips the volume drop (the seed still resets its own rows, so links change either way),
+`--force` takes ports 8000/5173/5432 from whatever holds them — including a sibling worktree's
+compose project — instead of aborting, and `--stop` shuts the servers down again (`--stop --all
+--wipe` takes Postgres and its data with them). Logs are under `.dev-sandbox/`.
+
+The rest of this section is the same thing by hand, against your own Auth0 tenant.
+
+### By hand
+
 Two processes, two terminals — plus Postgres. The backend is Postgres-only: booking storage and
 identity share one database behind `DATABASE_URL`, and the server refuses to touch the database until
 that variable is set.
