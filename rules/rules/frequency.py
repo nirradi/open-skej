@@ -14,25 +14,43 @@ caller does not put in the context. The engine stays ignorant of a schema that w
 a rule that filtered internally would silently mis-enforce the day a ``deleted`` or ``no_show`` flag
 appeared, with nothing to signal that it had.
 
-**Every boundary here is a UTC boundary.** ``interfaces.py`` rejects a non-zero offset at
-construction, so a week or a month starts at UTC midnight and there are no DST cases: no hour is
-ever skipped or repeated, and the arithmetic below is plain ``timedelta`` addition rather than
-anything localised.
+**These rules are handed their window; they do not derive it.** Both take a half-open
+``[window_start, window_end)`` pair of UTC instants at construction. They used to compute the week
+or month themselves by snapping the request to UTC midnight, which silently miscounted for every
+venue not sitting on UTC: a Sydney booking at 00:30 on Monday local is 13:30 **Sunday** in UTC, so
+it landed in the previous UTC week and a weekly cap of one admitted a second booking in the same
+Sydney week. A local week has no fixed UTC representation, and the engine has no timezone to find
+one with — so the caller, which does, resolves the boundary and passes the instants in. That is the
+same "conversion happens at the boundary" split availability hours already follow.
+
+The bounds are still **UTC instants** and everything below is still plain instant comparison. What
+moved out is the decision about *which* instants; the engine remains zone-free, and no rule here
+reads a wall clock.
 
 **The window is anchored on the request, not on ``now``.** A booking is counted against the week or
 month it *falls in*, so a request three weeks out is judged against that week's bookings and not
 against this one's — a limit anchored on ``now`` would refuse next month's first booking because of
-this month's traffic. The practical consequence is that history reaches only as far as the window
-``interfaces.history_window`` permits, so a request beyond it is measured against a history the
-caller has no bookings for and passes. That is the documented bound of the engine's promise —
-evaluation costs at most one calendar month of history — not a gap in these rules.
+this month's traffic. That property now lives in whoever computes the bounds, and it is a property
+of the *caller* rather than of these rules; ``app.rules_stub`` resolves both windows from the
+booking's own local date for exactly this reason. The practical consequence is unchanged: history
+reaches only as far as ``interfaces.history_window`` permits, so a request beyond it is measured
+against a history the caller has no bookings for and passes. That is the documented bound of the
+engine's promise — evaluation costs at most one calendar month of history — not a gap in these
+rules.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from .interfaces import BaseRule, BookingRecord, BookingRequest, Context, RuleResult, Weekday
+from .interfaces import (
+    BaseRule,
+    BookingRecord,
+    BookingRequest,
+    Context,
+    RuleResult,
+    _require_utc,
+)
 
 __all__ = [
     "MaxBookingsPerWeekRule",
@@ -45,27 +63,23 @@ def _format_bookings(count: int) -> str:
     return f"{count} booking" if count == 1 else f"{count} bookings"
 
 
-def _day_start(moment: datetime) -> datetime:
-    return moment.replace(hour=0, minute=0, second=0, microsecond=0)
+def _validate_window(
+    window_start: object, window_end: object, rule_name: str
+) -> tuple[datetime, datetime]:
+    """Validate a half-open ``[window_start, window_end)`` pair of UTC instants.
 
-
-def _week_bounds(moment: datetime, week_starts_on: Weekday) -> tuple[datetime, datetime]:
-    """Return the half-open ``[start, end)`` UTC week containing ``moment``.
-
-    ``Weekday`` is numbered to match :meth:`datetime.date.weekday`, so the offset back to the start
-    of the week is a modular subtraction and holds for every choice of first day.
+    The same zero-offset discipline ``interfaces.py`` applies to every datetime crossing this
+    boundary, applied to the one pair that now arrives through a constructor rather than through a
+    dataclass. A caller that resolved a local week against the wrong zone cannot be caught here —
+    but one that forgot to convert to UTC at all can be, and that is the likelier mistake.
     """
-    days_since_start = (moment.weekday() - int(week_starts_on)) % 7
-    start = _day_start(moment) - timedelta(days=days_since_start)
-    return start, start + timedelta(days=7)
-
-
-def _month_bounds(moment: datetime) -> tuple[datetime, datetime]:
-    """Return the half-open ``[start, end)`` UTC calendar month containing ``moment``."""
-    start = _day_start(moment).replace(day=1)
-    if start.month == 12:
-        return start, start.replace(year=start.year + 1, month=1)
-    return start, start.replace(month=start.month + 1)
+    start = _require_utc(window_start, f"{rule_name}.window_start")
+    end = _require_utc(window_end, f"{rule_name}.window_end")
+    if start >= end:
+        raise ValueError(
+            f"{rule_name}.window_start must be strictly before window_end; got {start} >= {end}"
+        )
+    return start, end
 
 
 def _count_starting_within(
@@ -82,25 +96,33 @@ def _count_starting_within(
 class MaxBookingsPerWeekRule(BaseRule):
     """A user may hold at most ``max_bookings`` bookings in the week the request falls in.
 
-    The week runs ``[start, start + 7 days)`` from ``context.calendar.week_starts_on`` at UTC
-    midnight. The bound counts the request itself: with ``max_bookings=2`` and two bookings already
-    in that week, the third is refused — a check on the existing count alone would allow a booking
-    that takes the user one over the line.
+    The week is ``[window_start, window_end)``, a pair of UTC instants supplied by the caller. It is
+    *not* derived here: which instants bound "the week this booking is in" depends on the venue's
+    timezone, and the engine has none — see the module docstring for the miscount that followed from
+    deriving it. The caller is expected to resolve the week containing the **request**, in the
+    venue's own zone, honouring whatever first-day-of-week convention applies.
 
-    The boundary is half-open on both ends. A booking one second before the week starts belongs to
-    the previous week and does not count; one starting exactly at the boundary instant belongs to
-    this week and does.
+    The bound counts the request itself: with ``max_bookings=2`` and two bookings already in that
+    week, the third is refused — a check on the existing count alone would allow a booking that
+    takes the user one over the line.
+
+    The boundary is half-open. A booking one second before the window starts belongs to the previous
+    week and does not count; one starting exactly at the boundary instant belongs to this week and
+    does.
     """
 
-    def __init__(self, max_bookings: int) -> None:
+    def __init__(self, max_bookings: int, window_start: datetime, window_end: datetime) -> None:
         if max_bookings <= 0:
             raise ValueError(
                 f"MaxBookingsPerWeekRule.max_bookings must be positive; got {max_bookings!r}"
             )
         self.max_bookings = max_bookings
+        self.window_start, self.window_end = _validate_window(
+            window_start, window_end, "MaxBookingsPerWeekRule"
+        )
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
-        lower, upper = _week_bounds(request.start_at, context.calendar.week_starts_on)
+        lower, upper = self.window_start, self.window_end
         existing = _count_starting_within(context.history.bookings, lower, upper)
         if existing + 1 > self.max_bookings:
             return RuleResult.deny(
@@ -118,20 +140,27 @@ class MaxBookingsPerMonthRule(BaseRule):
     count on a calendar. December rolls into January like any other boundary — a December booking
     does not count toward January's allowance.
 
-    As with the weekly rule the bound counts the request itself, and the window is half-open, so a
-    booking at ``00:00`` on the first of the month belongs to that month and one a second earlier
-    does not.
+    As with the weekly rule the month is ``[window_start, window_end)``, supplied by the caller
+    rather than derived, for the same reason: "the calendar month this booking is in" is a question
+    about the venue's local calendar, and the last local evening of a month is already the next
+    month in UTC for any venue far enough ahead of it.
+
+    The bound counts the request itself, and the window is half-open, so a booking at the opening
+    instant belongs to that month and one a second earlier does not.
     """
 
-    def __init__(self, max_bookings: int) -> None:
+    def __init__(self, max_bookings: int, window_start: datetime, window_end: datetime) -> None:
         if max_bookings <= 0:
             raise ValueError(
                 f"MaxBookingsPerMonthRule.max_bookings must be positive; got {max_bookings!r}"
             )
         self.max_bookings = max_bookings
+        self.window_start, self.window_end = _validate_window(
+            window_start, window_end, "MaxBookingsPerMonthRule"
+        )
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
-        lower, upper = _month_bounds(request.start_at)
+        lower, upper = self.window_start, self.window_end
         existing = _count_starting_within(context.history.bookings, lower, upper)
         if existing + 1 > self.max_bookings:
             return RuleResult.deny(

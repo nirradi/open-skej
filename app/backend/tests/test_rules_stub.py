@@ -10,6 +10,7 @@ a `SpaceRuleConfig`, and history forwarding.
 """
 
 from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -477,3 +478,92 @@ def test_date_rule_messages_are_human_readable():
         assert message[0].isupper()
         assert "Error" not in message
         assert "Traceback" not in message
+
+
+# --- counting windows resolve in the Space's own timezone ---------------------------------------
+#
+# Task 5.12. The two counting rules used to derive their window by snapping the request to UTC
+# midnight, which is wrong for every venue that is not on UTC: a Sydney booking at 00:30 Monday
+# local is 13:30 *Sunday* in UTC, so it landed in the previous UTC week and a weekly cap of one
+# admitted a second booking in the same Sydney week. The adapter now resolves the local week and
+# month and hands the rules a pair of instants.
+#
+# Each case below is chosen so the local answer and the UTC answer *disagree* — a test where they
+# agree would pass just as well against the bug.
+
+
+def _tz_instant(tz_name: str, *parts: int) -> datetime:
+    """A local wall-clock time in ``tz_name``, as the UTC instant the backend would store."""
+    return datetime(*parts, tzinfo=ZoneInfo(tz_name)).astimezone(timezone.utc)
+
+
+def _booking(start: datetime, minutes: int = 30) -> BookingRequest:
+    return BookingRequest(start_at=start, end_at=start + timedelta(minutes=minutes))
+
+
+@pytest.mark.parametrize(
+    "tz, existing, requested, expect_allowed",
+    [
+        # Sydney is UTC+11 in January: Mon 00:30 local is Sun 13:30 UTC, the previous UTC week.
+        ("Australia/Sydney", (2026, 1, 14, 10), (2026, 1, 12, 0, 30), False),
+        # ...and UTC+10 in July, so the same case must hold on the other side of the DST change.
+        ("Australia/Sydney", (2026, 7, 15, 10), (2026, 7, 13, 0, 30), False),
+        # Genuinely different Sydney weeks stay allowed — the fix must not simply deny more.
+        ("Australia/Sydney", (2026, 1, 8, 10), (2026, 1, 12, 0, 30), True),
+        # Honolulu is UTC-10, so its boundary moves the other way: Sun 23:00 local is Mon UTC.
+        ("Pacific/Honolulu", (2026, 1, 12, 23), (2026, 1, 14, 10), False),
+        ("Pacific/Honolulu", (2026, 1, 11, 23), (2026, 1, 14, 10), True),
+        ("Europe/Berlin", (2026, 1, 14, 10), (2026, 1, 12, 0, 30), False),
+        # A UTC venue is unaffected, which is what makes this a fix rather than a change.
+        ("UTC", (2026, 1, 14, 10), (2026, 1, 12, 0, 30), False),
+    ],
+)
+def test_the_weekly_window_is_the_space_s_local_week(tz, existing, requested, expect_allowed):
+    config = SpaceRuleConfig(timezone=tz, max_bookings_per_week=1)
+    held = _booking(_tz_instant(tz, *existing), minutes=60)
+    request = _booking(_tz_instant(tz, *requested))
+
+    result = evaluate(request, config, history=(held,), now=request.start_at)
+
+    assert result.allowed is expect_allowed
+
+
+@pytest.mark.parametrize(
+    "tz, existing, requested, now, expect_allowed",
+    [
+        # Same Sydney month, different UTC months either side of the request.
+        ("Australia/Sydney", (2026, 2, 2, 10), (2026, 2, 25, 10), (2026, 2, 1, 0), False),
+        # 1 March 00:30 in Sydney is 28 February in UTC — a different local month, so allowed.
+        ("Australia/Sydney", (2026, 2, 2, 10), (2026, 3, 1, 0, 30), (2026, 2, 1, 0), True),
+        # Honolulu: 31 January 23:00 local is 1 February UTC, still local January.
+        ("Pacific/Honolulu", (2026, 1, 2, 10), (2026, 1, 31, 23), (2026, 1, 25, 0), False),
+        ("Pacific/Honolulu", (2026, 1, 2, 10), (2026, 2, 1, 10), (2026, 1, 25, 0), True),
+        ("UTC", (2026, 2, 2, 10), (2026, 2, 25, 10), (2026, 2, 1, 0), False),
+    ],
+)
+def test_the_monthly_window_is_the_space_s_local_month(
+    tz, existing, requested, now, expect_allowed
+):
+    config = SpaceRuleConfig(timezone=tz, max_bookings_per_month=1)
+    held = _booking(_tz_instant(tz, *existing), minutes=60)
+    request = _booking(_tz_instant(tz, *requested))
+
+    result = evaluate(request, config, history=(held,), now=_tz_instant(tz, *now))
+
+    assert result.allowed is expect_allowed
+
+
+def test_a_week_spanning_a_dst_change_is_seven_local_days_long():
+    """Not ``start + 7 days``: across a transition the week is 167 or 169 hours.
+
+    Sydney leaves daylight saving on 5 April 2026, so the week of Mon 30 March runs 169 hours. A
+    booking late on the final Sunday is inside that week and must count; adding a fixed timedelta
+    to the start would close the window an hour early and let it through.
+    """
+    config = SpaceRuleConfig(timezone="Australia/Sydney", max_bookings_per_week=1)
+    held = _booking(_tz_instant("Australia/Sydney", 2026, 3, 30, 10), minutes=60)
+    last_hour = _booking(_tz_instant("Australia/Sydney", 2026, 4, 5, 23, 30))
+
+    result = evaluate(last_hour, config, history=(held,), now=held.start_at)
+
+    assert result.allowed is False

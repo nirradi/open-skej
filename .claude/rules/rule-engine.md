@@ -90,9 +90,12 @@ assembles the canon per Space** from that Space's own configuration rather than 
 UTC window per booking date before `AvailabilityHoursRule` is built. **It passes Space-wide history**
 only when the Space's canon includes a counting rule: the router loads the user's bookings across
 every Resource in the Space, capped to `history_window`, and passes them in; with no counting rule
-configured, history stays empty and no query runs. `DEFAULT_CANON` is no longer what the API runs — it
-remains the *reference* canon the generation loop is measured against and the source of the default
-values a Space that overrides nothing would use.
+configured, history stays empty and no query runs. **It resolves the counting windows** in the
+Space's own zone — the local week and local calendar month containing the booking, converted to UTC
+instants and handed to `MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule`, which no longer derive
+them. `DEFAULT_CANON` is no longer what the API runs — it remains the *reference* canon the
+generation loop is measured against and the source of the default values a Space that overrides
+nothing would use.
 
 `ContextMismatchError` is deliberately not caught at this boundary: the adapter builds both the
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
@@ -162,19 +165,42 @@ a Space whose `opens_at` is at or after its `closes_at` on its own wall clock is
 from the legitimate case above. That check is also the one place a venue open past its *local*
 midnight would be admitted deliberately, rather than arriving by accident through a typo.
 
-`frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n)` and
-`MaxBookingsPerMonthRule(n)`, the only ones whose verdict depends on anything beyond the request.
+`frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n, window_start, window_end)` and
+`MaxBookingsPerMonthRule(n, window_start, window_end)`, the only ones whose verdict depends on
+anything beyond the request.
 They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of the four
 request-local rules in `canon.py`. The API does not run `DEFAULT_CANON`; it assembles a per-Space
 canon that *includes* these two when a Space sets `max_bookings_per_week` / `max_bookings_per_month`.
 Keeping them out of the reference canon is what lets the end-to-end suite assert against a seeded Space
 configured to those four rules' values without a counting rule silently changing the outcome.
 
+**Neither rule derives its own window — both are handed one.** The window is a half-open
+`[window_start, window_end)` pair of UTC instants passed at construction, and the rule does nothing
+but count into it. Deriving it here is what made a local week wrong: a Sydney booking at 00:30 on
+Monday local is 13:30 **Sunday** in UTC, so a window snapped to UTC midnight put it in the previous
+week and a cap of one admitted a second booking in the same Sydney week. A local week has no fixed
+UTC representation and the engine has no timezone to find one with, so the layer that does resolves
+it. This is the same boundary split availability hours already follow, and `CalendarContext` still
+carries **no timezone field** for the same reason it never did — a zone there would invite every
+rule, generated ones included, to convert for itself.
+
+An inverted pair is a **caller bug** here and is rejected at construction, unlike
+`AvailabilityHoursRule`, where inversion means "this window crosses a UTC day". A counting window is
+two absolute instants, not a recurring daily one, so it has no wrap to describe.
+
 **A booking is counted against the window it starts in, and the window is anchored on the request
 rather than on `now`.** A request three weeks out is judged against that week's bookings, not this
 week's; anchoring on `now` would refuse next month's first booking because of this month's traffic.
-Windows are half-open `[start, end)`, so a booking straddling a boundary counts once, against the
-side it begins on.
+That property now lives in the caller that computes the bounds — `rules_stub._build_canon` resolves
+both windows from the booking's own **local** date. Windows are half-open, so a booking straddling a
+boundary counts once, against the side it begins on.
+
+**A local week is seven local days, not `start + 7 days`.** Across a DST transition it is 167 or 169
+hours, and adding a fixed `timedelta` to the start would put the closing boundary an hour inside the
+neighbouring week — the same class of error as the UTC snapping this replaced, one line further
+down. The adapter resolves both ends from local midnight independently. `week_starts_on` stays a
+calendar convention on `CalendarContext`, read by the adapter when it resolves the week; no rule
+reads it any more.
 
 **The bound counts the request itself.** With a limit of two and two bookings already in the window,
 the third is refused — checking the existing count alone would admit the booking that takes the user
