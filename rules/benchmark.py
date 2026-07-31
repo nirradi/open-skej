@@ -68,7 +68,8 @@ __all__ = [
     "main",
 ]
 
-#: Verbatim, in this order — the five constraints item 10 and task 6.2 name.
+#: The golden set, in this order. Fixed rather than configurable: a benchmark that measured a
+#: different set of constraints each run could not compare one prompt revision against the next.
 GOLDEN_EXAMPLES: tuple[str, ...] = (
     "max 1 hour",
     "only on weekends",
@@ -613,10 +614,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.output.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
         print(f"\nReport written to {args.output}")
 
-    # A model that gave up is a *result* — item 10's whole question is whether a small model can
-    # hold the contract, and "no" is an answer this exits 0 on. A backend that could not be reached
-    # is not a result at all, and exiting 0 on it would make an unreachable daemon look like a run
-    # whose numbers mean something.
+    # A model that gave up is a *result* — the question this benchmark exists to answer is whether
+    # a given model can hold the rule contract at all, and "no" is an answer, so it exits 0. A
+    # backend that could not be reached is not a result at all, and exiting 0 on it would make an
+    # unreachable daemon look like a run whose numbers mean something.
     return 1 if any_call_error(report) else 0
 
 
