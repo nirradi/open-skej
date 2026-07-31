@@ -215,6 +215,51 @@ def _local_date(instant: datetime, tz_name: str) -> date:
     return instant.astimezone(ZoneInfo(tz_name)).date()
 
 
+def _local_midnight_utc(day: date, tz_name: str) -> datetime:
+    """The UTC instant at which ``day`` begins in ``tz_name``.
+
+    The counting rules' boundaries are built from this and nothing else, so a
+    week or a month starts when the *venue's* day starts rather than at UTC
+    midnight. On the handful of dates a zone's DST transition falls at or near
+    local midnight, ``zoneinfo`` resolves the nonexistent or repeated instant by
+    PEP 495 — the same treatment ``app.operating_hours`` already gives operating
+    hours, and for the same reason: a second code path for a few hours a year
+    would buy correctness nobody asked for and nobody could verify by reading.
+    """
+    return datetime.combine(day, time(0, 0), tzinfo=ZoneInfo(tz_name)).astimezone(timezone.utc)
+
+
+def _local_week_bounds(on_date: date, tz_name: str) -> tuple[datetime, datetime]:
+    """The half-open ``[start, end)`` UTC bounds of the **local** week containing ``on_date``.
+
+    ``Weekday`` is numbered to match :meth:`datetime.date.weekday`, so stepping
+    back to the start of the week is a modular subtraction that holds for any
+    choice of first day. The end is computed as *seven local days later*, not as
+    ``start + 7 days``: across a DST transition the week is 167 or 169 hours
+    long, and adding a fixed timedelta would put the boundary an hour into the
+    neighbouring week — which is the whole class of bug this task exists to
+    remove, reintroduced one line further down.
+    """
+    days_since_start = (on_date.weekday() - int(WEEK_STARTS_ON)) % 7
+    first_day = on_date - timedelta(days=days_since_start)
+    return (
+        _local_midnight_utc(first_day, tz_name),
+        _local_midnight_utc(first_day + timedelta(days=7), tz_name),
+    )
+
+
+def _local_month_bounds(on_date: date, tz_name: str) -> tuple[datetime, datetime]:
+    """The half-open ``[start, end)`` UTC bounds of the **local** calendar month containing
+    ``on_date``."""
+    first_day = on_date.replace(day=1)
+    next_month = (
+        first_day.replace(year=first_day.year + 1, month=1)
+        if first_day.month == 12
+        else first_day.replace(month=first_day.month + 1)
+    )
+    return _local_midnight_utc(first_day, tz_name), _local_midnight_utc(next_month, tz_name)
+
+
 def _engine_request(booking: BookingRequest) -> EngineBookingRequest:
     return EngineBookingRequest(
         user_id=booking.user_id,
@@ -277,10 +322,24 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
         canon.append(AvailabilityHoursRule(opens_at=utc_open, closes_at=utc_close))
 
     if config.max_bookings_per_week is not None:
-        canon.append(MaxBookingsPerWeekRule(max_bookings=config.max_bookings_per_week))
+        week_start, week_end = _local_week_bounds(on_date, config.timezone)
+        canon.append(
+            MaxBookingsPerWeekRule(
+                max_bookings=config.max_bookings_per_week,
+                window_start=week_start,
+                window_end=week_end,
+            )
+        )
 
     if config.max_bookings_per_month is not None:
-        canon.append(MaxBookingsPerMonthRule(max_bookings=config.max_bookings_per_month))
+        month_start, month_end = _local_month_bounds(on_date, config.timezone)
+        canon.append(
+            MaxBookingsPerMonthRule(
+                max_bookings=config.max_bookings_per_month,
+                window_start=month_start,
+                window_end=month_end,
+            )
+        )
 
     return tuple(canon)
 
