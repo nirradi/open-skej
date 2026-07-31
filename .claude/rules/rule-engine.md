@@ -267,16 +267,33 @@ The separation is what makes "nothing generated is imported by the app" a proper
 rather than a promise.
 
 **The model is called through an `LLMClient` seam** — one method, `complete(system, prompt, model)` —
-not an SDK directly. `ClaudeCliClient` shells out to `claude -p --output-format json` and so needs no
-API key, only an authenticated CLI: an acceptable dependency for a developer tool whose output is a
-file a human reviews, and one the booking API never carries.
+not an SDK directly. Two implementations ship. `ClaudeCliClient` shells out to
+`claude -p --output-format json` and so needs no API key, only an authenticated CLI: an acceptable
+dependency for a developer tool whose output is a file a human reviews, and one the booking API never
+carries. `OllamaClient` calls a model served by a local Ollama daemon over its HTTP API, so it needs
+neither a key nor a cloud account.
 
 **The CLI cannot serve the benchmark, which is why the seam exists.** A call whose real prompt is 10
 input / 40 output tokens is billed for ~11.5k tokens of harness preamble at $0.015–0.023, and
 `--system-prompt` with `--exclude-dynamic-system-prompt-sections` does not strip it — the overhead
 stays and the cost *rises*, by losing the cache hit. Token, latency and cost figures measured through
-this client describe the harness, not the prompt. An SDK implementation plugs into the same protocol
-and is what `benchmark.py` must be given.
+this client describe the harness, not the prompt. `OllamaClient` is what the benchmark is given
+instead: it reports the counts for the prompt actually sent and nothing else, and a local model costs
+no money to call as often as a benchmark wants to.
+
+**`OllamaClient` talks `/api/chat`, never `/api/generate`, and always with `stream: false`.** Chat
+carries the system prompt as its own message; `/api/generate` would need it folded into the user
+turn, and this package's long constraint-dense system prompt is precisely the variable under test, so
+folding it in would benchmark a prompt nobody ships. Streaming is Ollama's default and answers with
+newline-delimited JSON, one object per token — parsing the first yields an empty completion that is
+rejected several layers later as bad rule source, blaming the model for a transport choice. It is
+built on `urllib.request` and adds **no dependency**: `rules` is installed into the backend as an
+editable sibling, so a package pulled in to serve a developer tool is a cost the booking API pays
+forever. `cost_usd` stays `None` rather than `0.0` — a local model's price is not zero dollars, it is
+a number this backend has no way to know, and the metadata fields are optional exactly so a backend
+can say so. A model that is not pulled comes back as Ollama's own 404 and is surfaced as an
+`LLMCallError` naming the `ollama pull` that fixes it, never as a generic HTTP failure — the same
+lesson as `is_error` below, that a transport failure passed on as a completion is blamed on the model.
 
 **A failed CLI call is identified by `is_error` and the exit code, never by `subtype`.** A run that
 404s on an unknown model id exits 1 and reports `is_error: true` while still reporting
