@@ -59,6 +59,27 @@ class SpaceArchivedError(Exception):
     """A mutation was attempted on a Space that has been archived."""
 
 
+class InvalidOperatingHoursError(Exception):
+    """``opens_at`` is at or after ``closes_at`` on the Space's own wall clock.
+
+    Rejected at the write boundary rather than left to the rule engine, because
+    since task 5.13 the engine can no longer tell this apart from a legitimate
+    configuration. ``AvailabilityHoursRule`` reads an *inverted* UTC pair as
+    "this window crosses a UTC calendar day" — which is what makes an ordinary
+    Sydney or Honolulu venue bookable at all — and a locally-inverted pair
+    resolves to an inverted UTC pair too. So an admin who types the closing time
+    into the opening box gets a venue that is open all night and shut all day,
+    silently, instead of one that refuses every booking loudly.
+
+    Validating here is what keeps that ambiguity out of the engine: local
+    ordering is a property of what a human typed, and this is the only layer
+    that still knows it was typed rather than derived. A venue genuinely open
+    past its own local midnight is ``DEFERRED.md`` item 18 — an unsupported
+    configuration today, and this is the check that would be relaxed to admit
+    it, deliberately, rather than it arriving by accident through a typo.
+    """
+
+
 class ResourceNotFoundError(Exception):
     """No Resource with that id belongs to this Space.
 
@@ -307,6 +328,19 @@ def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
         space.max_bookings_per_week = payload.max_bookings_per_week
     if "max_bookings_per_month" in fields:
         space.max_bookings_per_month = payload.max_bookings_per_month
+
+    # Checked on the *effective* pair rather than on the payload, because a
+    # PATCH may set one bound and inherit the other: sending only `opens_at`
+    # must still be judged against the `closes_at` already stored. Both null
+    # means the availability rule is not enforced at all, which is a valid
+    # configuration and not this check's business.
+    if (
+        space.opens_at is not None
+        and space.closes_at is not None
+        and space.opens_at >= space.closes_at
+    ):
+        session.rollback()
+        raise InvalidOperatingHoursError(space.opens_at, space.closes_at)
 
     session.commit()
     return space

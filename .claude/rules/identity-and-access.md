@@ -156,6 +156,21 @@ because a bad zone would only surface later as a broken operating-hours resoluti
 was set. A Resource has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}`
 renames it and nothing more.
 
+**`opens_at` must be earlier than `closes_at` on the Space's own wall clock, and that is enforced
+here or nowhere.** A pair that inverts locally is refused with **422**. This is not tidiness: the rule
+engine reads an *inverted* UTC window as "this window crosses a UTC calendar day", which is what makes
+a venue in Sydney or Honolulu bookable at all (`rule-engine.md`), and locally-inverted hours resolve
+to an inverted UTC pair too. The engine cannot tell them apart, so an admin who typed the closing time
+into the opening box would get a Space open all night and shut all day — silently, and in the
+*permissive* direction. This layer is the last one that still knows the values were typed rather than
+derived.
+
+The check is made on the **effective pair after the patch is applied**, not on the payload: a PATCH
+naming only `opens_at` is a legal partial update, and whether it inverts depends on the `closes_at`
+already stored. Both null is a valid configuration — the availability rule is simply not enforced —
+and is not this check's business. Relaxing it is how a venue open past its own local midnight would
+be admitted, deliberately, if that is ever wanted.
+
 **No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
 reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a
 cascade would destroy booking history the moment a Resource or user was removed. A Resource retires

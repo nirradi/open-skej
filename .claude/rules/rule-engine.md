@@ -98,12 +98,16 @@ values a Space that overrides nothing would use.
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
 tracker, not be served as a polite refusal.
 
-**A Space whose operating hours cannot be resolved is denied, not served.** A local window that wraps
-past midnight in the Space's own zone raises `MidnightWrapError` while the canon is being assembled,
-and the adapter converts it to a denial carrying the engine's generic `RULE_ERROR_MESSAGE`. A
-configuration the boundary cannot resolve is a failure to positively establish that the booking is
-permitted, so it resolves to **no** — the same reading the controller gives a rule that raises,
-applied one layer out.
+**Every Space's operating hours resolve.** `resolve_operating_hours` has no failure mode and raises
+nothing: a local window whose UTC image lands on two calendar dates is *represented*, not refused.
+There is no `MidnightWrapError` and no containment path in the adapter for one.
+
+That error used to exist and denied every booking against any Space it fired on. It fired far more
+widely than its name suggests — not only the UTC+13/+14 zones, but any venue whose opening hour is
+earlier than its own UTC offset, or whose closing hour is late enough to cross the boundary the other
+way. `Australia/Sydney` could not open before 11:00 and `Pacific/Honolulu` could not close after
+about 13:00; ordinary hours either side made the venue permanently unbookable, with the engine's
+generic copy and nothing naming the configuration as the cause.
 
 ## The canon
 
@@ -140,6 +144,23 @@ package.
 `time(6, 0)` unless it sits on UTC. The adapter resolves a Space's local hours to a UTC window for
 the booking's own date before constructing the rule (see Backend integration); the engine itself has
 no timezone to convert from, and rendering those bounds in a viewer's timezone stays the UI's job.
+
+**An inverted pair means the window crosses a UTC day, and is not an error.** `opens_at > closes_at`
+says "opens on one UTC date, closes on the next" — the only way that can be said once the date is
+dropped from a pair of `time` values. It is the ordinary case for a venue far enough from UTC, not
+a broken configuration. `AvailabilityHoursRule` therefore never compares the two bounds against each
+other: it first decides **which occurrence** of the recurring daily window the booking's own instant
+falls in (`_occurrence_for`), and both bounds it then compares come from that one decision. The old
+shape anchored `opens_at` and `closes_at` to `request.start_at.date()` independently, so for a
+request crossing the boundary one bound could be dated a day off the other — which is what
+mislabelled the denial reason, naming the closing bound for a booking that was refused for being too
+early.
+
+Because the inversion is load-bearing, **local ordering is enforced at the write boundary instead**:
+a Space whose `opens_at` is at or after its `closes_at` on its own wall clock is refused there (see
+`identity-and-access.md`), because by the time hours reach the engine an inversion is indistinguishable
+from the legitimate case above. That check is also the one place a venue open past its *local*
+midnight would be admitted deliberately, rather than arriving by accident through a typo.
 
 `frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n)` and
 `MaxBookingsPerMonthRule(n)`, the only ones whose verdict depends on anything beyond the request.

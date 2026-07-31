@@ -929,6 +929,55 @@ def test_an_admin_sets_the_space_schedule_and_rule_parameters(
     assert body["max_bookings_per_month"] == 10
 
 
+def test_operating_hours_that_invert_on_the_local_clock_are_refused(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """An admin who types the closing time into the opening box is told so.
+
+    This became load-bearing with task 5.13. The engine reads an *inverted* UTC
+    window as "this window crosses a UTC calendar day" — which is what makes an
+    ordinary Sydney or Honolulu venue bookable — so it can no longer distinguish
+    that from hours inverted on the venue's own clock. Unchecked, the swap gives
+    a Space open all night and shut all day, silently, where it used to refuse
+    every booking loudly. The write boundary is the last layer that still knows
+    these values were typed rather than derived.
+    """
+    response = api.as_user(alice).patch(
+        f"/spaces/{space_a.public_id}",
+        json={"opens_at": "21:00", "closes_at": "09:00"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert "earlier than closing" in response.json()["detail"]
+
+
+def test_operating_hours_are_judged_on_the_pair_the_patch_leaves_behind(
+    api: Api, alice: User, space_a: Space
+) -> None:
+    """A PATCH naming one bound is still judged against the stored other one.
+
+    The check cannot live on the payload: sending only ``opens_at`` is a legal
+    partial update, and whether it inverts depends on the ``closes_at`` already
+    in the row. `space_a` opens 09:00 and closes 17:00.
+    """
+    client = api.as_user(alice)
+    url = f"/spaces/{space_a.public_id}"
+
+    refused = client.patch(url, json={"opens_at": "18:00"})
+    assert refused.status_code == 422, refused.text
+
+    # The rejected write left nothing behind.
+    assert client.get(url).json()["opens_at"] == "09:00:00"
+
+    # Equal bounds are an empty window, not a valid one.
+    assert client.patch(url, json={"opens_at": "17:00"}).status_code == 422
+
+    # And the ordinary narrowing still works.
+    accepted = client.patch(url, json={"opens_at": "10:00"})
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["opens_at"] == "10:00:00"
+
+
 def test_an_explicit_null_clears_space_schedule_and_rule_parameters(
     api: Api, alice: User, space_a: Space
 ) -> None:

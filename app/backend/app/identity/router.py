@@ -205,6 +205,15 @@ def update_space(payload: SpaceUpdate, context: AdminContext, session: SessionDe
         space = service.update_space(session, context.space, payload)
     except service.SpaceArchivedError:
         raise _archived()
+    except service.InvalidOperatingHoursError:
+        # 422, not 400: this is the same class of answer FastAPI gives for a
+        # payload that fails validation, and to the admin filling in the panel
+        # it is one — the pair is only invalid once combined with what is
+        # already stored, which is why the schema cannot catch it.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Opening time must be earlier than closing time.",
+        )
 
     return SpaceRead.build(space, context.role)
 
