@@ -4,11 +4,11 @@ One method, ``complete(system, prompt, model) -> LLMResponse``. The agents in th
 written against that and nothing else, so the backend is a constructor argument rather than a
 rewrite.
 
-**One implementation ships today: ``ClaudeCliClient``**, which shells out to ``claude -p``. It needs
-no API key, only a Claude Code CLI that is installed and interactively authenticated, which is why
-the generation loop is buildable now. That is an acceptable dependency for a *developer* tool whose
-output is a file a human reviews before it is committed; it would not be acceptable for anything the
-booking API calls at request time, and nothing here is.
+**``ClaudeCliClient``** shells out to ``claude -p``. It needs no API key, only a Claude Code CLI
+that is installed and interactively authenticated, which is why the generation loop is buildable
+now. That is an acceptable dependency for a *developer* tool whose output is a file a human reviews
+before it is committed; it would not be acceptable for anything the booking API calls at request
+time, and nothing here is.
 
 **Why an SDK client is a separate implementation and not a flag on this one.** The benchmark exists
 to log token usage, latency and cost per prompt, and the CLI cannot report those for the prompt it
@@ -25,12 +25,20 @@ is what the benchmark must be given.
 ``LLMResponse`` metadata is therefore optional throughout: a backend reports what it can, and a
 consumer that needs a number the backend does not have is asking the wrong backend rather than
 reading a fabricated zero.
+
+**``OllamaClient`` calls a local model through a running Ollama daemon**, which is what makes the
+benchmark this package exists to feed possible without cloud spend or an API key: it hits
+``POST /api/chat`` rather than ``/api/generate`` because chat carries the system prompt as its own
+message, and this package's system prompt is long and constraint-dense — the very thing under test.
+Folding it into the user turn for ``/api/generate`` would benchmark a prompt nobody ships.
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol
 
@@ -42,9 +50,14 @@ __all__ = [
     "ClaudeCliClient",
     "build_command",
     "interpret_cli_result",
+    "OllamaClient",
+    "build_chat_request",
+    "interpret_ollama_result",
     "DEFAULT_MODEL",
     "DEFAULT_CLI_EXECUTABLE",
     "DEFAULT_CLI_TIMEOUT_SECONDS",
+    "DEFAULT_OLLAMA_BASE_URL",
+    "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
 ]
 
 #: The model every agent in this package uses unless told otherwise. Opus is the default
@@ -58,6 +71,13 @@ DEFAULT_CLI_EXECUTABLE = "claude"
 #: Wall clock for one CLI call. Generous: the CLI spends over a second on startup before the first
 #: token, and a rule with a long system prompt is not a fast completion.
 DEFAULT_CLI_TIMEOUT_SECONDS = 180.0
+
+#: Where the Ollama daemon listens by default.
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+
+#: Wall clock for one chat call. A 1.5B model on CPU against this package's system prompt is not a
+#: fast completion — generous is the safe side to be wrong on.
+DEFAULT_OLLAMA_TIMEOUT_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -263,3 +283,183 @@ def _as_float(value: object) -> float | None:
 def _excerpt(text: str, limit: int = 400) -> str:
     text = (text or "").strip()
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+class OllamaClient:
+    """Calls a model served by a local Ollama daemon, over its HTTP API.
+
+    Talks ``/api/chat``, never ``/api/generate`` — see the module docstring for why the split
+    matters here specifically: this package's system prompt is the thing under test, and folding it
+    into the user turn would benchmark a prompt nobody ships.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = DEFAULT_OLLAMA_BASE_URL,
+        timeout_seconds: float = DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+        options: Mapping[str, Any] | None = None,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds!r}")
+        self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        # Copied rather than held by reference, and only when non-empty: 6.2 passes a fixed `seed`
+        # and `temperature` so two benchmark runs are comparable, and an absent key here is what
+        # keeps a call with nothing to say about `options` byte-identical to one made before this
+        # argument existed.
+        self.options = dict(options) if options else None
+
+    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+        url, body = build_chat_request(
+            self.base_url, system=system, prompt=prompt, model=model, options=self.options
+        )
+        status, response_body = _send_chat_request(
+            url, body, timeout_seconds=self.timeout_seconds, base_url=self.base_url
+        )
+        return interpret_ollama_result(
+            status=status, body=response_body, model=model, base_url=self.base_url
+        )
+
+
+def build_chat_request(
+    base_url: str,
+    *,
+    system: str,
+    prompt: str,
+    model: str,
+    options: Mapping[str, Any] | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """The exact URL and decoded request body for one ``/api/chat`` call.
+
+    Split out from ``complete`` for the same reason ``build_command`` is: it is the one part of
+    this client whose correctness is a matter of shape, and a test that had to run a daemon to
+    check it would be a test that calls the model.
+
+    ``stream`` is always ``False``. Ollama's default is newline-delimited JSON, one object per
+    token; parsing only the first yields an empty completion, which would flow into the fence
+    stripper and be rejected several layers later as bad rule source — blaming the model for a
+    transport choice made here.
+    """
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False,
+    }
+    if options:
+        body["options"] = dict(options)
+    return f"{base_url}/api/chat", body
+
+
+def interpret_ollama_result(*, status: int, body: str, model: str, base_url: str) -> LLMResponse:
+    """Turn one finished ``/api/chat`` response into an ``LLMResponse``, or raise ``LLMCallError``.
+
+    Keyed on the HTTP status before anything about the body is trusted. A model that is not pulled
+    is Ollama's own 404, naming the model in its own error text; every other non-200 is surfaced
+    generically rather than guessed at.
+    """
+    if status == 404:
+        raise LLMCallError(
+            f"Ollama does not have {model!r} pulled (404 from {base_url}). "
+            f"Run `ollama pull {model}` and retry. Daemon said: {_excerpt(body) or '<no detail>'}",
+            exit_code=status,
+            stderr=body,
+        )
+    if status != 200:
+        raise LLMCallError(
+            f"Ollama returned HTTP {status} from {base_url}: {_excerpt(body) or '<no detail>'}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    payload = _parse_ollama_payload(body, status=status)
+
+    message = payload.get("message")
+    if not isinstance(message, Mapping):
+        raise LLMCallError(
+            f"Ollama's response has no 'message' object to read a completion from "
+            f"(status {status}): {_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    text = _as_text(message.get("content"))
+    if not text:
+        raise LLMCallError(
+            f"Ollama returned no completion text in 'message.content' (status {status}): "
+            f"{_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    # Ollama reports total_duration in nanoseconds; LLMResponse.duration_ms is milliseconds.
+    duration_ns = _as_int(payload.get("total_duration"))
+    return LLMResponse(
+        text=text,
+        model=model,
+        input_tokens=_as_int(payload.get("prompt_eval_count")),
+        output_tokens=_as_int(payload.get("eval_count")),
+        # A local model's price is not zero dollars in the sense 0.0 would claim; it is a number
+        # this backend has no way to know, so it stays unset like every other metadata field a
+        # backend cannot report.
+        cost_usd=None,
+        duration_ms=duration_ns // 1_000_000 if duration_ns is not None else None,
+        raw=payload,
+    )
+
+
+def _parse_ollama_payload(body: str, *, status: int) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise LLMCallError(
+            f"Ollama did not return JSON (status {status}): {_excerpt(body) or '<empty>'}",
+            exit_code=status,
+            stderr=body,
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise LLMCallError(
+            f"Ollama returned JSON that is not an object (status {status}): {_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+    return payload
+
+
+def _send_chat_request(
+    url: str, body: Mapping[str, Any], *, timeout_seconds: float, base_url: str
+) -> tuple[int, str]:
+    """The one function that touches a socket. Everything else in this client is pure.
+
+    Returns ``(status, response_text)`` for any request the daemon actually answered — a 404 is
+    still an answer, and ``interpret_ollama_result`` is what turns that into the "run ollama pull"
+    message. Only a request the daemon never got to answer at all — refused, or too slow — raises
+    from here directly, because there is no status/body pair to hand back for either.
+    """
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+    except TimeoutError as exc:
+        raise LLMCallError(
+            f"Ollama did not answer within {timeout_seconds:g}s ({base_url})."
+        ) from exc
+    except urllib.error.URLError as exc:
+        # A connect timeout surfaces as a URLError wrapping a TimeoutError, not as a bare
+        # TimeoutError — confirmed against a real socket, not assumed from the docs — so the
+        # timeout message above would never fire without unwrapping `.reason` here too.
+        if isinstance(exc.reason, TimeoutError):
+            raise LLMCallError(
+                f"Ollama did not answer within {timeout_seconds:g}s ({base_url})."
+            ) from exc
+        raise LLMCallError(
+            f"Ollama's daemon is not answering at {base_url!r}. Is `ollama serve` running?"
+        ) from exc
