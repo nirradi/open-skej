@@ -236,9 +236,77 @@ def test_availability_hours_are_utc_hours():
     assert not hours_rule().evaluate(hours_from(as_utc), context()).passed
 
 
-def test_opening_after_closing_is_rejected_at_construction():
+def test_equal_opening_and_closing_is_rejected_at_construction():
     with pytest.raises(ValueError):
-        AvailabilityHoursRule(opens_at=time(23, 0), closes_at=time(6, 0))
+        AvailabilityHoursRule(opens_at=time(6, 0), closes_at=time(6, 0))
+
+
+# --- AvailabilityHoursRule, crossing a UTC calendar day ------------------------------
+#
+# `opens_at > closes_at` is not a construction error: it is the shape a Space's local
+# operating hours resolve to whenever the zone's offset is large enough to push local
+# morning back across UTC midnight (an entirely ordinary Sydney or Honolulu schedule,
+# not an exotic one — see `app.operating_hours` and `DEFERRED.md` items 16/17). This
+# rule has to read that inversion correctly rather than reject it.
+
+
+def wrapping_hours_rule() -> AvailabilityHoursRule:
+    """Opens at 23:00 UTC, closes at 11:00 UTC the following date — a crossing window."""
+    return AvailabilityHoursRule(opens_at=time(23, 0), closes_at=time(11, 0))
+
+
+def test_a_crossing_window_constructs_without_error():
+    rule = wrapping_hours_rule()
+    assert rule.opens_at == time(23, 0)
+    assert rule.closes_at == time(11, 0)
+
+
+def test_a_crossing_window_allows_a_booking_shortly_after_opening():
+    """23:30 on day 20 is the "opens today, closes tomorrow" half of one occurrence."""
+    result = wrapping_hours_rule().evaluate(hours_from(at(23, 30, day=20)), context())
+    assert result.passed
+
+
+def test_a_crossing_window_allows_a_booking_shortly_before_closing():
+    """10:00-11:00 on day 21 is the "opened yesterday, closes today" half of the same occurrence."""
+    result = wrapping_hours_rule().evaluate(
+        request(at(10, 0, day=21), at(11, 0, day=21)), context()
+    )
+    assert result.passed
+
+
+def test_a_crossing_window_denies_a_booking_in_the_daily_gap():
+    """15:00 sits strictly between closing (11:00) and the next opening (23:00) — never in hours.
+
+    This is the case that used to raise `MidnightWrapError` and deny every booking on the Space
+    with the engine's generic copy, regardless of when it actually fell (`DEFERRED.md` item 16's
+    mislabelling, and item 17's total failure). Denied here for the specific, actionable reason.
+    """
+    result = wrapping_hours_rule().evaluate(hours_from(at(15, 0, day=20)), context())
+    assert not result.passed
+    assert "starts too early" in (result.fail_reason or "")
+
+
+def test_a_crossing_window_denies_a_booking_that_runs_past_the_wrapped_close():
+    result = wrapping_hours_rule().evaluate(
+        request(at(10, 30, day=21), at(11, 30, day=21)), context()
+    )
+    assert not result.passed
+    assert "runs too late" in (result.fail_reason or "")
+
+
+def test_a_crossing_window_closing_bound_is_inclusive():
+    """Ending exactly at the wrapped closing instant is fine, one minute later is not."""
+    assert (
+        wrapping_hours_rule()
+        .evaluate(request(at(10, 30, day=21), at(11, 0, day=21)), context())
+        .passed
+    )
+    assert (
+        not wrapping_hours_rule()
+        .evaluate(request(at(10, 30, day=21), at(11, 1, day=21)), context())
+        .passed
+    )
 
 
 # --- The canon, in order ------------------------------------------------------------

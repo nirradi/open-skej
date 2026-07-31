@@ -158,18 +158,19 @@ RESOURCE_A2_NAME = "Court 2"
 SPACE_B_NAME = "Sandbox Space B (Sydney)"
 SPACE_B_DESCRIPTION = "Owned by the same owner as Space A; nobody else is in it."
 SPACE_B_TIMEZONE = "Australia/Sydney"
-# Not 09:00-17:00: Sydney sits at UTC+10 (AEST) / UTC+11 (AEDT), both ahead of
-# an opens_at that early, so resolving "09:00-17:00 local" to UTC pushes
-# opening back onto the *previous* UTC calendar day (23:00/22:00) while
-# closing stays on the same one (07:00/06:00) — `resolve_operating_hours`
-# correctly refuses to express that as a same-UTC-day pair and raises
-# `MidnightWrapError` on *every* date, which made this Space unable to accept
-# any booking at all (found by task 5.1, running the seed against the live
-# API rather than a unit test pinned to one date). 11:00-21:00 keeps opening
-# at or after Sydney's UTC offset in both AEST and AEDT, so the window never
-# crosses a UTC calendar-day boundary, while still being a real non-UTC,
-# DST-observing zone for the per-date resolution to demonstrate.
-SPACE_B_OPENS_AT = time(11, 0)
+# Ordinary hours for a tennis club — and, deliberately, the exact configuration
+# that made this Space unbookable before task 5.13: Sydney sits at UTC+10
+# (AEST) / UTC+11 (AEDT), both ahead of an opens_at this early, so resolving
+# "09:00-21:00 local" to UTC pushes opening back onto the *previous* UTC
+# calendar day (23:00/22:00) while closing stays on the same one (11:00/10:00).
+# `resolve_operating_hours` now returns that inverted pair instead of raising
+# `MidnightWrapError`, and `rules.canon.AvailabilityHoursRule` reads the
+# inversion as a window crossing a UTC calendar day rather than a broken
+# config (`DEFERRED.md` items 16 and 17). Task 5.1 found the bug by running
+# this seed at 09:00-17:00 against the live API and moved it to 11:00-21:00
+# purely to work around it (PR #53) — that traded away the one fixture that
+# would catch a regression here, so 5.13 moves it back.
+SPACE_B_OPENS_AT = time(9, 0)
 SPACE_B_CLOSES_AT = time(21, 0)
 SPACE_B_SLOT_MINUTES = 30
 SPACE_B_MAX_DURATION_MINUTES = 90

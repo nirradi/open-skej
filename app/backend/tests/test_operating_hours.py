@@ -12,7 +12,7 @@ from datetime import date, time
 
 import pytest
 
-from app.operating_hours import MidnightWrapError, resolve_operating_hours
+from app.operating_hours import resolve_operating_hours
 
 
 def test_europe_berlin_is_two_hours_ahead_in_july_cest():
@@ -95,68 +95,85 @@ def test_unknown_timezone_name_fails_loudly():
         )
 
 
-def test_midnight_wrap_raises_a_clear_domain_error():
-    """A window that wraps past midnight in UTC is refused, not returned inverted.
+def test_a_utc_day_crossing_window_resolves_to_an_inverted_pair():
+    """A window whose UTC images cross a calendar day is returned, not refused.
 
     Pacific/Auckland is UTC+13 in the New Zealand summer, so an ordinary
     06:00-23:00 local window resolves to 17:00Z on the *previous* UTC date
-    through 10:00Z on `on_date` — an inverted (open, close) pair if returned
-    as bare `time` values. Raising is the deliberate, documented choice made
-    in `MidnightWrapError` rather than handing the engine a window that
-    silently never admits a booking.
+    through 10:00Z on `on_date` — returned here as `(17:00, 10:00)`, an
+    inverted `(open, close)` pair by string comparison. That inversion is
+    exactly how `rules.canon.AvailabilityHoursRule` reads "this window spans
+    two UTC dates" (see its own docstring and the module docstring here);
+    this function used to raise `MidnightWrapError` instead, which made an
+    entirely ordinary local schedule unrepresentable (`DEFERRED.md` item 17).
     """
-    with pytest.raises(MidnightWrapError):
-        resolve_operating_hours(
-            opens_at=time(6, 0),
-            closes_at=time(23, 0),
-            tz_name="Pacific/Auckland",
-            on_date=date(2026, 1, 21),
-        )
+    utc_open, utc_close = resolve_operating_hours(
+        opens_at=time(6, 0),
+        closes_at=time(23, 0),
+        tz_name="Pacific/Auckland",
+        on_date=date(2026, 1, 21),
+    )
+    assert utc_open == time(17, 0)
+    assert utc_close == time(10, 0)
 
 
-def test_midnight_wrap_is_not_only_a_utc_plus_13_problem():
-    """An ordinary 09:00-17:00 window wraps at UTC+10 too, not just UTC+13/+14.
+def test_utc_day_crossing_is_not_only_a_utc_plus_13_problem():
+    """An ordinary 09:00-17:00 window crosses at UTC+10 too, not just UTC+13/+14.
 
     Found by task 5.1 verifying the seeded sandbox end to end: Australia/Sydney
     sits at UTC+10 (AEST), so 09:00 local resolves to 23:00Z on the *previous*
-    UTC date while 17:00 resolves to 07:00Z the same day — the same inversion
+    UTC date while 17:00 resolves to 07:00Z the same day — the same crossing
     the Auckland case above demonstrates, just at a smaller offset. The
-    wrap condition is `opens_at_hour < utc_offset_hours`, which this module's
-    own docstring undersells by naming only "roughly UTC-11 to UTC+12" and
-    UTC+13/+14 as the practical case; an ordinary 9-to-5 schedule at UTC+10
-    hits it too. This is exactly why the sandbox seed no longer uses these
-    hours for its Sydney Space (`app/backend/app/sandbox_seed.py`).
+    crossing condition is `opens_at_hour < utc_offset_hours`, which this
+    module's own docstring used to undersell by naming only "roughly UTC-11
+    to UTC+12" and UTC+13/+14 as the practical case; an ordinary 9-to-5
+    schedule at UTC+10 hits it too.
     """
-    with pytest.raises(MidnightWrapError):
-        resolve_operating_hours(
-            opens_at=time(9, 0),
-            closes_at=time(17, 0),
-            tz_name="Australia/Sydney",
-            on_date=date(2026, 7, 29),
-        )
+    utc_open, utc_close = resolve_operating_hours(
+        opens_at=time(9, 0),
+        closes_at=time(17, 0),
+        tz_name="Australia/Sydney",
+        on_date=date(2026, 7, 29),
+    )
+    assert utc_open == time(23, 0)
+    assert utc_close == time(7, 0)
 
 
-def test_sydney_space_b_hours_do_not_wrap_in_either_season():
-    """The sandbox seed's actual Space B hours (11:00-21:00) resolve cleanly.
+def test_sydney_09_to_21_crosses_a_utc_day_in_either_season():
+    """The sandbox seed's real Space B hours (09:00-21:00) now resolve, crossing in both seasons.
 
-    Sydney alternates AEST (UTC+10) and AEDT (UTC+11) across the year; 11:00
-    keeps opening at or after the offset in both, so neither season crosses a
-    UTC calendar-day boundary — unlike the 09:00-17:00 window above.
+    Sydney alternates AEST (UTC+10) and AEDT (UTC+11) across the year; opening
+    at 09:00 sits behind the offset in both, so both seasons cross a UTC
+    calendar-day boundary — this is the exact configuration that made Space B
+    unbookable before this module stopped raising (`DEFERRED.md` item 17).
     """
     winter_open, winter_close = resolve_operating_hours(
-        opens_at=time(11, 0),
+        opens_at=time(9, 0),
         closes_at=time(21, 0),
         tz_name="Australia/Sydney",
         on_date=date(2026, 7, 29),  # AEST, UTC+10
     )
-    assert winter_open == time(1, 0)
+    assert winter_open == time(23, 0)
     assert winter_close == time(11, 0)
 
     summer_open, summer_close = resolve_operating_hours(
-        opens_at=time(11, 0),
+        opens_at=time(9, 0),
         closes_at=time(21, 0),
         tz_name="Australia/Sydney",
         on_date=date(2026, 1, 15),  # AEDT, UTC+11
     )
-    assert summer_open == time(0, 0)
+    assert summer_open == time(22, 0)
     assert summer_close == time(10, 0)
+
+
+def test_honolulu_08_to_20_crosses_a_utc_day_year_round():
+    """Pacific/Honolulu has no DST (always UTC-10), so this crosses every date the same way."""
+    for on_date in (date(2026, 1, 15), date(2026, 7, 15)):
+        utc_open, utc_close = resolve_operating_hours(
+            opens_at=time(8, 0),
+            closes_at=time(20, 0),
+            tz_name="Pacific/Honolulu",
+            on_date=on_date,
+        )
+        assert utc_open == time(18, 0)
+        assert utc_close == time(6, 0)

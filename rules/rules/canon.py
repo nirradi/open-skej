@@ -117,36 +117,78 @@ class MaxDurationRule(BaseRule):
 
 
 class AvailabilityHoursRule(BaseRule):
-    """Bookings must sit inside ``[opens_at, closes_at]`` on a single day.
+    """Bookings must sit inside the recurring daily window ``[opens_at, closes_at]``.
 
     ``opens_at`` and ``closes_at`` are **UTC** clock times — see the module docstring. The closing
     bound is **inclusive**: ending exactly at closing time is fine.
 
-    ``end_at`` is compared against a closing *instant* built from ``start_at``'s date, not against a
-    bare clock time. That is what rejects a booking running past midnight: comparing clock times
-    alone, a 23:30–00:30 booking would read as ending at 00:30 — comfortably before closing — and be
-    allowed to wrap silently into the next open day.
+    **The window may cross a UTC calendar day**, and ``opens_at`` is not required to be before
+    ``closes_at`` — when it isn't, that inversion *is* the window: it opens on one UTC date and
+    closes on the next. This is not the same thing as a venue open past its own *local* midnight
+    (``DEFERRED.md`` item 18, unsupported and unrelated): an entirely ordinary same-local-day window
+    — Sydney 09:00-21:00, Honolulu 08:00-20:00 — resolves to exactly this shape in UTC whenever the
+    zone's offset is large enough that local morning falls on the UTC day before (``app.
+    operating_hours``, which is where such a pair comes from and why it stopped raising rather than
+    returning one). A same-Space, same-UTC-day window (Berlin, or the reference hours below) simply
+    never inverts, so this rule behaves exactly as it always did for the case everyone has been
+    testing against.
+
+    ``evaluate`` never anchors ``opens_at`` and ``closes_at`` to ``request.start_at.date()``
+    independently of each other — doing that is what silently mislabelled a denial's reason
+    (``DEFERRED.md`` item 16): for a crossing window, "the UTC date ``start_at`` falls on" is not a
+    fact about the window, it's a fact about *which half* of one occurrence the request landed in.
+    ``_occurrence_for`` decides that once, from ``start_at`` alone, and both bounds of what it
+    returns come from that same decision — never one built on an assumption the other contradicts.
     """
 
     def __init__(self, opens_at: time, closes_at: time) -> None:
-        if opens_at >= closes_at:
+        if opens_at == closes_at:
             raise ValueError(
-                f"AvailabilityHoursRule.opens_at must be before closes_at; "
-                f"got {opens_at} >= {closes_at}"
+                f"AvailabilityHoursRule.opens_at must differ from closes_at; both were {opens_at}"
             )
         self.opens_at = opens_at
         self.closes_at = closes_at
 
+    def _occurrence_for(self, start_at: datetime) -> tuple[datetime, datetime] | None:
+        """The one occurrence of the recurring window that could contain ``start_at``.
+
+        ``None`` means ``start_at`` falls in the daily gap between one closing and the next
+        opening — outside every occurrence, whatever ``end_at`` turns out to be.
+        """
+        tzinfo = start_at.tzinfo
+        start_date = start_at.date()
+
+        if self.opens_at < self.closes_at:
+            # Same UTC day: the only occurrence a `start_at` on this date could belong to.
+            return (
+                datetime.combine(start_date, self.opens_at, tzinfo),
+                datetime.combine(start_date, self.closes_at, tzinfo),
+            )
+        if start_at.time() >= self.opens_at:
+            # The "opens today" half of an occurrence that closes on the following UTC date.
+            return (
+                datetime.combine(start_date, self.opens_at, tzinfo),
+                datetime.combine(start_date + timedelta(days=1), self.closes_at, tzinfo),
+            )
+        if start_at.time() < self.closes_at:
+            # The "closes today" half of an occurrence that opened on the previous UTC date.
+            return (
+                datetime.combine(start_date - timedelta(days=1), self.opens_at, tzinfo),
+                datetime.combine(start_date, self.closes_at, tzinfo),
+            )
+        return None
+
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
         friendly_hours = f"between {_format_time(self.opens_at)} and {_format_time(self.closes_at)}"
+        occurrence = self._occurrence_for(request.start_at)
 
-        if request.start_at.time() < self.opens_at:
+        if occurrence is None or request.start_at < occurrence[0]:
             return RuleResult.deny(
                 f"We open at {_format_time(self.opens_at)}, so this booking starts too early."
                 f" Please pick a time {friendly_hours}."
             )
 
-        closing = datetime.combine(request.start_at.date(), self.closes_at, request.start_at.tzinfo)
+        _, closing = occurrence
         if request.end_at > closing:
             return RuleResult.deny(
                 f"We close at {_format_time(self.closes_at)}, so this booking runs too late."
