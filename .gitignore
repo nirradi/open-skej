@@ -26,6 +26,11 @@ dist/
 # Node
 node_modules/
 
+# Pids and logs of the local sandbox stack (`scripts/dev-sandbox.sh`). Per-run process state, and
+# the logs of two servers that are torn down and recreated on demand — nothing here describes the
+# repository, and a committed pid file is a pid that belongs to somebody else's machine.
+.dev-sandbox/
+
 # Local SQLite databases
 *.db
 *.db-wal
