@@ -18,7 +18,7 @@ import {
   slotsPerDay,
   test,
 } from './fixtures'
-import { calendarConfig, formatSlotLabel } from '../../frontend/src/config'
+import { formatSlotLabel } from '../../frontend/src/config'
 import { DAYS_PER_WEEK } from '../../frontend/src/calendar/week'
 
 test('the calendar renders a grid matching the configured slot size', async ({ page }) => {
@@ -43,12 +43,16 @@ test('the calendar renders a grid matching the configured slot size', async ({ p
   // One past the last: proves the count is a real bound, not a lower bound.
   await expect(page.getByTestId(slotId(firstDay, slotsPerDay))).toHaveCount(0)
 
-  // The first and last labels bracket the configured availability window.
+  // The first label is midnight, whatever the Space's own hours are: task 5.9
+  // made the grid render the full day and grey what falls outside opening
+  // hours, rather than clipping the day to them. Clipping meant a booking made
+  // before an admin narrowed the hours had no row left to sit on and vanished
+  // from a calendar it was still on.
   await expect(page.getByTestId(slotId(firstDay, 0))).toHaveAttribute(
     'aria-label',
     `${firstDay} ${formatSlotLabel(0)}`,
   )
-  expect(formatSlotLabel(0)).toBe(`${String(calendarConfig.openHour).padStart(2, '0')}:00`)
+  expect(formatSlotLabel(0)).toBe('00:00')
 })
 
 test('the week label and navigation bounds reflect the booking horizon', async ({ page }) => {

@@ -130,7 +130,15 @@ SPACE_A_TIMEZONE = "Europe/Berlin"
 # hour outside a UTC-resolved window.
 SPACE_A_OPENS_AT: time | None = None
 SPACE_A_CLOSES_AT: time | None = None
-SPACE_A_SLOT_MINUTES = 60
+# A copy-contract constant, like `SPACE_A_MAX_DURATION_MINUTES` below: the E2E
+# suite drags across slots and asserts the resulting duration in words
+# ("30 minutes", "2 hours 30 minutes"), so the grid's slot size is part of what
+# those specs assert and not an implementation detail they tolerate. It was 60 —
+# the service's default for a Space that never sets one — which was invisible
+# while the grid laid itself out from a hardcoded frontend constant. Task 5.9
+# made the grid follow the Space, which turned that default into five failing
+# specs. Stated explicitly here so the two sides agree on purpose.
+SPACE_A_SLOT_MINUTES = 30
 # Mirrors `MAX_BOOKING_MINUTES` in `03-sad-path.spec.ts` — a copy-contract
 # constant on both sides, not a coincidence.
 SPACE_A_MAX_DURATION_MINUTES = 120
