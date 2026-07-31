@@ -40,7 +40,6 @@ from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, model_validator
 from rules import (
     DEFAULT_CANON,
-    RULE_ERROR_MESSAGE,
     AvailabilityHoursRule,
     BaseRule,
     BookingHorizonRule,
@@ -58,7 +57,7 @@ from rules import BookingRecord as EngineBookingRecord
 from rules import BookingRequest as EngineBookingRequest
 from rules import Context as EngineContext
 
-from app.operating_hours import MidnightWrapError, resolve_operating_hours
+from app.operating_hours import resolve_operating_hours
 
 ALLOWED_MESSAGE = "Looks good — this slot is available."
 
@@ -304,13 +303,6 @@ def evaluate(
     ``now`` defaults to the live UTC clock; tests pin it explicitly instead of
     racing the wall clock.
 
-    A ``MidnightWrapError`` from resolving this Space's operating hours (a
-    zone far enough from UTC that an ordinary local window wraps past
-    midnight — see ``app.operating_hours``) is contained here as a denial
-    carrying the engine's own generic "couldn't check this" copy: fail closed
-    on a broken configuration rather than 500 the endpoint or silently let the
-    booking through unchecked.
-
     ``ContextMismatchError`` is not caught. The request and the context are
     both built here from ``booking`` and ``history``, so a mismatch cannot be
     a client error — it would be a bug in this adapter, and the engine raises
@@ -321,10 +313,7 @@ def evaluate(
     utc_now = _to_utc(now) if now is not None else datetime.now(timezone.utc)
     engine_request = _engine_request(booking)
 
-    try:
-        canon = _build_canon(config, _local_date(engine_request.start_at, config.timezone))
-    except MidnightWrapError:
-        return RuleResult(allowed=False, message=RULE_ERROR_MESSAGE)
+    canon = _build_canon(config, _local_date(engine_request.start_at, config.timezone))
 
     engine_context = EngineContext(
         user=UserContext(user_id=booking.user_id),

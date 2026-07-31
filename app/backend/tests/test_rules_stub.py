@@ -6,8 +6,7 @@ kept pointed at the observable verdict rather than at the adapter's
 internals: the individual rules' own edge cases (inclusive bounds, ordering,
 window arithmetic) are `rules/tests`' job, so this module asserts the things
 that are genuinely this adapter's — timezone conversion, canon assembly from
-a `SpaceRuleConfig`, history forwarding, and the `MidnightWrapError`
-containment path.
+a `SpaceRuleConfig`, and history forwarding.
 """
 
 from datetime import datetime, time, timedelta, timezone
@@ -20,7 +19,6 @@ from app.rules_stub import (
     AVAILABILITY_OPEN,
     BOOKING_HORIZON_DAYS,
     MAX_BOOKING_DURATION,
-    RULE_ERROR_MESSAGE,
     BookingRequest,
     RuleResult,
     SpaceRuleConfig,
@@ -260,24 +258,52 @@ def test_availability_hours_resolve_against_the_spaces_own_timezone():
     assert not denied.allowed
 
 
-def test_midnight_wrap_is_contained_as_a_fail_closed_denial():
-    """A Space whose local hours wrap past UTC midnight fails closed, not open.
+def test_a_utc_day_crossing_space_accepts_a_booking_in_its_own_local_hours():
+    """A Space whose local hours cross a UTC calendar day is bookable, not dead.
 
     Pacific/Auckland is UTC+13 in the New Zealand summer (January), so an
-    ordinary 06:00-23:00 local window resolves to a UTC pair that wraps past
-    midnight (`app.operating_hours.MidnightWrapError`). The adapter contains
-    that as a denial with the engine's own generic copy rather than letting it
-    reach the endpoint as an unhandled exception or silently allowing.
+    ordinary 06:00-23:00 local window resolves (see
+    `app.operating_hours`) to opening 2026-01-20T17:00Z and closing
+    2026-01-21T10:00Z — no longer a `MidnightWrapError`. A booking sitting in
+    the local morning — 2026-01-21 07:00 Auckland local, which is
+    2026-01-20T18:00Z — is accepted, not refused with the engine's generic
+    "couldn't check this" copy (`DEFERRED.md` items 16 and 17).
     """
-    wraps = SpaceRuleConfig(timezone="Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0))
-    start = datetime(2026, 1, 21, 12, 0, tzinfo=timezone.utc)
+    crosses = SpaceRuleConfig(
+        timezone="Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0)
+    )
+    local_morning = datetime(2026, 1, 20, 18, 0, tzinfo=timezone.utc)
 
     result = evaluate(
-        request(start, start + timedelta(hours=1)), wraps, now=start - timedelta(hours=1)
+        request(local_morning, local_morning + timedelta(hours=1)),
+        crosses,
+        now=local_morning - timedelta(hours=1),
+    )
+
+    assert result.allowed
+
+
+def test_a_utc_day_crossing_space_still_denies_an_out_of_hours_booking():
+    """The fix is not "widen the window until everything passes" — out-of-hours still denies.
+
+    The denial copy names the engine's own UTC clock (17:00), not the Space's local 06:00 — the
+    engine has no timezone to convert from, and rendering a bound in a viewer's own zone stays the
+    UI's job (`.claude/rules/rule-engine.md`); unaffected by this task.
+    """
+    crosses = SpaceRuleConfig(
+        timezone="Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0)
+    )
+    # 2026-01-21 02:00 Auckland local (before the 06:00 local opening) is 2026-01-20T13:00Z.
+    before_opening = datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)
+
+    result = evaluate(
+        request(before_opening, before_opening + timedelta(hours=1)),
+        crosses,
+        now=before_opening - timedelta(hours=1),
     )
 
     assert not result.allowed
-    assert result.message == RULE_ERROR_MESSAGE
+    assert "17:00" in result.message
 
 
 def test_naive_now_is_rejected():

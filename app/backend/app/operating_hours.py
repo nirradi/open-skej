@@ -27,40 +27,30 @@ the version of this that looks right in July and is wrong in January. The
 conversion must therefore be repeated **per date**, at the boundary, on
 every call: ``on_date`` is not a formality, it is the reason this function
 takes a date at all instead of just a zone name.
+
+**A window may resolve to two different UTC calendar dates.** A perfectly
+ordinary same-local-day window — Sydney 09:00-21:00, Honolulu 08:00-20:00 —
+lands its opening instant on the UTC calendar date *before* ``on_date``
+whenever the zone's offset is large enough (Sydney is UTC+10/+11; anything
+open before roughly its own offset hits this, not just the UTC+13/+14 zones
+a narrower reading of "midnight wrap" might suggest). Because the return
+value here is a pair of bare ``time`` values with no date attached, that
+case comes back as ``utc_open > utc_close`` — an "inverted" pair by string
+comparison, but not an error: it is exactly how "opens on the UTC date
+before ``on_date``, closes on ``on_date`` itself" has to look once the date
+is dropped. ``rules.canon.AvailabilityHoursRule`` is what reads that
+inversion correctly, reconstructing which UTC calendar date each bound
+belongs to from the booking it is judging rather than from ``on_date`` here,
+which by the time a rule runs is long gone. This function used to refuse to
+return such a pair at all (``MidnightWrapError``); doing so made an entirely
+ordinary Sydney or Honolulu venue's hours unrepresentable and every booking
+against it fail — see ``DEFERRED.md`` items 16 and 17. It no longer refuses.
 """
 
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
-__all__ = ["resolve_operating_hours", "MidnightWrapError"]
-
-
-class MidnightWrapError(ValueError):
-    """A local operating window resolved to a UTC window that wraps past midnight.
-
-    Raised by :func:`resolve_operating_hours` when converting ``opens_at`` /
-    ``closes_at`` to UTC yields ``utc_open >= utc_close`` — the pair can no
-    longer be read as "open from X to Y later the same UTC day".
-
-    This is a real edge, not a hypothetical: a zone far enough from UTC (e.g.
-    ``Pacific/Auckland``, UTC+13) shifts an ordinary local window like
-    06:00-23:00 back across the UTC calendar-day boundary, so the *opening*
-    time lands on the *previous* UTC date while the closing time does not.
-    Dropped to bare ``time`` values — which is what
-    ``rules.canon.AvailabilityHoursRule`` accepts and what this function
-    therefore must return — that distinction is lost, and returning the pair
-    anyway would hand the engine an availability window that is silently
-    inverted rather than one that spans two UTC dates.
-
-    The safe default is to refuse rather than guess: raising here is what
-    keeps a broken window from reaching the engine as a pair of `time`
-    values that happen to compare the wrong way. A Space whose venue and
-    configured hours combine to trigger this is real (any zone at UTC+13/+14,
-    or a window wide enough relative to a zone's offset) and is a
-    configuration problem for a human to resolve — split the window, or pick
-    hours that do not wrap — not one this function can silently paper over by
-    returning a value that would misbehave downstream.
-    """
+__all__ = ["resolve_operating_hours"]
 
 
 def resolve_operating_hours(
@@ -73,7 +63,10 @@ def resolve_operating_hours(
     fixed offset); ``on_date`` is the calendar date — in that local zone — the
     hours apply to. The return value is the equivalent UTC clock times for
     that same date, which is exactly the shape
-    ``rules.canon.AvailabilityHoursRule`` is constructed with.
+    ``rules.canon.AvailabilityHoursRule`` is constructed with — including,
+    per the module docstring, the case where the pair comes back inverted
+    (``utc_open > utc_close``) because the local window's opening instant
+    falls on the UTC calendar date before ``on_date``.
 
     **DST is the point, not an edge case.** The same wall-clock input
     resolves to a *different* UTC time depending on ``on_date`` — 07:00
@@ -94,11 +87,13 @@ def resolve_operating_hours(
       *typed* is task 4.12's job (rejecting it before it is ever stored);
       this function's only obligation is to never silently substitute a
       different zone for a bad one it is handed.
-    * **The midnight-wrap case** — see :class:`MidnightWrapError`. Detected
-      by comparing the two resolved UTC times and raised rather than
-      returned, because a caller that only sees two ``time`` values has no
-      way to tell "inverted by wraparound" from "legitimately open all but
-      one hour."
+    * **The UTC-day-crossing case** — the local window resolves to an
+      *inverted* pair, ``utc_open > utc_close``. This is not an error: it is
+      the only way "opens on the UTC date before ``on_date``, closes on
+      ``on_date``" can be expressed once the date is dropped from the return
+      value. See the module docstring and ``rules.canon.AvailabilityHoursRule``,
+      which is what turns the inversion back into two correctly-dated
+      instants when it judges one specific booking.
     * **DST gap and fold instants** — a local time that does not exist (the
       hour skipped in a spring-forward transition) or exists twice (the hour
       repeated in a fall-back one) — are resolved by ``zoneinfo``'s own
@@ -112,12 +107,15 @@ def resolve_operating_hours(
       path nobody can verify by inspection.
 
     **Supported range.** Any IANA zone name ``ZoneInfo`` accepts, for any
-    ``opens_at`` / ``closes_at`` pair whose UTC-converted images preserve
-    their order (``utc_open < utc_close``). That covers ordinary daytime
-    operating hours in every zone from roughly UTC-11 to UTC+12; a window
-    that wraps past midnight in UTC (``Pacific/Auckland`` and other
-    UTC+13/+14 zones are the practical case) raises
-    :class:`MidnightWrapError` instead of returning an inverted pair.
+    ``opens_at`` / ``closes_at`` pair that is ordered as a *local* same-day
+    window (``opens_at < closes_at``, the Space's own wall clock — a venue
+    open past its own local midnight is a distinct, unsupported
+    configuration, ``DEFERRED.md`` item 18, and not this function's concern).
+    Their UTC-converted images may or may not preserve that order: a zone
+    close enough to UTC keeps ``utc_open < utc_close`` (Berlin), while one
+    far enough ahead of UTC — Sydney included, not only the UTC+13/+14 zones
+    a narrower reading might suggest — resolves to ``utc_open > utc_close``.
+    Both are valid returns; see the module docstring.
 
     ``slot_minutes`` needs no equivalent function: it is a duration, not a
     clock time, and a duration is the same length of time in every zone.
@@ -125,12 +123,4 @@ def resolve_operating_hours(
     tz = ZoneInfo(tz_name)
     utc_open = datetime.combine(on_date, opens_at, tzinfo=tz).astimezone(timezone.utc).time()
     utc_close = datetime.combine(on_date, closes_at, tzinfo=tz).astimezone(timezone.utc).time()
-
-    if utc_open >= utc_close:
-        raise MidnightWrapError(
-            f"resolving {opens_at}-{closes_at} local ({tz_name}) on {on_date} yields"
-            f" a UTC window of {utc_open}-{utc_close}, which wraps past midnight and"
-            f" cannot be expressed as a single same-day (open, close) pair"
-        )
-
     return utc_open, utc_close
