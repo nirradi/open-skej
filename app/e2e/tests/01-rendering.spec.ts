@@ -99,7 +99,17 @@ test('"This week" is one click back from several weeks out', async ({ page }) =>
   await expect(thisWeek).toBeEnabled()
 
   await thisWeek.click()
-  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  // Wait for the grid to actually show this week before reading all seven keys.
+  // `calendar-loading` is not that signal: when the week's bookings are already
+  // cached it never renders at all, so `toHaveCount(0)` is satisfied
+  // immediately — before React has re-rendered the day headers — and the
+  // one-shot `renderedDateKeys` read below then returns the *previous* week.
+  // A retrying locator assertion on the first header is the wait that means
+  // what this test needs, and it is the same idiom used a few lines above.
+  await expect(page.locator('[data-testid^="calendar-day-"]').first()).toHaveAttribute(
+    'data-testid',
+    `calendar-day-${currentWeekDateKeys[0]}`,
+  )
   expect(await renderedDateKeys(page)).toEqual(currentWeekDateKeys)
   await expect(thisWeek).toBeDisabled()
 
