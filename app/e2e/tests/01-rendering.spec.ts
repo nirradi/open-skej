@@ -18,7 +18,7 @@ import {
   slotsPerDay,
   test,
 } from './fixtures'
-import { calendarConfig, formatSlotLabel } from '../../frontend/src/config'
+import { formatSlotLabel } from '../../frontend/src/config'
 import { DAYS_PER_WEEK } from '../../frontend/src/calendar/week'
 
 test('the calendar renders a grid matching the configured slot size', async ({ page }) => {
@@ -43,12 +43,16 @@ test('the calendar renders a grid matching the configured slot size', async ({ p
   // One past the last: proves the count is a real bound, not a lower bound.
   await expect(page.getByTestId(slotId(firstDay, slotsPerDay))).toHaveCount(0)
 
-  // The first and last labels bracket the configured availability window.
+  // The first label is midnight, whatever the Space's own hours are: task 5.9
+  // made the grid render the full day and grey what falls outside opening
+  // hours, rather than clipping the day to them. Clipping meant a booking made
+  // before an admin narrowed the hours had no row left to sit on and vanished
+  // from a calendar it was still on.
   await expect(page.getByTestId(slotId(firstDay, 0))).toHaveAttribute(
     'aria-label',
     `${firstDay} ${formatSlotLabel(0)}`,
   )
-  expect(formatSlotLabel(0)).toBe(`${String(calendarConfig.openHour).padStart(2, '0')}:00`)
+  expect(formatSlotLabel(0)).toBe('00:00')
 })
 
 test('the week label and navigation bounds reflect the booking horizon', async ({ page }) => {
@@ -95,7 +99,17 @@ test('"This week" is one click back from several weeks out', async ({ page }) =>
   await expect(thisWeek).toBeEnabled()
 
   await thisWeek.click()
-  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  // Wait for the grid to actually show this week before reading all seven keys.
+  // `calendar-loading` is not that signal: when the week's bookings are already
+  // cached it never renders at all, so `toHaveCount(0)` is satisfied
+  // immediately — before React has re-rendered the day headers — and the
+  // one-shot `renderedDateKeys` read below then returns the *previous* week.
+  // A retrying locator assertion on the first header is the wait that means
+  // what this test needs, and it is the same idiom used a few lines above.
+  await expect(page.locator('[data-testid^="calendar-day-"]').first()).toHaveAttribute(
+    'data-testid',
+    `calendar-day-${currentWeekDateKeys[0]}`,
+  )
   expect(await renderedDateKeys(page)).toEqual(currentWeekDateKeys)
   await expect(thisWeek).toBeDisabled()
 
