@@ -37,6 +37,7 @@ from app.identity.models import (
     SpaceAccessRequest,
     SpaceInvitation,
     SpaceMembership,
+    SpaceRule,
     User,
 )
 from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceUpdate
@@ -78,6 +79,28 @@ class InvalidOperatingHoursError(Exception):
     configuration today, and this is the check that would be relaxed to admit
     it, deliberately, rather than it arriving by accident through a typo.
     """
+
+
+class AmbiguousRuleInstanceError(Exception):
+    """``PATCH /spaces`` cannot tell which of several unscoped rule instances
+    it was meant to edit.
+
+    ``PATCH /spaces`` (task 6.6's write-through shim onto ``space_rules``) can
+    only sensibly mean *the* unscoped (``applies_to IS NULL``) instance of a
+    rule type — a scalar field like ``slot_minutes`` has nowhere to name which
+    of several instances it is setting. This shim's own writes never create a
+    second unscoped instance of a type, so this can only fire once 6.7/6.8
+    let an admin create one directly; when it does, refusing is the point —
+    silently picking one or overwriting every instance of the type would both
+    be worse than telling the caller their scalar edit no longer has a single
+    target. This is a transitional guard for a transitional path: 6.10 deletes
+    the shim outright rather than growing this into real multi-instance
+    editing, which is 6.7/6.8's job.
+    """
+
+    def __init__(self, rule_type: str) -> None:
+        super().__init__(rule_type)
+        self.rule_type = rule_type
 
 
 class ResourceNotFoundError(Exception):
@@ -248,25 +271,37 @@ def create_space(
     produces an empty Space even though the schema could represent one. If any
     write fails, none of them survives.
 
-    The Space gets default operating hours and a default slot interval, so it is
-    bookable immediately rather than requiring an admin visit to the config UI
-    first — the auto-created Resource itself carries none, since a Resource is
-    config-free by design and every court in a Space shares the Space's one
-    schedule. The four rule parameters are left unset.
+    The Space gets default operating hours and a default slot interval, as
+    ``space_rules`` rows rather than columns on ``Space`` itself (task 6.6),
+    so it is bookable immediately rather than requiring an admin visit to the
+    config UI first — the auto-created Resource itself carries none, since a
+    Resource is config-free by design and every court in a Space shares the
+    Space's one schedule. The four rule parameters are left unset, i.e. no
+    rows are created for them.
     """
-    space = Space(
-        name=name,
-        description=description,
-        created_by_user_id=creator.id,
-        opens_at=_DEFAULT_OPENS_AT,
-        closes_at=_DEFAULT_CLOSES_AT,
-        slot_minutes=_DEFAULT_SLOT_MINUTES,
-    )
+    space = Space(name=name, description=description, created_by_user_id=creator.id)
     session.add(space)
     session.flush()
 
     session.add(SpaceMembership(space_id=space.id, user_id=creator.id, role=MembershipRole.OWNER))
     session.add(Resource(space_id=space.id, name=FIRST_RESOURCE_NAME))
+    session.add(
+        SpaceRule(
+            space_id=space.id,
+            rule_type="availability_hours",
+            params={
+                "opens_at": _DEFAULT_OPENS_AT.isoformat(),
+                "closes_at": _DEFAULT_CLOSES_AT.isoformat(),
+            },
+        )
+    )
+    session.add(
+        SpaceRule(
+            space_id=space.id,
+            rule_type="slot_alignment",
+            params={"slot_minutes": _DEFAULT_SLOT_MINUTES},
+        )
+    )
     session.commit()
     return space
 
@@ -293,6 +328,76 @@ def list_spaces_for_user(
     return [(space, role) for space, role in session.execute(query).all()]
 
 
+def _unscoped_rows_by_type(session: Session, space: Space) -> dict[str, list[SpaceRule]]:
+    """Every one of this Space's **unscoped** (``applies_to IS NULL``) rows,
+    grouped by ``rule_type`` — one query for a whole ``PATCH`` rather than one
+    per field.
+
+    "Unscoped" is the whole of what ``PATCH /spaces``' write-through shim
+    (task 6.6) ever touches: a scalar field like ``slot_minutes`` has nowhere
+    to name which of several day/date-scoped instances it means, so this shim
+    only ever reads or writes the one instance of a type with no
+    ``applies_to`` restriction. A row scoped to specific weekdays or dates —
+    only reachable once 6.7/6.8 land — is invisible to this function
+    entirely.
+    """
+    rows = (
+        session.execute(
+            select(SpaceRule)
+            .where(SpaceRule.space_id == space.id, SpaceRule.applies_to.is_(None))
+            .order_by(SpaceRule.id)
+        )
+        .scalars()
+        .all()
+    )
+
+    grouped: dict[str, list[SpaceRule]] = {}
+    for row in rows:
+        grouped.setdefault(row.rule_type, []).append(row)
+    return grouped
+
+
+def _write_through_unscoped_rule(
+    session: Session,
+    space: Space,
+    rows: Sequence[SpaceRule],
+    rule_type: str,
+    params: Optional[dict],
+) -> None:
+    """Create, update, or delete the Space's one unscoped instance of ``rule_type``.
+
+    ``rows`` is every unscoped row of this type, already queried once for the
+    whole ``PATCH`` by ``_unscoped_rows_by_type`` rather than re-queried per
+    field. More than one raises :class:`AmbiguousRuleInstanceError` — this
+    shim's own writes never produce that state, but a second instance created
+    directly once 6.7/6.8 land would leave a scalar field with no single
+    target to mean.
+
+    ``params=None`` deletes the row — a rule the payload asks to clear back
+    to "not enforced" is a row that should not exist, not one with empty or
+    null params, matching this table's "pause is a flag on the instance"
+    convention (a *cleared* rule is not merely paused, it is not configured at
+    all). Otherwise the row is created if absent or updated in place.
+    """
+    if len(rows) > 1:
+        raise AmbiguousRuleInstanceError(rule_type)
+
+    existing = rows[0] if rows else None
+
+    if params is None:
+        if existing is not None:
+            session.delete(existing)
+        return
+
+    if existing is None:
+        session.add(SpaceRule(space_id=space.id, rule_type=rule_type, params=params))
+    else:
+        # Reassigned wholesale, never mutated in place: SQLAlchemy only
+        # tracks a JSONB column as dirty on assignment, not on an in-place
+        # dict mutation of an already-loaded value.
+        existing.params = params
+
+
 def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
     """Apply a partial update. Omitted fields are left alone.
 
@@ -301,6 +406,14 @@ def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
     ``description``: the schema only rejects a null ``name`` and a null
     ``timezone``, so every other field here may be cleared back to "no
     restriction" / "rule not enforced" by sending it explicitly as ``null``.
+
+    These seven fields no longer touch a column on ``Space`` at all (task
+    6.6) — each writes through to the Space's one *unscoped* ``space_rules``
+    instance of the matching rule type, creating or deleting the row as
+    needed. This is a transitional shim: ``SpaceUpdate``/``SpaceRead`` keep
+    exactly their pre-6.6 shape so nothing about the admin panel or the API
+    contract changes in this PR, and the shim itself is deleted in task 6.10
+    once the rules API (6.7) owns real multi-instance editing.
     """
     _require_active(space)
 
@@ -314,36 +427,179 @@ def update_space(session: Session, space: Space, payload: SpaceUpdate) -> Space:
         space.description = payload.description
     if "timezone" in fields and payload.timezone is not None:
         space.timezone = payload.timezone
-    if "opens_at" in fields:
-        space.opens_at = payload.opens_at
-    if "closes_at" in fields:
-        space.closes_at = payload.closes_at
-    if "slot_minutes" in fields:
-        space.slot_minutes = payload.slot_minutes
-    if "max_duration_minutes" in fields:
-        space.max_duration_minutes = payload.max_duration_minutes
-    if "booking_horizon_days" in fields:
-        space.booking_horizon_days = payload.booking_horizon_days
-    if "max_bookings_per_week" in fields:
-        space.max_bookings_per_week = payload.max_bookings_per_week
-    if "max_bookings_per_month" in fields:
-        space.max_bookings_per_month = payload.max_bookings_per_month
 
-    # Checked on the *effective* pair rather than on the payload, because a
-    # PATCH may set one bound and inherit the other: sending only `opens_at`
-    # must still be judged against the `closes_at` already stored. Both null
-    # means the availability rule is not enforced at all, which is a valid
-    # configuration and not this check's business.
-    if (
-        space.opens_at is not None
-        and space.closes_at is not None
-        and space.opens_at >= space.closes_at
-    ):
-        session.rollback()
-        raise InvalidOperatingHoursError(space.opens_at, space.closes_at)
+    rows_by_type = _unscoped_rows_by_type(session, space)
+
+    if "opens_at" in fields or "closes_at" in fields:
+        hours_rows = rows_by_type.get("availability_hours", [])
+        if len(hours_rows) > 1:
+            raise AmbiguousRuleInstanceError("availability_hours")
+        current_hours = hours_rows[0] if hours_rows else None
+
+        # The *effective* pair: a PATCH naming only one bound inherits the
+        # other from whatever is already stored, exactly as a PATCH against
+        # the old `opens_at`/`closes_at` columns did.
+        effective_opens_at = (
+            payload.opens_at
+            if "opens_at" in fields
+            else (time.fromisoformat(current_hours.params["opens_at"]) if current_hours else None)
+        )
+        effective_closes_at = (
+            payload.closes_at
+            if "closes_at" in fields
+            else (time.fromisoformat(current_hours.params["closes_at"]) if current_hours else None)
+        )
+
+        if effective_opens_at is not None and effective_closes_at is not None:
+            if effective_opens_at >= effective_closes_at:
+                session.rollback()
+                raise InvalidOperatingHoursError(effective_opens_at, effective_closes_at)
+            hours_params: Optional[dict] = {
+                "opens_at": effective_opens_at.isoformat(),
+                "closes_at": effective_closes_at.isoformat(),
+            }
+        else:
+            # Both null, or only one bound set: mirrors `_build_canon`'s own
+            # "both or neither" gating — a lone bound enforces nothing, so it
+            # is stored as no row at all rather than a row missing a
+            # required param (which would later fail closed as an
+            # unbuildable row instead of simply being absent).
+            hours_params = None
+
+        _write_through_unscoped_rule(session, space, hours_rows, "availability_hours", hours_params)
+
+    if "slot_minutes" in fields:
+        params = (
+            {"slot_minutes": payload.slot_minutes} if payload.slot_minutes is not None else None
+        )
+        _write_through_unscoped_rule(
+            session, space, rows_by_type.get("slot_alignment", []), "slot_alignment", params
+        )
+
+    if "max_duration_minutes" in fields:
+        params = (
+            {"max_duration_minutes": payload.max_duration_minutes}
+            if payload.max_duration_minutes is not None
+            else None
+        )
+        _write_through_unscoped_rule(
+            session, space, rows_by_type.get("max_duration", []), "max_duration", params
+        )
+
+    if "booking_horizon_days" in fields:
+        params = (
+            {"days": payload.booking_horizon_days}
+            if payload.booking_horizon_days is not None
+            else None
+        )
+        _write_through_unscoped_rule(
+            session, space, rows_by_type.get("booking_horizon", []), "booking_horizon", params
+        )
+
+    if "max_bookings_per_week" in fields:
+        params = (
+            {"max_bookings": payload.max_bookings_per_week}
+            if payload.max_bookings_per_week is not None
+            else None
+        )
+        _write_through_unscoped_rule(
+            session,
+            space,
+            rows_by_type.get("max_bookings_per_week", []),
+            "max_bookings_per_week",
+            params,
+        )
+
+    if "max_bookings_per_month" in fields:
+        params = (
+            {"max_bookings": payload.max_bookings_per_month}
+            if payload.max_bookings_per_month is not None
+            else None
+        )
+        _write_through_unscoped_rule(
+            session,
+            space,
+            rows_by_type.get("max_bookings_per_month", []),
+            "max_bookings_per_month",
+            params,
+        )
 
     session.commit()
     return space
+
+
+def space_schedule_fields(session: Session, space: Space) -> dict:
+    """The seven ``SpaceRead``/``SpaceUpdate`` scalar values, derived from this
+    Space's unscoped ``space_rules`` rows.
+
+    ``SpaceRead`` keeps serving exactly these seven fields (task 6.6's
+    transitional shim), but from this point on nothing reads them off
+    ``Space`` itself — every caller building a ``SpaceRead`` calls this
+    first. Mirrors :func:`update_space`'s write-through mapping in reverse:
+    the same rule type, the same param names, read back instead of written.
+
+    If more than one unscoped instance of a type somehow exists — never
+    producible by this shim's own writes, but not a state a *read* should
+    ever refuse on — the first, by id, is reported; there is nothing to 409
+    on a ``GET``, unlike the write path.
+    """
+    rows_by_type = _unscoped_rows_by_type(session, space)
+
+    fields: dict = {
+        "opens_at": None,
+        "closes_at": None,
+        "slot_minutes": None,
+        "max_duration_minutes": None,
+        "booking_horizon_days": None,
+        "max_bookings_per_week": None,
+        "max_bookings_per_month": None,
+    }
+
+    hours = rows_by_type.get("availability_hours")
+    if hours:
+        fields["opens_at"] = time.fromisoformat(hours[0].params["opens_at"])
+        fields["closes_at"] = time.fromisoformat(hours[0].params["closes_at"])
+
+    slot_alignment = rows_by_type.get("slot_alignment")
+    if slot_alignment:
+        fields["slot_minutes"] = slot_alignment[0].params["slot_minutes"]
+
+    max_duration = rows_by_type.get("max_duration")
+    if max_duration:
+        fields["max_duration_minutes"] = max_duration[0].params["max_duration_minutes"]
+
+    booking_horizon = rows_by_type.get("booking_horizon")
+    if booking_horizon:
+        fields["booking_horizon_days"] = booking_horizon[0].params["days"]
+
+    max_bookings_per_week = rows_by_type.get("max_bookings_per_week")
+    if max_bookings_per_week:
+        fields["max_bookings_per_week"] = max_bookings_per_week[0].params["max_bookings"]
+
+    max_bookings_per_month = rows_by_type.get("max_bookings_per_month")
+    if max_bookings_per_month:
+        fields["max_bookings_per_month"] = max_bookings_per_month[0].params["max_bookings"]
+
+    return fields
+
+
+def list_space_rules(session: Session, space: Space) -> Sequence[SpaceRule]:
+    """Every ``space_rules`` row for this Space — scoped and unscoped,
+    enabled and disabled alike — for ``app.rules_stub`` to filter and build a
+    canon from.
+
+    Order doesn't matter here: ``app.rules_stub._build_canon`` re-sorts the
+    rows it can build by each type's declared priority
+    (``.claude/rules/rule-engine.md``), not by the order this query returns
+    them in.
+    """
+    return (
+        session.execute(
+            select(SpaceRule).where(SpaceRule.space_id == space.id).order_by(SpaceRule.id)
+        )
+        .scalars()
+        .all()
+    )
 
 
 def archive_space(session: Session, space: Space) -> Space:

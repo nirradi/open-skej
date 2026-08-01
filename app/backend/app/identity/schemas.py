@@ -143,6 +143,14 @@ class SpaceRead(BaseModel):
     hours and slot interval — every Resource in it shares them, since a Resource
     carries no configuration of its own. The four rule-parameter fields are the
     canon's per-Space limits; ``null`` means that rule is not enforced here.
+
+    All seven of those fields are, since task 6.6, **derived from this
+    Space's ``space_rules`` rows** rather than read off columns on ``Space``
+    itself — see ``app.identity.service.space_schedule_fields``, which
+    ``build`` below takes as its ``schedule`` argument rather than deriving
+    it again here. This model's own shape is unchanged: the storage moved,
+    the wire contract did not, which is the whole point of task 6.6's
+    write-through shim.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -163,19 +171,24 @@ class SpaceRead(BaseModel):
     my_role: MembershipRole
 
     @classmethod
-    def build(cls, space: Space, role: MembershipRole) -> "SpaceRead":
+    def build(cls, space: Space, role: MembershipRole, schedule: dict) -> "SpaceRead":
+        """``schedule`` is ``app.identity.service.space_schedule_fields(session,
+        space)`` — the one place the seven fields below are derived from
+        ``space_rules`` rows, called once per ``Space`` and reused here so
+        every route serving a ``SpaceRead`` agrees on how they are read.
+        """
         return cls(
             public_id=space.public_id,
             name=space.name,
             description=space.description,
             timezone=space.timezone,
-            opens_at=space.opens_at,
-            closes_at=space.closes_at,
-            slot_minutes=space.slot_minutes,
-            max_duration_minutes=space.max_duration_minutes,
-            booking_horizon_days=space.booking_horizon_days,
-            max_bookings_per_week=space.max_bookings_per_week,
-            max_bookings_per_month=space.max_bookings_per_month,
+            opens_at=schedule["opens_at"],
+            closes_at=schedule["closes_at"],
+            slot_minutes=schedule["slot_minutes"],
+            max_duration_minutes=schedule["max_duration_minutes"],
+            booking_horizon_days=schedule["booking_horizon_days"],
+            max_bookings_per_week=schedule["max_bookings_per_week"],
+            max_bookings_per_month=schedule["max_bookings_per_month"],
             created_at=space.created_at,
             archived_at=space.archived_at,
             my_role=role,

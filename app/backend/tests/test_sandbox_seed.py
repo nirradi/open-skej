@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.constants import DEFAULT_RESOURCE_ID, DEFAULT_USER_ID
 from app.db.models import Base, Booking
+from app.identity import service
 from app.identity.models import (
     AccessRequestStatus,
     InvitationStatus,
@@ -96,13 +97,17 @@ def test_seed_produces_every_interesting_state(session):
     # exercises (see the module docstring).
     space_a = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
     assert space_a.timezone == SPACE_A_TIMEZONE
-    assert space_a.opens_at == SPACE_A_OPENS_AT
-    assert space_a.closes_at == SPACE_A_CLOSES_AT
-    assert space_a.slot_minutes == SPACE_A_SLOT_MINUTES
-    assert space_a.max_duration_minutes == SPACE_A_MAX_DURATION_MINUTES
-    assert space_a.booking_horizon_days == SPACE_A_BOOKING_HORIZON_DAYS
-    assert space_a.max_bookings_per_week is None
-    assert space_a.max_bookings_per_month is None
+    # Since task 6.6 these seven fields live on `space_rules` rows, not on the
+    # `Space` row itself — `space_schedule_fields` is the one place that reads
+    # them back, mirroring what `SpaceRead` serves over the API.
+    schedule_a = service.space_schedule_fields(session, space_a)
+    assert schedule_a["opens_at"] == SPACE_A_OPENS_AT
+    assert schedule_a["closes_at"] == SPACE_A_CLOSES_AT
+    assert schedule_a["slot_minutes"] == SPACE_A_SLOT_MINUTES
+    assert schedule_a["max_duration_minutes"] == SPACE_A_MAX_DURATION_MINUTES
+    assert schedule_a["booking_horizon_days"] == SPACE_A_BOOKING_HORIZON_DAYS
+    assert schedule_a["max_bookings_per_week"] is None
+    assert schedule_a["max_bookings_per_month"] is None
     assert space_a.archived_at is None
 
     roles_in_a = dict(
@@ -134,19 +139,20 @@ def test_seed_produces_every_interesting_state(session):
     space_b = session.execute(select(Space).where(Space.name == SPACE_B_NAME)).scalar_one()
     assert space_b.timezone == SPACE_B_TIMEZONE
     assert space_b.timezone != space_a.timezone
+    schedule_b = service.space_schedule_fields(session, space_b)
     # Configured differently from Space A — the two Spaces, not their
     # Resources, are what differ now that configuration lives on the Space.
-    assert (space_b.opens_at, space_b.closes_at, space_b.slot_minutes) != (
-        space_a.opens_at,
-        space_a.closes_at,
-        space_a.slot_minutes,
+    assert (schedule_b["opens_at"], schedule_b["closes_at"], schedule_b["slot_minutes"]) != (
+        schedule_a["opens_at"],
+        schedule_a["closes_at"],
+        schedule_a["slot_minutes"],
     )
     # Space B is where the new per-Space rule capabilities are observable:
     # real availability hours to resolve per date, and a weekly cap.
-    assert space_b.opens_at is not None
-    assert space_b.closes_at is not None
-    assert space_b.max_duration_minutes == SPACE_B_MAX_DURATION_MINUTES
-    assert space_b.max_bookings_per_week == SPACE_B_MAX_BOOKINGS_PER_WEEK
+    assert schedule_b["opens_at"] is not None
+    assert schedule_b["closes_at"] is not None
+    assert schedule_b["max_duration_minutes"] == SPACE_B_MAX_DURATION_MINUTES
+    assert schedule_b["max_bookings_per_week"] == SPACE_B_MAX_BOOKINGS_PER_WEEK
 
     # Two Resources, like Space A — the weekly cap is Space-wide, so
     # demonstrating it needs a booking to land on a different Resource than

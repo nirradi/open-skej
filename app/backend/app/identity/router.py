@@ -74,6 +74,10 @@ INVITATION_RESOLVED_DETAIL = (
     " To remove someone who has already joined, remove their membership instead."
 )
 INVITATION_ROLE_TOO_HIGH_DETAIL = "You cannot invite someone at a role above your own."
+AMBIGUOUS_RULE_INSTANCE_DETAIL = (
+    "This Space already has more than one instance of that rule configured."
+    " Use the rules page to edit a specific one."
+)
 
 
 def _archived() -> HTTPException:
@@ -138,6 +142,12 @@ def _invitation_role_too_high() -> HTTPException:
     )
 
 
+def _ambiguous_rule_instance() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT, detail=AMBIGUOUS_RULE_INSTANCE_DETAIL
+    )
+
+
 @router.post("", response_model=SpaceRead, status_code=status.HTTP_201_CREATED)
 def create_space(payload: SpaceCreate, user: CurrentUser, session: SessionDep) -> SpaceRead:
     """Create a Space. The creator becomes its owner.
@@ -147,7 +157,8 @@ def create_space(payload: SpaceCreate, user: CurrentUser, session: SessionDep) -
     to recover it from if the caller discards it.
     """
     space = service.create_space(session, user, name=payload.name, description=payload.description)
-    return SpaceRead.build(space, MembershipRole.OWNER)
+    schedule = service.space_schedule_fields(session, space)
+    return SpaceRead.build(space, MembershipRole.OWNER, schedule)
 
 
 @router.get("", response_model=list[SpaceRead])
@@ -160,7 +171,7 @@ def list_spaces(
     are not discoverable, so this returns memberships and nothing else.
     """
     return [
-        SpaceRead.build(space, role)
+        SpaceRead.build(space, role, service.space_schedule_fields(session, space))
         for space, role in service.list_spaces_for_user(
             session, user, include_archived=include_archived
         )
@@ -168,9 +179,10 @@ def list_spaces(
 
 
 @router.get("/{public_id}", response_model=SpaceRead)
-def read_space(context: MemberContext) -> SpaceRead:
+def read_space(context: MemberContext, session: SessionDep) -> SpaceRead:
     """Full detail, for members only. Non-members get 404, not 403."""
-    return SpaceRead.build(context.space, context.role)
+    schedule = service.space_schedule_fields(session, context.space)
+    return SpaceRead.build(context.space, context.role, schedule)
 
 
 @router.get("/{public_id}/preview", response_model=SpacePreview)
@@ -214,8 +226,11 @@ def update_space(payload: SpaceUpdate, context: AdminContext, session: SessionDe
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="Opening time must be earlier than closing time.",
         )
+    except service.AmbiguousRuleInstanceError:
+        raise _ambiguous_rule_instance()
 
-    return SpaceRead.build(space, context.role)
+    schedule = service.space_schedule_fields(session, space)
+    return SpaceRead.build(space, context.role, schedule)
 
 
 @router.post("/{public_id}/archive", response_model=SpaceRead)
@@ -232,7 +247,8 @@ def archive_space(context: OwnerContext, session: SessionDep) -> SpaceRead:
     except service.SpaceArchivedError:
         raise _archived()
 
-    return SpaceRead.build(space, context.role)
+    schedule = service.space_schedule_fields(session, space)
+    return SpaceRead.build(space, context.role, schedule)
 
 
 @router.post(

@@ -138,26 +138,35 @@ Space and nowhere else, through `require_space_role` on the parent — which ext
 oracle-free **404, never 403** rule to a Resource id belonging to another tenant, resolved in one
 query so the timing does not leak either.
 
-**All configuration lives on the Space.** A venue is in one physical place, so its timezone (an IANA
-name like `Europe/Berlin`, never a fixed offset that is right in July and wrong in January), its
-operating hours and slot interval (`opens_at`, `closes_at`, `slot_minutes`), and its rule-engine
-parameters (`max_duration_minutes`, `booking_horizon_days`, `max_bookings_per_week`,
-`max_bookings_per_month`) are all **per-Space columns**. Operating hours are *local wall-clock*
-config, resolved against the Space's `timezone` to a UTC instant per date at the boundary — that is
-the one place a zone is a property of the data; stored instants carry none. The rule params are
-nullable: unset means the corresponding rule is not enforced. Because a frequency cap belongs to the
-Space, it counts every booking the user holds anywhere in the venue, across all its courts, never per
-court.
+**The timezone is the one genuinely per-Space column left; everything else a Space enforces is a rule
+instance.** A venue is in one physical place, so its timezone (an IANA name like `Europe/Berlin`,
+never a fixed offset that is right in July and wrong in January) is a column on `Space`. Operating
+hours, slot interval, and every rule-engine limit — a maximum booking duration, a booking horizon, a
+weekly or monthly frequency cap — are rows in `space_rules` instead: one row per *instance* of a rule
+type declared in `rules.registry.REGISTRY` (`rule-engine.md`, "The canon"), carrying that type's own
+JSON `params`, an `applies_to` narrowing which weekdays or dates it governs (`null` means always), and
+an `enabled` flag that is the entire pause mechanism — a disabled row is never assembled into the
+canon. A Space can hold any number of instances of a type; nothing here caps it to one. Because a
+frequency cap belongs to the Space rather than any one row's `applies_to`, it counts every booking the
+user holds anywhere in the venue, across all its courts, never per court.
 
-The whole schedule is **admin-editable** via `PATCH /spaces/{public_id}` (admin+), and `SpaceRead`
-carries all of it so the config UI reads it without a second call. A `timezone` is validated as a real
-IANA name at the boundary — an unknown name or a fixed offset (`+02:00`) is rejected, never stored —
-because a bad zone would only surface later as a broken operating-hours resolution far from where it
-was set. A Resource has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}`
-renames it and nothing more.
+`PATCH /spaces/{public_id}` (admin+) still accepts the seven scalar fields this schedule used to be —
+`opens_at`, `closes_at`, `slot_minutes`, `max_duration_minutes`, `booking_horizon_days`,
+`max_bookings_per_week`, `max_bookings_per_month` — and `SpaceRead` still serves them, so the config
+UI reads and writes the same shape it always has. Neither touches a column: each field writes through
+to the Space's one *unscoped* (`applies_to IS NULL`) instance of the matching rule type, creating or
+deleting the row as the value is set or cleared to `null`, and `SpaceRead` derives its answer by
+reading that row back. A scalar field has no way to name which of several scoped or duplicate
+instances of a type it means, so a second unscoped instance of a type — unreachable through this path,
+but not prevented by the schema — is a conflict this write refuses rather than guesses at. A Resource
+has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}` renames it and
+nothing more.
 
-**`opens_at` must be earlier than `closes_at` on the Space's own wall clock, and that is enforced
-here or nowhere.** A pair that inverts locally is refused with **422**. This is not tidiness: the rule
+**`opens_at` and `closes_at` are stored together, in one `availability_hours` row, required together.**
+A row with one bound missing is not a state the rule type can build from, so a `PATCH` that would leave
+only one of the pair set instead clears both — there is no column left to remember the other on its
+own. `opens_at` must be earlier than `closes_at` on the Space's own wall clock, and that is enforced
+here or nowhere: a pair that inverts locally is refused with **422**. This is not tidiness: the rule
 engine reads an *inverted* UTC window as "this window crosses a UTC calendar day", which is what makes
 a venue in Sydney or Honolulu bookable at all (`rule-engine.md`), and locally-inverted hours resolve
 to an inverted UTC pair too. The engine cannot tell them apart, so an admin who typed the closing time
@@ -170,6 +179,10 @@ naming only `opens_at` is a legal partial update, and whether it inverts depends
 already stored. Both null is a valid configuration — the availability rule is simply not enforced —
 and is not this check's business. Relaxing it is how a venue open past its own local midnight would
 be admitted, deliberately, if that is ever wanted.
+
+A `timezone` is validated as a real IANA name at the boundary — an unknown name or a fixed offset
+(`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
+operating-hours resolution far from where it was set.
 
 **No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
 reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a

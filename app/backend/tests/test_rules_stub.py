@@ -1,18 +1,21 @@
 """Tests for the rule-engine adapter, focused on the boundary directions.
 
 `app.rules_stub` decides nothing itself — it assembles a canon from a
-`SpaceRuleConfig` and hands it to `rules.evaluate_request`. These cases are
-kept pointed at the observable verdict rather than at the adapter's
-internals: the individual rules' own edge cases (inclusive bounds, ordering,
-window arithmetic) are `rules/tests`' job, so this module asserts the things
-that are genuinely this adapter's — timezone conversion, canon assembly from
-a `SpaceRuleConfig`, and history forwarding.
+`SpaceRuleConfig` (a Space's timezone plus its `space_rules` rows, read
+through `rules.REGISTRY`, task 6.6) and hands it to `rules.evaluate_request`.
+These cases are kept pointed at the observable verdict rather than at the
+adapter's internals: the individual rules' own edge cases (inclusive bounds,
+ordering, window arithmetic) are `rules/tests`' job, so this module asserts
+the things that are genuinely this adapter's — timezone conversion, canon
+assembly from a `SpaceRuleConfig`'s rows, history forwarding, and (since
+task 6.6) the fail-closed path a row that cannot be built takes.
 """
 
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
+from rules import RULE_ERROR_MESSAGE
 
 from app.rules_stub import (
     ALLOWED_MESSAGE,
@@ -23,6 +26,7 @@ from app.rules_stub import (
     BookingRequest,
     RuleResult,
     SpaceRuleConfig,
+    SpaceRuleRow,
 )
 from app.rules_stub import evaluate as _evaluate
 
@@ -33,12 +37,60 @@ DAY = datetime(2026, 7, 20, tzinfo=timezone.utc)
 # against the wall clock and the whole file would start failing on 2026-07-21.
 NOW = DAY - timedelta(days=1)
 
+
+def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
+    """Build a `SpaceRuleConfig` from the *old* seven scalar-kwarg names.
+
+    Every case in this module cares about the observable verdict, not about
+    `space_rules` row shape, so this is a compatibility shim for the tests
+    rather than something `app.rules_stub` itself has any more: each non-None
+    kwarg becomes one unscoped, enabled `SpaceRuleRow` — mirroring exactly
+    what `app.identity.service.update_space`'s write-through shim does for a
+    real `PATCH /spaces` (task 6.6). `opens_at`/`closes_at` are combined into
+    one `availability_hours` row and, matching `_build_canon`'s own gating,
+    only when *both* are given — passing just one is exactly how
+    `test_availability_needs_both_bounds_set` proves that half a
+    configuration enforces nothing.
+    """
+    rows: list[SpaceRuleRow] = []
+    next_id = 1
+
+    def add(rule_type: str, params: dict) -> None:
+        nonlocal next_id
+        rows.append(SpaceRuleRow(id=next_id, rule_type=rule_type, params=params))
+        next_id += 1
+
+    opens_at = rule_kwargs.get("opens_at")
+    closes_at = rule_kwargs.get("closes_at")
+    if opens_at is not None and closes_at is not None:
+        add(
+            "availability_hours",
+            {"opens_at": opens_at.isoformat(), "closes_at": closes_at.isoformat()},
+        )
+
+    if rule_kwargs.get("slot_minutes") is not None:
+        add("slot_alignment", {"slot_minutes": rule_kwargs["slot_minutes"]})
+
+    if rule_kwargs.get("max_duration_minutes") is not None:
+        add("max_duration", {"max_duration_minutes": rule_kwargs["max_duration_minutes"]})
+
+    if rule_kwargs.get("booking_horizon_days") is not None:
+        add("booking_horizon", {"days": rule_kwargs["booking_horizon_days"]})
+
+    if rule_kwargs.get("max_bookings_per_week") is not None:
+        add("max_bookings_per_week", {"max_bookings": rule_kwargs["max_bookings_per_week"]})
+
+    if rule_kwargs.get("max_bookings_per_month") is not None:
+        add("max_bookings_per_month", {"max_bookings": rule_kwargs["max_bookings_per_month"]})
+
+    return SpaceRuleConfig(timezone=timezone_name, rules=tuple(rows))
+
+
 #: A Space configured with every rule parameter set, mirroring the values the
 #: old module-level ``DEFAULT_CANON`` used to enforce unconditionally — so the
 #: cases below that only care about duration/hours/horizon read the same way
 #: they did before the canon became per-Space.
-FULL_CONFIG = SpaceRuleConfig(
-    timezone="UTC",
+FULL_CONFIG = _config(
     opens_at=AVAILABILITY_OPEN,
     closes_at=AVAILABILITY_CLOSE,
     max_duration_minutes=int(MAX_BOOKING_DURATION.total_seconds() // 60),
@@ -109,7 +161,7 @@ def test_booking_of_exactly_max_duration_is_allowed():
 
 
 def test_max_duration_unset_allows_a_booking_the_default_would_deny():
-    """A Space with no ``max_duration_minutes`` enforces no duration cap at all."""
+    """A Space with no ``max_duration`` row enforces no duration cap at all."""
     over_the_reference_default = request(at(10), at(10) + MAX_BOOKING_DURATION + timedelta(hours=1))
 
     result = evaluate(over_the_reference_default, NULL_CONFIG)
@@ -152,8 +204,9 @@ def test_booking_ending_exactly_at_closing_is_allowed():
 
 
 def test_availability_needs_both_bounds_set():
-    """Only one of ``opens_at``/``closes_at`` set enforces no availability rule."""
-    half_configured = SpaceRuleConfig(timezone="UTC", opens_at=time(9, 0))
+    """Only one of ``opens_at``/``closes_at`` set produces no ``availability_hours`` row at all."""
+    half_configured = _config(opens_at=time(9, 0))
+    assert half_configured.rules == ()
 
     # 03:00 would be refused under FULL_CONFIG's 06:00 opening; here it passes
     # because the rule is never built without both bounds.
@@ -241,9 +294,7 @@ def test_availability_hours_resolve_against_the_spaces_own_timezone():
     07:00 Europe/Berlin is 05:00Z in July (CEST, UTC+2). A booking at 05:00Z
     sits exactly at that resolved opening; one a minute earlier does not.
     """
-    berlin_summer = SpaceRuleConfig(
-        timezone="Europe/Berlin", opens_at=time(7, 0), closes_at=time(22, 0)
-    )
+    berlin_summer = _config("Europe/Berlin", opens_at=time(7, 0), closes_at=time(22, 0))
     opening_instant = datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc)
 
     assert evaluate(
@@ -270,9 +321,7 @@ def test_a_utc_day_crossing_space_accepts_a_booking_in_its_own_local_hours():
     2026-01-20T18:00Z — is accepted, not refused with the engine's generic
     "couldn't check this" copy (`DEFERRED.md` items 16 and 17).
     """
-    crosses = SpaceRuleConfig(
-        timezone="Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0)
-    )
+    crosses = _config("Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0))
     local_morning = datetime(2026, 1, 20, 18, 0, tzinfo=timezone.utc)
 
     result = evaluate(
@@ -291,9 +340,7 @@ def test_a_utc_day_crossing_space_still_denies_an_out_of_hours_booking():
     engine has no timezone to convert from, and rendering a bound in a viewer's own zone stays the
     UI's job (`.claude/rules/rule-engine.md`); unaffected by this task.
     """
-    crosses = SpaceRuleConfig(
-        timezone="Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0)
-    )
+    crosses = _config("Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0))
     # 2026-01-21 02:00 Auckland local (before the 06:00 local opening) is 2026-01-20T13:00Z.
     before_opening = datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)
 
@@ -332,7 +379,7 @@ def test_clock_defaults_to_the_current_time_when_omitted():
 
 
 def test_a_space_with_no_frequency_cap_ignores_history_entirely():
-    """No ``max_bookings_per_*`` set means no counting rule in the canon at all."""
+    """No ``max_bookings_per_*`` row means no counting rule in the canon at all."""
     booking = request(at(10), at(11))
     unrelated_history = tuple(request(at(h), at(h + 1)) for h in (1, 2, 3, 12, 13, 14))
 
@@ -341,7 +388,7 @@ def test_a_space_with_no_frequency_cap_ignores_history_entirely():
 
 
 def test_max_bookings_per_week_denies_the_booking_that_goes_over():
-    weekly_cap = SpaceRuleConfig(timezone="UTC", max_bookings_per_week=2)
+    weekly_cap = _config(max_bookings_per_week=2)
     history = (
         request(at(1), at(2), resource_id="court-1"),
         request(at(3), at(4), resource_id="court-2"),
@@ -357,7 +404,7 @@ def test_max_bookings_per_week_counts_across_every_resource_in_the_space():
     """The engine counts everything handed to it; the Space-wide scope is the
     adapter's history query, proven here by history drawn from a resource other
     than the one being requested."""
-    weekly_cap = SpaceRuleConfig(timezone="UTC", max_bookings_per_week=1)
+    weekly_cap = _config(max_bookings_per_week=1)
     history = (request(at(1), at(2), resource_id="a-different-court"),)
 
     result = evaluate(
@@ -368,7 +415,7 @@ def test_max_bookings_per_week_counts_across_every_resource_in_the_space():
 
 
 def test_max_bookings_per_month_denies_the_booking_that_goes_over():
-    monthly_cap = SpaceRuleConfig(timezone="UTC", max_bookings_per_month=1)
+    monthly_cap = _config(max_bookings_per_month=1)
     history = (request(at(1), at(2)),)
 
     result = evaluate(request(at(10), at(11)), monthly_cap, history)
@@ -519,7 +566,7 @@ def _booking(start: datetime, minutes: int = 30) -> BookingRequest:
     ],
 )
 def test_the_weekly_window_is_the_space_s_local_week(tz, existing, requested, expect_allowed):
-    config = SpaceRuleConfig(timezone=tz, max_bookings_per_week=1)
+    config = _config(tz, max_bookings_per_week=1)
     held = _booking(_tz_instant(tz, *existing), minutes=60)
     request = _booking(_tz_instant(tz, *requested))
 
@@ -544,7 +591,7 @@ def test_the_weekly_window_is_the_space_s_local_week(tz, existing, requested, ex
 def test_the_monthly_window_is_the_space_s_local_month(
     tz, existing, requested, now, expect_allowed
 ):
-    config = SpaceRuleConfig(timezone=tz, max_bookings_per_month=1)
+    config = _config(tz, max_bookings_per_month=1)
     held = _booking(_tz_instant(tz, *existing), minutes=60)
     request = _booking(_tz_instant(tz, *requested))
 
@@ -560,10 +607,128 @@ def test_a_week_spanning_a_dst_change_is_seven_local_days_long():
     booking late on the final Sunday is inside that week and must count; adding a fixed timedelta
     to the start would close the window an hour early and let it through.
     """
-    config = SpaceRuleConfig(timezone="Australia/Sydney", max_bookings_per_week=1)
+    config = _config("Australia/Sydney", max_bookings_per_week=1)
     held = _booking(_tz_instant("Australia/Sydney", 2026, 3, 30, 10), minutes=60)
     last_hour = _booking(_tz_instant("Australia/Sydney", 2026, 4, 5, 23, 30))
 
     result = evaluate(last_hour, config, history=(held,), now=held.start_at)
 
     assert result.allowed is False
+
+
+# --- task 6.6: rows read through the registry, applies_to, and fail-closed ----------------------
+
+
+def test_a_disabled_row_is_never_assembled_into_the_canon():
+    """Pause is the entire mechanism: a disabled row has no effect at all."""
+    paused = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="max_duration",
+                params={"max_duration_minutes": 30},
+                enabled=False,
+            ),
+        ),
+    )
+
+    # 2 hours would be refused by an *enabled* 30-minute cap; disabled, it is not built at all.
+    result = evaluate(request(at(10), at(12)), paused)
+
+    assert result.allowed
+
+
+def test_applies_to_weekdays_scopes_a_row_to_matching_local_dates():
+    """A row scoped to specific weekdays governs only a booking whose *local* date matches.
+
+    2026-07-20 is a Monday (weekday 0). Scoped to Tuesday/Thursday (1, 3), the row must not
+    apply, so a booking that a matching day would deny instead passes.
+    """
+    monday = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="max_duration",
+                params={"max_duration_minutes": 30},
+                applies_to={"weekdays": [1, 3]},
+            ),
+        ),
+    )
+
+    result = evaluate(request(at(10), at(12)), monday)
+
+    assert result.allowed
+
+
+def test_applies_to_weekdays_denies_on_a_matching_local_date():
+    """The mirror of the case above: the same row, on a date it *does* name."""
+    tuesday = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="max_duration",
+                params={"max_duration_minutes": 30},
+                applies_to={"weekdays": [1]},
+            ),
+        ),
+    )
+    a_tuesday = DAY + timedelta(days=1)  # 2026-07-21 is a Tuesday.
+
+    result = evaluate(
+        request(a_tuesday + timedelta(hours=10), a_tuesday + timedelta(hours=12)), tuesday
+    )
+
+    assert not result.allowed
+
+
+def test_an_unregistered_rule_type_denies_the_booking_with_the_generic_message():
+    """A row naming a rule_type no longer in REGISTRY fails closed, not silently skipped."""
+    unknown = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(SpaceRuleRow(id=1, rule_type="no_such_rule_type", params={}),),
+    )
+
+    result = evaluate(request(at(10), at(11)), unknown)
+
+    assert not result.allowed
+    assert result.message == RULE_ERROR_MESSAGE
+
+
+def test_a_row_missing_a_required_param_denies_the_booking_with_the_generic_message():
+    """`max_duration` requires `max_duration_minutes`; a row missing it fails closed."""
+    broken = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(SpaceRuleRow(id=1, rule_type="max_duration", params={}),),
+    )
+
+    result = evaluate(request(at(10), at(11)), broken)
+
+    assert not result.allowed
+    assert result.message == RULE_ERROR_MESSAGE
+
+
+def test_reads_history_is_true_only_when_an_enabled_row_reads_it():
+    weekly = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(SpaceRuleRow(id=1, rule_type="max_bookings_per_week", params={"max_bookings": 1}),),
+    )
+    assert weekly.reads_history
+
+    paused = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="max_bookings_per_week",
+                params={"max_bookings": 1},
+                enabled=False,
+            ),
+        ),
+    )
+    assert not paused.reads_history
+
+    assert not NULL_CONFIG.reads_history
+    assert not FULL_CONFIG.reads_history

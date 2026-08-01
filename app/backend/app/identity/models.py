@@ -31,9 +31,10 @@ Design notes that apply throughout:
 import enum
 import secrets
 from datetime import datetime, time
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Enum,
     ForeignKey,
@@ -44,6 +45,7 @@ from sqlalchemy import (
     Time,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models import Base, UtcDateTime, utcnow
@@ -224,6 +226,89 @@ class Space(Base):
 
     def __repr__(self) -> str:
         return f"Space(id={self.id!r}, public_id={self.public_id!r}, name={self.name!r})"
+
+
+class SpaceRule(Base):
+    """One configured instance of a rule type, governing one Space.
+
+    This is task 6.6's expand half of an expand-then-contract migration
+    (``ops/plans/stream-6-plan.md``): rule configuration moves from seven
+    fixed columns on ``Space`` into rows here, one row per *instance* of a
+    rule type declared in ``rules.registry.REGISTRY`` — so a Space can hold
+    any number of instances of a type ("Mon/Wed/Fri 10-15" and "Tue/Thu 8-12"
+    as two ``availability_hours`` rows) instead of one fixed value for the
+    whole venue. The seven ``spaces`` columns are backfilled into rows here
+    by the migration and are, from this point on, read by nothing and
+    written by nothing — they are dropped outright in a later task (6.10),
+    once this store has proven itself equivalent.
+
+    ``rule_type`` is the registry's **stable string id** (``availability_hours``,
+    ``max_duration``, …) — never a Python class name, so renaming the class a
+    type happens to be implemented by cannot silently orphan every row that
+    named it. ``params`` is the JSONB blob ``RuleType.build`` validates and
+    reads; its shape is entirely owned by the registered type, which is what
+    keeps this table generic over a type registered after this migration
+    ships.
+
+    ``applies_to`` narrows *when* the instance is active, and is a new shape
+    with nothing else in the codebase to reverse-engineer it from, so it is
+    documented here. It carries **at most one facet** — the pair (a weekday
+    set intersected with a date set) is reserved, not built: neither an
+    intersecting nor a union reading of the two has an obviously right
+    meaning and nobody has asked for it (``ops/plans/stream-6-plan.md``, "Out
+    of scope"). The three legal shapes:
+
+    * ``None`` — always applies. The shape every row this migration
+      backfills is given, and the common case going forward.
+    * ``{"weekdays": [0, 2, 4]}`` — a list of ``datetime.date.weekday()``
+      integers, ``0`` = Monday, matching ``rules.Weekday``'s own numbering.
+      The instance applies only when the booking's own **local** date (in
+      the Space's zone — never UTC; see ``app.rules_stub._local_date``) has
+      a weekday in this list.
+    * ``{"dates": ["2026-12-25"]}`` — a list of ISO ``date`` strings
+      (``date.isoformat()``). The instance applies only when the booking's
+      local date is in this list.
+
+    ``enabled`` is the pause switch, and pausing is the entire mechanism for
+    "not today": a disabled row is never assembled into the canon, full
+    stop. It is not the same operation as deleting the row — a paused rule
+    instance is a decision an admin can reverse, and it says nothing about
+    whether the row should still exist.
+
+    No ``ON DELETE CASCADE`` on ``space_id``, matching every other foreign
+    key onto ``spaces.id`` in this schema (``.claude/rules/identity-and-
+    access.md``, "nothing is deleted") — a cascade would silently destroy a
+    Space's configuration the moment the row referencing it went away, which
+    is exactly the failure mode that rule protects against elsewhere. The row
+    *itself*, unlike a booking or a membership, may be deleted outright: this
+    table's "nothing is deleted" analogue is ``enabled``, not row survival —
+    "nothing is deleted" is about admission history (who asked, who was let
+    in), and a retired rule instance was never that.
+    """
+
+    __tablename__ = "space_rules"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"))
+    rule_type: Mapped[str] = mapped_column(String(64))
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    # None means "always" — see the docstring above for the two narrower shapes.
+    applies_to: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, default=None)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        # "Which rules govern this Space?" — every read this table serves —
+        # filters on space_id alone.
+        Index("ix_space_rules_space", "space_id"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"SpaceRule(id={self.id!r}, space_id={self.space_id!r},"
+            f" rule_type={self.rule_type!r}, enabled={self.enabled!r})"
+        )
 
 
 class Resource(Base):
