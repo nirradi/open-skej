@@ -25,8 +25,12 @@ import type {
   MembershipRole,
   MutatingResult,
   Resource,
+  RuleTypeRead,
   Space,
   SpacePreview,
+  SpaceRuleCreateInput,
+  SpaceRuleRead,
+  SpaceRuleUpdateInput,
 } from './types'
 
 /**
@@ -1130,5 +1134,79 @@ export async function revokeInvitation(
 export async function archiveSpace(publicId: string): Promise<MutatingResult<Space>> {
   return mutatingRequest<Space>(`/spaces/${encodeURIComponent(publicId)}/archive`, {
     method: 'POST',
+  })
+}
+
+/**
+ * `GET /rule-types` — every registered rule type (`rules.REGISTRY`), in the
+ * order an assembled canon runs them.
+ *
+ * Authenticated but deliberately not Space-scoped: this describes what the
+ * product can configure at all, never one tenant's configuration of it, so it
+ * carries no `public_id` and cannot produce `not_found`. `SpaceRulesPage`
+ * reads this once and renders a form per type from its `params` alone —
+ * nothing here or downstream of it names a specific rule type.
+ */
+export async function listRuleTypes(): Promise<AuthenticatedResult<RuleTypeRead[]>> {
+  return authenticatedRequest<RuleTypeRead[]>('/rule-types')
+}
+
+/**
+ * `GET /spaces/{public_id}/rules` — every rule instance configured for this
+ * Space, scoped and unscoped, enabled and disabled alike. Members and up.
+ */
+export async function listSpaceRules(publicId: string): Promise<AuthenticatedResult<SpaceRuleRead[]>> {
+  return authenticatedRequest<SpaceRuleRead[]>(`/spaces/${encodeURIComponent(publicId)}/rules`)
+}
+
+/**
+ * `POST /spaces/{public_id}/rules` — configure a new rule instance. Admin+.
+ *
+ * `invalid_request` covers both an unregistered `rule_type` and `params` that
+ * fail its schema (a missing required parameter, one below its declared
+ * `minimum`) — the server's own client-side-validation-should-have-caught-this
+ * backstop, same as every other malformed-body case in this client.
+ */
+export async function createSpaceRule(
+  publicId: string,
+  body: SpaceRuleCreateInput,
+): Promise<MutatingResult<SpaceRuleRead>> {
+  return mutatingRequest<SpaceRuleRead>(`/spaces/${encodeURIComponent(publicId)}/rules`, {
+    method: 'POST',
+    ...jsonBody(body),
+  })
+}
+
+/**
+ * `PATCH /spaces/{public_id}/rules/{rule_id}` — edit one rule instance in
+ * place. Admin+. `params`, if present, wholesale-replaces what is stored,
+ * re-validated against the row's own (unchanged) `rule_type`; `applies_to`
+ * follows the omit-leaves-alone / explicit-null-clears-to-"always" convention.
+ * `not_found` covers a `rule_id` belonging to another Space, indistinguishable
+ * from one that does not exist at all.
+ */
+export async function updateSpaceRule(
+  publicId: string,
+  ruleId: number,
+  patch: SpaceRuleUpdateInput,
+): Promise<MutatingResult<SpaceRuleRead>> {
+  return mutatingRequest<SpaceRuleRead>(
+    `/spaces/${encodeURIComponent(publicId)}/rules/${ruleId}`,
+    { method: 'PATCH', ...jsonBody(patch) },
+  )
+}
+
+/**
+ * `DELETE /spaces/{public_id}/rules/{rule_id}` — remove a rule instance
+ * outright. Admin+. Resolves to `ok` with `null` data, matching `removeMember`:
+ * the server answers 204 with no body. Unlike pause (`enabled: false`), this
+ * is a real delete — there is no row left to reinstate.
+ */
+export async function deleteSpaceRule(
+  publicId: string,
+  ruleId: number,
+): Promise<MutatingResult<null>> {
+  return mutatingRequest<null>(`/spaces/${encodeURIComponent(publicId)}/rules/${ruleId}`, {
+    method: 'DELETE',
   })
 }

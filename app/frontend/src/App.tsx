@@ -1,6 +1,6 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
-import { AdminPage } from './admin'
+import { AdminPage, SpaceRulesPage } from './admin'
 import { AccountPage, PostLoginRedirect, ProtectedRoute } from './auth'
 import { ResourceCalendarRoute, SpaceListPage, SpacePage } from './space'
 
@@ -80,6 +80,24 @@ function App() {
           element={
             <ProtectedRoute>
               <AdminPage />
+            </ProtectedRoute>
+          }
+        />
+        {/*
+          `/s/{public_id}/rules` — an authenticated admin screen reached by
+          navigating from `/admin`, not a cold-link door: unlike
+          `/s/:publicId` and `/s/:publicId/resources/:resourceId` below, a
+          stranger with no membership has no legitimate reason to land here,
+          so this sits behind `ProtectedRoute` rather than `SpaceAccessGate`.
+          `SpaceRulesPage` itself still renders its own notice for a member
+          who is signed in but not an admin — the guard here only rules out
+          "signed out entirely".
+        */}
+        <Route
+          path="/s/:publicId/rules"
+          element={
+            <ProtectedRoute>
+              <SpaceRulesPage />
             </ProtectedRoute>
           }
         />

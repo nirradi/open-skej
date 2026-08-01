@@ -152,15 +152,20 @@ user holds anywhere in the venue, across all its courts, never per court.
 
 `PATCH /spaces/{public_id}` (admin+) still accepts the seven scalar fields this schedule used to be —
 `opens_at`, `closes_at`, `slot_minutes`, `max_duration_minutes`, `booking_horizon_days`,
-`max_bookings_per_week`, `max_bookings_per_month` — and `SpaceRead` still serves them, so the config
-UI reads and writes the same shape it always has. Neither touches a column: each field writes through
-to the Space's one *unscoped* (`applies_to IS NULL`) instance of the matching rule type, creating or
-deleting the row as the value is set or cleared to `null`, and `SpaceRead` derives its answer by
-reading that row back. A scalar field has no way to name which of several scoped or duplicate
-instances of a type it means, so a second unscoped instance of a type — unreachable through this path,
-but not prevented by the schema — is a conflict this write refuses rather than guesses at. A Resource
-has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}` renames it and
-nothing more.
+`max_bookings_per_week`, `max_bookings_per_month` — and `SpaceRead` still serves them, kept only as a
+compatibility shim until the columns themselves are dropped. Neither touches a column: each field
+writes through to the Space's one *unscoped* (`applies_to IS NULL`) instance of the matching rule
+type, creating or deleting the row as the value is set or cleared to `null`, and `SpaceRead` derives
+its answer by reading that row back. A scalar field has no way to name which of several scoped or
+duplicate instances of a type it means, so a second unscoped instance of a type — unreachable through
+this path, but not prevented by the schema — is a conflict this write refuses rather than guesses at.
+**The admin UI no longer reads or writes through this shim.** `SpaceSchedulePanel` edits only the
+Space's `timezone` now — the one property its owner calls truly configurable and not a rule — and
+every rule instance, including the six that used to live on this scalar path, is edited on its own
+page at `/s/{public_id}/rules` (`SpaceRulesPage`), directly against the rules API below. The scalar
+shim survives only for whatever external caller still targets it, not for this product's own UI. A
+Resource has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}` renames it
+and nothing more.
 
 **`opens_at` and `closes_at` are stored together, in one `availability_hours` row, required together.**
 A row with one bound missing is not a state the rule type can build from, so a `PATCH` that would leave

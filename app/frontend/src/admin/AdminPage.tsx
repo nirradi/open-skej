@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 import { listSpaces, type Space } from '../api'
 import { AccessRequestsPanel } from './AccessRequestsPanel'
@@ -18,12 +19,13 @@ type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: stri
  * ## What this screen is, and what it is not
  *
  * It manages **people** — members and their roles, the access-request queue,
- * invitations, and archiving — and the minimal **schedule** surface
- * `DEFERRED.md` item 2 calls for: the Space's operating hours, slot interval,
- * and IANA timezone (task 4.13a moved hours and slot interval off Resources
- * and onto the Space itself). It is not a general configuration surface — no
- * Resource create/archive, no rule parameters (task 4.13b) — see
- * `SpaceSchedulePanel`.
+ * invitations, and archiving — and the Space's **timezone**, the one property
+ * of its schedule that stays a plain field rather than a rule instance (see
+ * `SpaceSchedulePanel`). Every booking constraint — operating hours, slot
+ * interval, duration and frequency caps — is a `space_rules` row, edited on
+ * its own page at `/s/{public_id}/rules`, linked from here rather than
+ * duplicated into this dashboard. It is not a general configuration surface —
+ * no Resource create/archive lives here either.
  *
  * The Space picker below is a list of *memberships*, which is a different thing
  * from a directory. `GET /spaces` returns the Spaces the caller belongs to and
@@ -226,6 +228,24 @@ function SpaceAdmin({
       />
       <InvitationsPanel space={space} />
       <SpaceSchedulePanel space={space} onSpaceChanged={onSpaceChanged} />
+
+      <section
+        className="rounded-lg border border-slate-200 bg-white p-4"
+        data-testid="rules-link-panel"
+      >
+        <h2 className="text-sm font-semibold text-slate-900">Rules</h2>
+        <p className="mt-1 text-xs text-slate-500">
+          Operating hours, slot interval, duration and frequency caps — every booking constraint
+          this Space enforces.
+        </p>
+        <Link
+          to={`/s/${space.public_id}/rules`}
+          className="mt-3 inline-block rounded bg-slate-800 px-3 py-1 text-sm text-white"
+          data-testid="space-rules-link"
+        >
+          Manage rules
+        </Link>
+      </section>
 
       {/* Archiving is owner-only on the server, so an admin is not offered it. */}
       {space.my_role === 'owner' ? (

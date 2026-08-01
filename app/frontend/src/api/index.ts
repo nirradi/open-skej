@@ -8,7 +8,9 @@ export {
   createInvitation,
   createResourceBooking,
   createSpace,
+  createSpaceRule,
   denyAccessRequest,
+  deleteSpaceRule,
   getCurrentUser,
   getSessionLostSnapshot,
   getSpace,
@@ -17,6 +19,8 @@ export {
   listMembers,
   listResourceBookings,
   listResources,
+  listRuleTypes,
+  listSpaceRules,
   listSpaces,
   mutatingRequest,
   previewSpace,
@@ -30,6 +34,7 @@ export {
   updateMemberRole,
   updateResource,
   updateSpace,
+  updateSpaceRule,
 } from './client'
 export type { AccessTokenProvider } from './client'
 export type {
@@ -62,6 +67,13 @@ export type {
   MutatingResult,
   PreviewStatus,
   Resource,
+  RuleAppliesTo,
+  RuleParamKind,
+  RuleParamRead,
+  RuleTypeRead,
   Space,
   SpacePreview,
+  SpaceRuleCreateInput,
+  SpaceRuleRead,
+  SpaceRuleUpdateInput,
 } from './types'
