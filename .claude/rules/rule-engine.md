@@ -141,9 +141,13 @@ constructor needs values resolved against the Space's own zone and the booking's
 the raw stored params, which is what keeps every local-to-UTC conversion at the adapter boundary
 instead of inviting a rule type to convert for itself; **`is_single`**, advisory only and never a
 uniqueness constraint, since the engine's flat AND makes two instances of one type coherent — they AND
-to the stricter — even when that is almost certainly not what an admin meant; and a **build function**
-from validated params (plus, for a type with `needs_local_resolution`, a second mapping of
-already-resolved values) to a constructed instance of the class it names.
+to the stricter, which is true for every type whether or not it is flagged. For a type like
+`max_bookings_per_week` a second instance is almost certainly not what an admin meant, so it is
+`is_single`; `availability_hours` and `max_duration` are deliberately **not**, because scoping each
+instance to a different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as
+two `availability_hours` rows — is the intended way to use them, not a mistake to warn about. And a
+**build function** from validated params (plus, for a type with `needs_local_resolution`, a second
+mapping of already-resolved values) to a constructed instance of the class it names.
 
 **Rule order comes from a type's declared priority, never from row order, insertion order, or an
 admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of
