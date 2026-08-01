@@ -37,6 +37,7 @@ import {
   type SelectedInterval,
 } from '../calendar'
 import { buildCalendarConfig } from '../config'
+import { SYSTEM_TIME_ZONE, zonedCalendarDate } from '../timezone'
 import { NotFoundCard, SpaceAccessGate } from './SpaceAccessGate'
 
 /**
@@ -103,6 +104,17 @@ export function ResourceCalendarPage() {
   const [searchParams, setSearchParams] = useSearchParams()
 
   /**
+   * The zone every displayed and submitted time on this page resolves
+   * through: the Space's own `timezone` once the header fetch resolves it,
+   * and the environment's own zone as a bootstrapping placeholder before
+   * that — the same placeholder `calendarConfig`'s own module default uses,
+   * for the same reason: there is no Space yet to have a real zone. Never a
+   * viewer preference — see `timezone.ts` and `ops/DEFERRED.md` item 19 for
+   * why that was rejected outright.
+   */
+  const timeZone = header?.space.timezone ?? SYSTEM_TIME_ZONE
+
+  /**
    * The week to render, derived from the URL rather than mirrored into a
    * `useState` — task 5.8's whole point. A `useState` seeded from `?week=`
    * would go stale the moment the URL changes by any means this component
@@ -110,11 +122,36 @@ export function ResourceCalendarPage() {
    * shape exists to prevent. A malformed or out-of-range value reads as
    * `null` and falls back to the current week silently: it is a URL a person
    * can type.
+   *
+   * "The current week" means the Space's today, read through `timeZone` —
+   * see `week.ts`'s `zonedCalendarDate` — so the fallback here and the grid's
+   * own navigation bounds can never name two different current weeks.
+   *
+   * Stabilised by *value*, not merely memoised, because `timeZone` itself
+   * changes exactly once in a normal session — from the bootstrapping
+   * placeholder to the Space's real zone, the moment the header fetch
+   * resolves (see `timeZone` above). `useMemo` alone would hand `CalendarGrid`
+   * a freshly-constructed `Date` at that moment even when the placeholder and
+   * the real zone name the identical calendar week (the common case — most
+   * viewers are not near a day boundary), and `CalendarGrid`'s own booking
+   * fetch keys an effect off this object's identity, not just its value: a
+   * new-but-equal `Date` re-fires that effect and hands a booking's second,
+   * empty mock response to a test — or a real fetch — that had no reason to
+   * expect one. Comparing by `getTime()` here and only replacing the stored
+   * `Date` when the value actually differs is what keeps `weekStart`
+   * referentially stable across that transition whenever the two zones agree
+   * on what "this week" is.
    */
-  const weekStart = useMemo(
-    () => parseWeekStartParam(searchParams.get('week'), now) ?? startOfWeek(now),
-    [now, searchParams],
+  const computedWeekStart = useMemo(
+    () =>
+      parseWeekStartParam(searchParams.get('week'), now, timeZone) ??
+      startOfWeek(zonedCalendarDate(now, timeZone)),
+    [now, searchParams, timeZone],
   )
+  const [weekStart, setWeekStart] = useState(computedWeekStart)
+  if (weekStart.getTime() !== computedWeekStart.getTime()) {
+    setWeekStart(computedWeekStart)
+  }
 
   /**
    * Pushes a new `?week=`, so Back walks week by week the way a person
@@ -190,11 +227,12 @@ export function ResourceCalendarPage() {
    *
    * An `'incoherent'` result (see `coherenceIssue` in `config.ts`) means this
    * Space's `slot_minutes` / `opens_at` / `closes_at` cannot describe a valid
-   * grid — a bad admin edit, or the `DEFERRED.md` item 17 shape where a
-   * Space's local hours are unusable in the first place. Rather than guess at
-   * a grid from data that cannot produce one, the calendar is replaced with a
-   * notice: the grid must never offer what the server will refuse, and a
-   * best-effort window built from nonsense data is exactly that risk.
+   * grid — a bad admin edit, or the `DEFERRED.md` item 18 shape where a
+   * Space's local hours cross its own local midnight and are unrepresentable
+   * in the first place. Rather than guess at a grid from data that cannot
+   * produce one, the calendar is replaced with a notice: the grid must never
+   * offer what the server will refuse, and a best-effort window built from
+   * nonsense data is exactly that risk.
    *
    * Memoized on `header`: `CalendarGrid` puts this in the dependency array of
    * both `selectedInterval` and the effect that reports it upward through
@@ -281,12 +319,14 @@ export function ResourceCalendarPage() {
             booking={selectedBooking}
             canCancelAnyone={canCancelAnyone}
             onCalendarChanged={handleCalendarChanged}
+            timeZone={timeZone}
           />
           <BookingPanel
             publicId={publicId}
             resourceId={resourceId}
             selection={selection}
             onCalendarChanged={handleCalendarChanged}
+            timeZone={timeZone}
           />
         </div>
       </div>

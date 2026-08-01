@@ -16,9 +16,32 @@
  * every booking and returns `rule_denied` regardless of what the grid allowed.
  * The point of duplicating the bound here is the converse: the grid must never
  * *offer* something the server will refuse.
+ *
+ * ## Calendar dates are zone-agnostic; instants are not
+ *
+ * A `day` passed around this module — `weekStart`, an entry of `daysOfWeek`,
+ * the argument to `toDateKey` — is a **calendar date carrier**: a `Date` built
+ * from and read back through the local `Date` constructor and local getters
+ * purely to hold a `(year, month, day)` triple. Two carriers are "the same
+ * day" or "one day apart" by that triple alone, and every function that only
+ * moves or compares carriers (`startOfDay`, `addDays`, `startOfWeek`,
+ * `daysOfWeek`, `toDateKey`, `dateFromKey`) needs no zone at all, because a
+ * calendar date is not tied to one — arithmetic over the triple gives the
+ * same answer no matter which zone the environment happens to be running in.
+ *
+ * A carrier stops being zone-agnostic the moment it needs to become a real
+ * instant — a slot's start, a day's opening and closing bound — and that
+ * conversion happens through the Space's own `timeZone`, via `config.ts`'s
+ * `slotStart` and this module's `dayBounds`, both of which go through
+ * `timezone.ts`'s `zonedTimeToInstant`. The other place a zone enters is the
+ * reverse direction: turning `now` — a real instant — into "today"'s carrier,
+ * which `canGoToPreviousWeek`, `canGoToNextWeek` and `parseWeekStartParam` do
+ * through `timezone.ts`'s `zonedCalendarDate` and an explicit `timeZone`
+ * parameter, so that "this week" means the Space's today, not the viewer's.
  */
 
 import { calendarConfig, slotStart, type CalendarConfig } from '../config'
+import { zonedCalendarDate, zonedParts } from '../timezone'
 
 /** Days in a rendered week. Not configurable — a week view shows a week. */
 export const DAYS_PER_WEEK = 7
@@ -81,20 +104,31 @@ export function horizonEnd(now: Date): Date {
  * Whether the week before `weekStart` may be navigated to.
  *
  * False on the current week: earlier weeks contain nothing bookable, and per
- * the plan, viewing past bookings is out of scope this phase.
+ * the plan, viewing past bookings is out of scope this phase. "Current" means
+ * the week containing `now`'s calendar date **in `timeZone`** — the Space's
+ * own zone, per the module docblock, so a viewer whose local date has already
+ * turned over (or has not yet) still sees the same current week the Space
+ * itself would name.
  */
-export function canGoToPreviousWeek(weekStart: Date, now: Date): boolean {
-  return weekStart.getTime() > startOfWeek(now).getTime()
+export function canGoToPreviousWeek(weekStart: Date, now: Date, timeZone: string): boolean {
+  return weekStart.getTime() > startOfWeek(zonedCalendarDate(now, timeZone)).getTime()
 }
 
 /**
  * Whether the week after `weekStart` may be navigated to.
  *
  * True only while that next week still contains at least one bookable day, so
- * paging stops on the week holding the horizon rather than one past it.
+ * paging stops on the week holding the horizon rather than one past it. The
+ * horizon instant itself (`horizonEnd`) is a fixed duration after `now` and
+ * needs no zone; which calendar day it falls on — the boundary actually
+ * compared against — does, for the same reason `canGoToPreviousWeek` reads
+ * "today" in `timeZone` rather than the environment's own zone.
  */
-export function canGoToNextWeek(weekStart: Date, now: Date): boolean {
-  return addDays(weekStart, DAYS_PER_WEEK).getTime() <= startOfDay(horizonEnd(now)).getTime()
+export function canGoToNextWeek(weekStart: Date, now: Date, timeZone: string): boolean {
+  return (
+    addDays(weekStart, DAYS_PER_WEEK).getTime() <=
+    zonedCalendarDate(horizonEnd(now), timeZone).getTime()
+  )
 }
 
 /** Why a slot cannot be selected, or `null` when it can. */
@@ -166,8 +200,14 @@ export function dateFromKey(key: string): Date {
  * falls back to the current week on `null`; this never throws and never
  * signals which of the above happened, because a mistyped URL is not an
  * error a visitor can act on.
+ *
+ * `timeZone` is the Space's own zone, used only to read `now`'s calendar date
+ * for the `earliest` / `latest` bounds below — the same "today means the
+ * Space's today" rule `canGoToPreviousWeek` / `canGoToNextWeek` follow. A
+ * literal `value` from the URL names a calendar date directly and needs no
+ * zone to parse.
  */
-export function parseWeekStartParam(value: string | null, now: Date): Date | null {
+export function parseWeekStartParam(value: string | null, now: Date, timeZone: string): Date | null {
   if (value === null || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null
 
   const parsed = dateFromKey(value)
@@ -177,8 +217,8 @@ export function parseWeekStartParam(value: string | null, now: Date): Date | nul
   }
 
   const weekStart = startOfWeek(parsed)
-  const earliest = startOfWeek(now)
-  const latest = startOfWeek(horizonEnd(now))
+  const earliest = startOfWeek(zonedCalendarDate(now, timeZone))
+  const latest = startOfWeek(zonedCalendarDate(horizonEnd(now), timeZone))
   if (weekStart.getTime() < earliest.getTime() || weekStart.getTime() > latest.getTime()) {
     return null
   }
@@ -187,17 +227,24 @@ export function parseWeekStartParam(value: string | null, now: Date): Date | nul
 }
 
 /**
- * A wall-clock time as `HH:MM`, in the browser's local timezone.
+ * A wall-clock time as `HH:MM`, in an explicit `timeZone`.
  *
  * Forced to 24-hour rather than left to the locale, so that every time in the
  * UI reads the same way. `formatSlotLabel` renders the time axis as `HH:MM`
  * unconditionally; a locale-dependent formatter alongside it produced a grid
  * whose axis said `12:00` while the booking sitting on that row said
  * `12:00 PM`, which looks like two different times at a glance.
+ *
+ * Every caller in the grid itself passes the Space's own `timeZone`, per the
+ * module docblock — a booking block reads the same clock the slot it sits on
+ * does. `timeZone` is a required parameter rather than defaulted so a new
+ * call site cannot silently fall back to the environment's own zone the way
+ * this function used to.
  */
-export function formatClockTime(value: Date): string {
-  const hh = String(value.getHours()).padStart(2, '0')
-  const mm = String(value.getMinutes()).padStart(2, '0')
+export function formatClockTime(value: Date, timeZone: string): string {
+  const { hour, minute } = zonedParts(value, timeZone)
+  const hh = String(hour).padStart(2, '0')
+  const mm = String(minute).padStart(2, '0')
   return `${hh}:${mm}`
 }
 
@@ -209,6 +256,21 @@ export function slotInterval(
 ): { start: Date; end: Date } {
   const start = slotStart(day, index, config)
   return { start, end: new Date(start.getTime() + config.slotMinutes * 60 * 1000) }
+}
+
+/**
+ * The real instants at which the calendar date `day` begins and ends, on the
+ * Space's own clock — midnight to midnight in `config.timeZone`.
+ *
+ * This is what a day *column* actually spans as an interval, and it is what
+ * booking-grouping and pixel-positioning in `CalendarGrid` compare against —
+ * both need the Space's midnight, not the environment's. Built from
+ * `slotStart` at index 0 (always midnight, see `config.ts`) rather than a
+ * fresh conversion, so a day's bounds and its first slot can never disagree
+ * about what midnight resolved to.
+ */
+export function dayBounds(day: Date, config: CalendarConfig = calendarConfig): { start: Date; end: Date } {
+  return { start: slotStart(day, 0, config), end: slotStart(addDays(day, 1), 0, config) }
 }
 
 /**

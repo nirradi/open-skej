@@ -22,6 +22,7 @@ import type { CalendarConfig } from '../config'
 import { CalendarGrid } from './CalendarGrid'
 import { slotsPerDayFor } from '../config'
 import { addDays, DAYS_PER_WEEK, slotTestId, startOfWeek, toDateKey } from './week'
+import { SYSTEM_TIME_ZONE } from '../timezone'
 
 const listResourceBookings = vi.hoisted(() => vi.fn())
 vi.mock('../api', () => ({ listResourceBookings }))
@@ -31,10 +32,23 @@ const NOW = new Date(2026, 6, 22, 14, 30)
 /** The Monday of NOW's week. */
 const MONDAY = startOfWeek(NOW)
 
-const THIRTY: CalendarConfig = { slotMinutes: 30, openMinutes: null, closeMinutes: null }
+// Every config below except the dedicated cross-zone `describe` further down
+// pins `timeZone` to the environment's own zone, so "the Space's clock" and
+// "the environment's clock" are the same thing here — exactly the assumption
+// this suite always ran under, preserved on purpose so the existing
+// assertions (`.disabled`, slot indices, aria-labels built from local wall
+// clock) still mean what they say.
+const SYSTEM_TZ = SYSTEM_TIME_ZONE
+
+const THIRTY: CalendarConfig = { slotMinutes: 30, openMinutes: null, closeMinutes: null, timeZone: SYSTEM_TZ }
 const TEN: CalendarConfig = { ...THIRTY, slotMinutes: 10 }
 /** 09:00-17:00, 30-minute slots — for the tests that need a real hours window. */
-const NINE_TO_FIVE: CalendarConfig = { slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 17 * 60 }
+const NINE_TO_FIVE: CalendarConfig = {
+  slotMinutes: 30,
+  openMinutes: 9 * 60,
+  closeMinutes: 17 * 60,
+  timeZone: SYSTEM_TZ,
+}
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 const RESOURCE_ID = 1
@@ -149,6 +163,44 @@ describe('the grid is driven by config.ts', () => {
     for (let offset = 0; offset < 7; offset += 1) {
       expect(slot(offset, 0)).toBeTruthy()
     }
+  })
+})
+
+describe('the DEFERRED.md item 19 repro: a Space in one zone, a viewer in another', () => {
+  // Exactly the repro recorded in the deferred entry: a Space at
+  // `Europe/Berlin`, open 13:00-22:00. August 3 2026 is a Monday, and Berlin
+  // is on CEST (UTC+2) that week, so the Space's 13:00 opening is 11:00Z —
+  // never 10:00Z, which is what sending the *viewer's* own zone (the item 19
+  // repro used Asia/Jerusalem, UTC+3) would have produced.
+  const BERLIN: CalendarConfig = {
+    slotMinutes: 30,
+    openMinutes: 13 * 60,
+    closeMinutes: 22 * 60,
+    timeZone: 'Europe/Berlin',
+  }
+  const AUGUST_MONDAY = new Date(2026, 7, 3)
+
+  it('renders the 13:00 row as bookable, not greyed', async () => {
+    await renderGrid({ config: BERLIN, initialWeekStart: AUGUST_MONDAY })
+    // 13:00 at 30-minute slots, from midnight, is index 26.
+    const row = screen.getByTestId(slotTestId(AUGUST_MONDAY, 26))
+    expect(row.dataset.blocked).toBeUndefined()
+    expect((row as HTMLButtonElement).disabled).toBe(false)
+    // The slot just before opening is still greyed — the grid draws a real
+    // boundary at 13:00, not an accidentally-permissive one.
+    expect(screen.getByTestId(slotTestId(AUGUST_MONDAY, 25)).dataset.blocked).toBe('out-of-hours')
+  })
+
+  it('selects the exact instant the backend accepts — 11:00Z, not 10:00Z', async () => {
+    const onSelectionChange = vi.fn()
+    await renderGrid({ config: BERLIN, initialWeekStart: AUGUST_MONDAY, onSelectionChange })
+
+    const row = screen.getByTestId(slotTestId(AUGUST_MONDAY, 26))
+    fireEvent.pointerDown(row)
+    fireEvent.pointerUp(window)
+
+    const interval = onSelectionChange.mock.calls.at(-1)?.[0] as { start: Date; end: Date }
+    expect(interval.start.toISOString()).toBe('2026-08-03T11:00:00.000Z')
   })
 })
 

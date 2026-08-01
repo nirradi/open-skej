@@ -22,9 +22,24 @@ import App from './App'
 import * as api from './api'
 import type { Booking } from './api'
 import { AuthModeContext, SessionContext, type Session } from './auth'
-import { bookingTestId, slotTestId, startOfWeek } from './calendar'
+import { bookingTestId, slotTestId } from './calendar'
 
-const NOW = new Date(2026, 6, 20, 9, 0)
+// A calendar-date carrier (see `calendar/week.ts`'s docblock), independent
+// of whichever zone the host running this suite happens to be in — `slotOn`
+// and `bookingAt` build every day they need from this literal, never from
+// `NOW` via local getters. See `NOW`'s own comment for why that distinction
+// matters now that the grid resolves through the Space's own zone.
+const MONDAY = new Date(2026, 6, 20)
+
+// A real instant: 09:00 UTC, July 20 2026. The fixture Space below is
+// `timezone: 'UTC'`, and built via `Date.UTC` rather than the local `Date`
+// constructor precisely because of that — a local construction would name a
+// different real instant on every machine, and once the grid stopped taking
+// its clock from the host and started taking it from the Space (this task),
+// a `NOW` that drifted relative to UTC could land on a different calendar
+// day than `MONDAY` on some hosts and break every index below. Built as UTC,
+// this is unambiguously "Monday, 09:00 on the Space's own clock" everywhere.
+const NOW = new Date(Date.UTC(2026, 6, 20, 9, 0))
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 const RESOURCE_ID = 3
@@ -103,18 +118,22 @@ function renderApp() {
 }
 
 function slotOn(dayOffset: number, index: number): HTMLElement {
-  const day = new Date(startOfWeek(NOW))
+  const day = new Date(MONDAY)
   day.setDate(day.getDate() + dayOffset)
   return screen.getByTestId(slotTestId(day, index))
 }
 
 function bookingAt(dayOffset: number, startHour: number, endHour: number): Booking {
-  const day = new Date(startOfWeek(NOW))
+  const day = new Date(MONDAY)
   day.setDate(day.getDate() + dayOffset)
-  const start = new Date(day)
-  start.setHours(startHour, 0, 0, 0)
-  const end = new Date(day)
-  end.setHours(endHour, 0, 0, 0)
+  // Built directly in UTC, not through the environment's own local `Date`
+  // setters: the fixture Space below is `timezone: 'UTC'`, and the grid now
+  // resolves every slot and booking through the Space's own zone rather than
+  // the environment's, so a booking fixture has to mean the same thing the
+  // grid does — otherwise this suite would only pass on a machine whose own
+  // zone happens to be UTC.
+  const start = new Date(Date.UTC(day.getFullYear(), day.getMonth(), day.getDate(), startHour))
+  const end = new Date(Date.UTC(day.getFullYear(), day.getMonth(), day.getDate(), endHour))
   return {
     id: 1,
     resource_id: 1,

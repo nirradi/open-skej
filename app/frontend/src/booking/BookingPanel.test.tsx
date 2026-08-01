@@ -24,6 +24,7 @@ import { BookingPanel } from './BookingPanel'
 import * as api from '../api'
 import type { Booking } from '../api'
 import type { SelectedInterval } from '../calendar'
+import { SYSTEM_TIME_ZONE } from '../timezone'
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 const RESOURCE_ID = 3
@@ -65,6 +66,7 @@ function renderPanel(sel: SelectedInterval | null = selection) {
       resourceId={RESOURCE_ID}
       selection={sel}
       onCalendarChanged={onCalendarChanged}
+      timeZone={SYSTEM_TIME_ZONE}
     />,
   )
 }
@@ -306,6 +308,7 @@ describe('when the selection moves', () => {
         resourceId={RESOURCE_ID}
         selection={{ start: new Date(2026, 6, 25, 8, 0), end: new Date(2026, 6, 25, 9, 0) }}
         onCalendarChanged={onCalendarChanged}
+        timeZone={SYSTEM_TIME_ZONE}
       />,
     )
 

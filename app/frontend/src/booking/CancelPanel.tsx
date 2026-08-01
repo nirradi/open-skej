@@ -107,6 +107,12 @@ export interface CancelPanelProps {
   canCancelAnyone: boolean
   /** Called after a change the calendar must reflect (any settled cancellation). */
   onCalendarChanged: () => void
+  /**
+   * The Space's own IANA zone — what the day/time summary below states the
+   * booking in, matching `BookingPanel`'s own `timeZone` prop and the grid it
+   * was selected from.
+   */
+  timeZone: string
 }
 
 export function CancelPanel({
@@ -115,6 +121,7 @@ export function CancelPanel({
   booking,
   canCancelAnyone,
   onCalendarChanged,
+  timeZone,
 }: CancelPanelProps) {
   const [result, setResult] = useState<CancelResult>({ kind: 'idle' })
   const [confirming, setConfirming] = useState(false)
@@ -266,10 +273,13 @@ export function CancelPanel({
     )
   }
 
-  const summary = summariseInterval({
-    start: new Date(booking.start_at),
-    end: new Date(booking.end_at),
-  })
+  const summary = summariseInterval(
+    {
+      start: new Date(booking.start_at),
+      end: new Date(booking.end_at),
+    },
+    timeZone,
+  )
   const cancelling = result.kind === 'cancelling'
   // `booking.mine` alone cannot decide this: it is false for an admin looking
   // at a member's booking too. `canCancelAnyone` is what tells an admin's

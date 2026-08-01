@@ -20,6 +20,7 @@ import type { Mock, MockInstance } from 'vitest'
 import { CancelPanel } from './CancelPanel'
 import * as api from '../api'
 import type { Booking } from '../api'
+import { SYSTEM_TIME_ZONE } from '../timezone'
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 const RESOURCE_ID = 3
@@ -62,6 +63,7 @@ function renderPanel(target: Booking | null = booking, canCancelAnyone = false) 
       booking={target}
       canCancelAnyone={canCancelAnyone}
       onCalendarChanged={onCalendarChanged}
+      timeZone={SYSTEM_TIME_ZONE}
     />,
   )
 }
@@ -468,6 +470,7 @@ describe('when the selection moves', () => {
         booking={{ ...booking, id: 43 }}
         canCancelAnyone={false}
         onCalendarChanged={onCalendarChanged}
+        timeZone={SYSTEM_TIME_ZONE}
       />,
     )
 
@@ -489,6 +492,7 @@ describe('when the selection moves', () => {
         booking={null}
         canCancelAnyone={false}
         onCalendarChanged={onCalendarChanged}
+        timeZone={SYSTEM_TIME_ZONE}
       />,
     )
 

@@ -66,6 +66,15 @@ export interface BookingPanelProps {
   selection: SelectedInterval | null
   /** Called after a change that the calendar must reflect (a booking, or a conflict). */
   onCalendarChanged: () => void
+  /**
+   * The Space's own IANA zone — what the day/time summary below states the
+   * selection in. `selection.start` / `.end` are already the correct real
+   * instants (`CalendarGrid` resolves them through the Space's zone before
+   * they ever reach this component); this is only about what clock the
+   * confirmation is *displayed* in, so it reads the same as the grid the
+   * selection was made on.
+   */
+  timeZone: string
 }
 
 export function BookingPanel({
@@ -73,6 +82,7 @@ export function BookingPanel({
   resourceId,
   selection,
   onCalendarChanged,
+  timeZone,
 }: BookingPanelProps) {
   const [result, setResult] = useState<PanelResult>({ kind: 'idle' })
 
@@ -209,7 +219,7 @@ export function BookingPanel({
     )
   }
 
-  const summary = summariseInterval(selection)
+  const summary = summariseInterval(selection, timeZone)
   const submitting = result.kind === 'submitting'
 
   return (

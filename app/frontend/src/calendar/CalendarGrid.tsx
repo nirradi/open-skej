@@ -55,6 +55,7 @@ import {
   bookingTestId,
   canGoToNextWeek,
   canGoToPreviousWeek,
+  dayBounds,
   DAYS_PER_WEEK,
   daysOfWeek,
   formatClockTime,
@@ -63,12 +64,12 @@ import {
   isSlotInPast,
   slotInterval,
   slotTestId,
-  startOfDay,
   startOfWeek,
   toDateKey,
   type SlotBlockedReason,
 } from './week'
 import { isInSelection, rangeBetween, rangeLength, type Selection } from './selection'
+import { SYSTEM_TIME_ZONE, zonedCalendarDate } from '../timezone'
 
 /**
  * Height of a single slot row, in pixels.
@@ -164,12 +165,28 @@ type LoadState =
 /** Copy for a fetch that failed in a way the user cannot act on. */
 const LOAD_ERROR_FALLBACK = "We couldn't load this week's bookings."
 
+// `dayHeaderFormat` / `weekLabelFormat` format calendar-date carriers (see
+// `week.ts`'s docblock), not real instants tied to a Space — formatting one
+// with the environment's own default zone reads back exactly the
+// `(year, month, day)` triple it was built from, regardless of which Space
+// is on screen, so neither needs an explicit `timeZone`.
 const dayHeaderFormat = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric' })
 const weekLabelFormat = new Intl.DateTimeFormat(undefined, {
   month: 'short',
   day: 'numeric',
   year: 'numeric',
 })
+
+/** A real instant as `Mon DD, YYYY, HH:MM`, resolved in an explicit `timeZone`. */
+function formatZonedDateTime(value: Date, timeZone: string): string {
+  const day = new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone,
+  }).format(value)
+  return `${day}, ${formatClockTime(value, timeZone)}`
+}
 
 export function CalendarGrid({
   publicId,
@@ -221,8 +238,16 @@ export function CalendarGrid({
     setSelectedBookingId(null)
   }
 
-  /** Identifies the fetch the grid currently wants an answer to. */
-  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}`
+  /**
+   * Identifies the fetch the grid currently wants an answer to.
+   *
+   * Includes `resolvedConfig.timeZone` alongside `weekStart`: the fetch
+   * window below is resolved through it, so a config swap (the placeholder
+   * zone giving way to the Space's real one, before `weekStart` or either
+   * token has changed) is a genuinely different request, not the same one
+   * settling twice.
+   */
+  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}:${resolvedConfig.timeZone}`
   const load: LoadState | { status: 'loading' } =
     settled !== null && settled.key === requestKey ? settled : { status: 'loading' }
 
@@ -233,8 +258,16 @@ export function CalendarGrid({
 
   useEffect(() => {
     let cancelled = false
-    const from = weekStart
-    const to = addDays(weekStart, DAYS_PER_WEEK)
+    // Midnight-to-midnight on the Space's own clock, not the environment's —
+    // the same reason `bookingsByDay` below goes through `dayBounds` rather
+    // than `weekStart` / `addDays` directly. A raw calendar-date instant
+    // would ask the server for the wrong window whenever the Space's zone
+    // isn't the environment's: a booking in the first few hours of the
+    // Space's week could sit before an environment-midnight `from`, or one in
+    // the last few hours could sit at or after an environment-midnight `to`,
+    // and either way never reach this component to be drawn at all.
+    const from = dayBounds(weekStart, resolvedConfig).start
+    const to = dayBounds(addDays(weekStart, DAYS_PER_WEEK - 1), resolvedConfig).end
 
     void listResourceBookings(publicId, resourceId, from, to).then((result) => {
       // A response for a week the user has already navigated away from would
@@ -269,7 +302,16 @@ export function CalendarGrid({
     return () => {
       cancelled = true
     }
-  }, [publicId, requestKey, resourceId, weekStart])
+    // `weekStart` and `resolvedConfig` are read inside this effect only to
+    // compute `from` / `to`, and `requestKey` already encodes both by value
+    // (`weekStart.getTime()`, `resolvedConfig.timeZone`) — see its own
+    // docblock. Listing the objects themselves here instead would re-fire
+    // this fetch on a fresh-but-equal `Date` or config object, which is
+    // exactly the hazard `ResourceCalendarPage`'s own `weekStart` stabiliser
+    // exists to prevent one layer up; this effect must not reintroduce it
+    // one layer down.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publicId, requestKey, resourceId])
 
   /**
    * The bookings shown, per day.
@@ -289,11 +331,13 @@ export function CalendarGrid({
     }))
 
     return days.map((day) => {
-      const dayStart = startOfDay(day)
-      const dayEnd = addDays(day, 1)
+      // Midnight to midnight on the Space's own clock — a booking that
+      // straddles the environment's midnight but not the Space's must still
+      // group with the one day column it actually belongs to.
+      const { start: dayStart, end: dayEnd } = dayBounds(day, resolvedConfig)
       return parsed.filter((entry) => intervalsOverlap(entry.start, entry.end, dayStart, dayEnd))
     })
-  }, [bookings, days])
+  }, [bookings, days, resolvedConfig])
 
   // ---- What a user may click -------------------------------------------
 
@@ -409,10 +453,16 @@ export function CalendarGrid({
 
   // ---- Navigation -------------------------------------------------------
 
-  const canPrev = canGoToPreviousWeek(weekStart, now)
-  const canNext = canGoToNextWeek(weekStart, now)
-  const thisWeek = startOfWeek(now)
+  const canPrev = canGoToPreviousWeek(weekStart, now, resolvedConfig.timeZone)
+  const canNext = canGoToNextWeek(weekStart, now, resolvedConfig.timeZone)
+  const thisWeek = startOfWeek(zonedCalendarDate(now, resolvedConfig.timeZone))
   const isCurrentWeek = weekStart.getTime() === thisWeek.getTime()
+
+  // Shown only when it differs from the Space's own zone (the module
+  // docblock's "secondary hint, never a second version of the grid") — the
+  // one place the viewer's own zone appears in this component at all.
+  const viewerTimeZone = SYSTEM_TIME_ZONE
+  const showViewerTimeZoneHint = viewerTimeZone !== resolvedConfig.timeZone
 
   /** Reports the week `deltaWeeks` away from the one currently shown. */
   const goToWeek = (deltaWeeks: number) => {
@@ -464,6 +514,11 @@ export function CalendarGrid({
         </h2>
       </header>
 
+      <p className="text-xs text-slate-500" data-testid="calendar-timezone-note">
+        Times shown in {resolvedConfig.timeZone}
+        {showViewerTimeZoneHint && ` — your own zone is ${viewerTimeZone}`}
+      </p>
+
       {load.status === 'loading' && (
         <p className="text-sm text-slate-500" data-testid="calendar-loading">
           Loading this week's bookings…
@@ -512,7 +567,9 @@ export function CalendarGrid({
 
         {days.map((day, dayIndex) => {
           const dateKey = toDateKey(day)
-          const dayStart = startOfDay(day)
+          // Midnight on the Space's own clock — see `bookingsByDay` above for
+          // why this must not be the environment's midnight.
+          const { start: dayStart } = dayBounds(day, resolvedConfig)
 
           return (
             <div
@@ -583,8 +640,8 @@ export function CalendarGrid({
                       aria-pressed={isSelected}
                       aria-label={
                         booking.mine
-                          ? `Booked ${formatClockTime(start)} to ${formatClockTime(end)}`
-                          : `Booked by someone else, ${formatClockTime(start)} to ${formatClockTime(end)}`
+                          ? `Booked ${formatClockTime(start, resolvedConfig.timeZone)} to ${formatClockTime(end, resolvedConfig.timeZone)}`
+                          : `Booked by someone else, ${formatClockTime(start, resolvedConfig.timeZone)} to ${formatClockTime(end, resolvedConfig.timeZone)}`
                       }
                       // Interactive as of 1.8, and safe to be: see the note at
                       // the top of this file on why intercepting these pointer
@@ -606,7 +663,7 @@ export function CalendarGrid({
                       style={{ top, height: Math.max(0, bottom - top) }}
                       onClick={() => toggleBooking(booking.id)}
                     >
-                      {formatClockTime(start)}
+                      {formatClockTime(start, resolvedConfig.timeZone)}
                     </button>
                   )
                 })}
@@ -619,7 +676,8 @@ export function CalendarGrid({
       {selection !== null && selectedInterval !== null && (
         <p className="text-sm text-slate-700" data-testid="calendar-selection">
           Selected {rangeLength(selection)} slot{rangeLength(selection) === 1 ? '' : 's'}:{' '}
-          {selectedInterval.start.toLocaleString()} – {selectedInterval.end.toLocaleTimeString()}
+          {formatZonedDateTime(selectedInterval.start, resolvedConfig.timeZone)} –{' '}
+          {formatClockTime(selectedInterval.end, resolvedConfig.timeZone)}
         </p>
       )}
     </section>

@@ -270,6 +270,17 @@ than falling back to an invented window. The greying is the same advisory line e
 this screen draws: it must never offer what the server would refuse, and it is never what refuses a
 booking.
 
+**Every clock the grid draws is the Space's own, never the viewer's.** The day columns, the slot
+axis, the greyed hours, and the instant a click submits all resolve through the Space's own
+`timezone` — the same zone `resolve_operating_hours` uses on the backend — via `Intl.DateTimeFormat`
+with an explicit zone, asked fresh per date rather than cached as an offset, for the identical reason
+the backend conversion is repeated per date rather than done once at write time. A viewer whose own
+zone differs from the Space's sees that only as a secondary hint alongside the grid, never a second
+version of it: every member looking at a Space sees one grid, in one clock, so two members can compare
+what a slot means without translating. A per-viewer clock was considered and rejected — it would let
+two members read different times for the same slot, and it makes the operating window wrap midnight
+for anyone far enough from the venue.
+
 **A Space whose schedule cannot describe a grid degrades to a notice on that Space's calendar.** The
 coherence check — a slot length that does not tile the day or land the hours on a boundary, a close
 at or before an open — runs where the configuration is built, not at boot. It once threw at import

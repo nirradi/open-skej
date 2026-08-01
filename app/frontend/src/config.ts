@@ -14,15 +14,15 @@
  * `app/backend/app/rules_stub.py`. Those constants are gone: task 4.13a moved
  * operating hours and slot interval onto the Space, where an admin edits them
  * in `SpaceSchedulePanel`. `buildCalendarConfig` is what turns a Space's own
- * `slot_minutes` / `opens_at` / `closes_at` into a `CalendarConfig` at
- * runtime — `ResourceCalendarPage` calls it once the Space is fetched and
- * passes the result to `CalendarGrid`. **The backend is still authoritative**:
- * it re-evaluates every booking against that same Space's rule canon and
- * returns a `rule_denied` response for anything outside it, regardless of
- * what this file computes. A config built from stale or wrong Space data
- * produces a grid that renders bookable slots the server will refuse — the
- * denial copy will still be correct and friendly, but the user was invited to
- * click something that could never work.
+ * `slot_minutes` / `opens_at` / `closes_at` / `timezone` into a
+ * `CalendarConfig` at runtime — `ResourceCalendarPage` calls it once the
+ * Space is fetched and passes the result to `CalendarGrid`. **The backend is
+ * still authoritative**: it re-evaluates every booking against that same
+ * Space's rule canon and returns a `rule_denied` response for anything
+ * outside it, regardless of what this file computes. A config built from
+ * stale or wrong Space data produces a grid that renders bookable slots the
+ * server will refuse — the denial copy will still be correct and friendly,
+ * but the user was invited to click something that could never work.
  *
  * `calendarConfig`, the module-level default, survives only as the fallback
  * `CalendarGrid` uses when no `config` prop is given (tests, mostly — a real
@@ -31,7 +31,9 @@
  * not enforced (`.claude/rules/identity-and-access.md`), so the honest
  * default is the *whole day* bookable, not the old hardcoded 06:00–23:00
  * window — inventing a window here would be a rule this file has no
- * authority to make up.
+ * authority to make up. Its `timeZone` is `SYSTEM_TIME_ZONE` — the closest
+ * thing to a Space when there is no Space at all, and never presented as a
+ * Space's real zone once one is loaded (see `timezone.ts`).
  *
  * ## The grid always renders the full day
  *
@@ -44,7 +46,25 @@
  * a calendar it was still on. Rendering the full day and greying the rest
  * means a booking is always somewhere on screen, whatever the Space's
  * current hours say.
+ *
+ * ## Every clock in the grid is the Space's own
+ *
+ * `openMinutes` / `closeMinutes` are minutes since midnight on the Space's
+ * own wall clock, and `slotStart` resolves a slot's day-plus-minutes to a
+ * real instant through the Space's own `timeZone` — never the viewer's. The
+ * conversion happens through `timezone.ts`'s `zonedTimeToInstant`, which asks
+ * `Intl.DateTimeFormat` for the zone's actual offset at that specific date
+ * rather than assuming one, so the same 13:00 resolves to a different UTC
+ * instant in July than in January, correctly. Every member looking at a Space
+ * sees the identical grid, in the identical clock, regardless of where they
+ * are; a viewer whose own zone differs from the Space's sees that only as a
+ * secondary hint elsewhere in the UI, never as a second version of the grid.
+ * A per-viewer clock was considered and rejected — it would let two members
+ * read different times for the same slot, and it makes the operating window
+ * wrap midnight for anyone far enough from the venue.
  */
+
+import { SYSTEM_TIME_ZONE, zonedTimeToInstant } from './timezone'
 
 /** Minutes in an hour — named so the arithmetic below reads as intent, not magic. */
 const MINUTES_PER_HOUR = 60
@@ -63,23 +83,31 @@ export interface CalendarConfig {
    */
   slotMinutes: number
   /**
-   * Minutes since midnight, local wall-clock, that the Space opens — inclusive.
-   * `null` means the Space enforces no opening bound: nothing before midnight
-   * is greyed for it.
+   * Minutes since midnight on the Space's own wall clock that it opens —
+   * inclusive. `null` means the Space enforces no opening bound: nothing
+   * before midnight is greyed for it.
    */
   openMinutes: number | null
   /**
-   * Minutes since midnight, local wall-clock, that the Space closes. A
+   * Minutes since midnight on the Space's own wall clock that it closes. A
    * booking may end exactly here. `null` means the Space enforces no closing
    * bound.
    */
   closeMinutes: number | null
+  /**
+   * The Space's own IANA zone (`Europe/Berlin`, never a fixed offset) — what
+   * `openMinutes` / `closeMinutes` are wall-clock times *in*, and what
+   * `slotStart` resolves every rendered slot's real instant through. See the
+   * module docblock's "every clock in the grid is the Space's own".
+   */
+  timeZone: string
 }
 
 export const calendarConfig: CalendarConfig = {
   slotMinutes: 30,
   openMinutes: null,
   closeMinutes: null,
+  timeZone: SYSTEM_TIME_ZONE,
 }
 
 /** How many slot rows the grid renders per day, for an arbitrary config. */
@@ -103,22 +131,27 @@ export function slotStartMinutes(index: number, config: CalendarConfig = calenda
 }
 
 /**
- * The local-time `Date` at which slot `index` starts on the given day.
+ * The real instant at which slot `index` starts on the given day, resolved
+ * through the Space's own `config.timeZone`.
  *
  * `day` contributes only its calendar date; its time component is discarded.
- * Constructed via the `Date` constructor rather than by adding milliseconds so
- * that a slot lands on the intended wall-clock time across a DST boundary.
+ * The date-plus-minutes pair is resolved to an instant by `zonedTimeToInstant`
+ * (`timezone.ts`) rather than by adding milliseconds to a UTC guess, so a slot
+ * lands on the intended wall-clock time across a DST boundary — the same
+ * per-date resolution `operating_hours.py` uses on the backend, and the
+ * reason a Space's 13:00 in July and its 13:00 in January can be (and, near a
+ * DST transition, are) different real instants for the identical wall-clock
+ * label.
  */
 export function slotStart(day: Date, index: number, config: CalendarConfig = calendarConfig): Date {
   const minutes = slotStartMinutes(index, config)
-  return new Date(
+  return zonedTimeToInstant(
     day.getFullYear(),
     day.getMonth(),
     day.getDate(),
     Math.floor(minutes / MINUTES_PER_HOUR),
     minutes % MINUTES_PER_HOUR,
-    0,
-    0,
+    config.timeZone,
   )
 }
 
@@ -162,14 +195,14 @@ export function isSlotOutOfHours(index: number, config: CalendarConfig = calenda
  *    the day, or hours that fall mid-slot, would either truncate the last
  *    slot or grey half of one — silently wrong rather than incoherent, which
  *    is worse.
- * 2. **`closeMinutes` at or before `openMinutes`.** In the frontend's
- *    browser-local model (this task keeps the clock browser-local — task
- *    5.11 moves it to the Space's own zone) this is the closest observable
- *    shadow of `DEFERRED.md` item 17: a Space whose local hours resolve to a
- *    UTC window crossing a calendar day is unusable on the backend, and
- *    every booking against it is denied. This function does not attempt that
- *    resolution — it only refuses to draw a window that is inverted or empty
- *    in whatever clock it is given.
+ * 2. **`closeMinutes` at or before `openMinutes`.** Both are minutes since
+ *    midnight on the Space's own wall clock (see the module docblock), and a
+ *    window that does not advance in that clock is exactly `DEFERRED.md`
+ *    item 18's shape — a venue open past its own local midnight, which
+ *    `operating_hours.py` also requires `opens_at < closes_at` local to
+ *    exclude. This function does not attempt to represent that case; it only
+ *    refuses to draw a window that is inverted or empty in the Space's own
+ *    clock.
  *
  * Not a boot-time assertion (the old `assertConfigIsCoherent` threw and ran
  * once at import time, which was correct for a compile-time constant nobody
@@ -218,7 +251,10 @@ export type CalendarConfigResult =
  * `opens_at` / `closes_at` null means "not enforced" and renders as no
  * restriction — never the old hardcoded 06:00–23:00 window; see the module
  * docblock for why that fallback would be inventing a rule this file has no
- * authority to make up.
+ * authority to make up. `timezone` is carried straight through as `timeZone`:
+ * it is already a validated IANA name by the time a Space reaches the
+ * frontend (`.claude/rules/identity-and-access.md`), so this function's only
+ * job is to not lose it on the way into `CalendarConfig`.
  *
  * Never throws: see `coherenceIssue` for what "incoherent" covers and why a
  * misconfigured Space degrades to a result the caller renders as a notice.
@@ -227,11 +263,13 @@ export function buildCalendarConfig(space: {
   slot_minutes: number | null
   opens_at: string | null
   closes_at: string | null
+  timezone: string
 }): CalendarConfigResult {
   const config: CalendarConfig = {
     slotMinutes: space.slot_minutes ?? calendarConfig.slotMinutes,
     openMinutes: space.opens_at === null ? null : parseClockMinutes(space.opens_at),
     closeMinutes: space.closes_at === null ? null : parseClockMinutes(space.closes_at),
+    timeZone: space.timezone,
   }
   const issue = coherenceIssue(config)
   if (issue !== null) return { status: 'incoherent', message: issue }
