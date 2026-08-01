@@ -981,9 +981,18 @@ def test_operating_hours_are_judged_on_the_pair_the_patch_leaves_behind(
 def test_an_explicit_null_clears_space_schedule_and_rule_parameters(
     api: Api, alice: User, space_a: Space
 ) -> None:
-    """An explicit null clears a schedule/rule-parameter column back to "no
+    """An explicit null clears a schedule/rule-parameter field back to "no
     restriction"; an omitted field is left alone — the same convention
     ``description`` and ``timezone`` already follow.
+
+    ``opens_at``/``closes_at`` are the one pair where "left alone" does not
+    mean "untouched at the storage layer": since task 6.6 both bounds live
+    together in one ``availability_hours`` row, required together
+    (``rules.registry``), so a row missing one bound is not a state this
+    store can represent — mirroring ``_build_canon``'s pre-existing "both or
+    neither" gating. Nulling ``opens_at`` alone therefore clears the whole
+    row, taking the untouched ``closes_at`` down with it, rather than leaving
+    a half-filled row behind for a later PATCH to inherit from.
     """
     client = api.as_user(alice)
     url = f"/spaces/{space_a.public_id}"
@@ -995,8 +1004,7 @@ def test_an_explicit_null_clears_space_schedule_and_rule_parameters(
     body = cleared.json()
     assert body["opens_at"] is None
     assert body["max_duration_minutes"] is None
-    # closes_at, not mentioned in either call, is untouched.
-    assert body["closes_at"] == "17:00:00"
+    assert body["closes_at"] is None
 
 
 @pytest.mark.parametrize(

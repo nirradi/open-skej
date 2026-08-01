@@ -33,6 +33,7 @@ from app.db.session import get_session
 from app.dependencies import get_driver
 from app.identity import service
 from app.identity.models import MembershipRole, Resource, Space, SpaceMembership, User
+from app.identity.schemas import SpaceUpdate
 from app.main import app
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -150,10 +151,14 @@ def space(session: Session, owner: User) -> Space:
     for a Space with no configuration would enforce nothing but
     ``NotInThePastRule``, and ``test_rule_denial_returns_422_and_persists_
     nothing`` needs a real rule to trip.
+
+    Set through ``service.update_space`` rather than the ``Space`` column
+    directly: since task 6.6 the column is read by nothing, and the adapter
+    builds the canon from the Space's ``space_rules`` rows, which only the
+    write-through shim populates.
     """
     space = service.create_space(session, owner, name="Court Club", description="A club")
-    space.max_duration_minutes = 120
-    session.commit()
+    service.update_space(session, space, SpaceUpdate(max_duration_minutes=120))
     return space
 
 
@@ -294,8 +299,7 @@ def test_off_grid_booking_is_refused_by_slot_alignment(
     accepted anything — the split ``rule-engine.md`` warns is only safe as long as the grid is
     advisory and something else is the real boundary. Nothing enforced it server-side until now.
     """
-    space.slot_minutes = 30
-    session.commit()
+    service.update_space(session, space, SpaceUpdate(slot_minutes=30))
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 7)), "end_at": iso(at(10, 22))}
@@ -317,8 +321,7 @@ def test_an_on_grid_booking_is_unaffected_by_slot_alignment(
     api: Api, session: Session, owner: User, space: Space, resource: Resource
 ) -> None:
     """The new rule only refuses what is actually off-grid."""
-    space.slot_minutes = 30
-    session.commit()
+    service.update_space(session, space, SpaceUpdate(slot_minutes=30))
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(11))}

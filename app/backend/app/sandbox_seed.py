@@ -88,9 +88,10 @@ from app.identity.models import (
     SpaceAccessRequest,
     SpaceInvitation,
     SpaceMembership,
+    SpaceRule,
     User,
 )
-from app.identity.schemas import ResourceUpdate
+from app.identity.schemas import ResourceUpdate, SpaceUpdate
 
 # --- Deterministic identities -------------------------------------------------
 # The ``sandbox|`` prefix mirrors ``app.db.bootstrap``'s ``bootstrap|`` one: a
@@ -193,16 +194,19 @@ def _reset(session: Session) -> None:
 
     Children before parents: bookings before the Resources and users they
     reference, the three per-Space queues before the Spaces and users they
-    reference, Resources before Spaces, Spaces before users (``created_by_
-    user_id``), users last. One transaction, so a second run never observes a
-    half-wiped database. This is a disposable sandbox, not the production
-    schema this repository otherwise never deletes from — see the module
-    docstring.
+    reference, ``space_rules`` and Resources before Spaces (task 6.6 gave
+    ``space_rules.space_id`` a foreign key onto ``spaces.id`` with no cascade,
+    matching every other FK in this schema), Spaces before users
+    (``created_by_user_id``), users last. One transaction, so a second run
+    never observes a half-wiped database. This is a disposable sandbox, not
+    the production schema this repository otherwise never deletes from — see
+    the module docstring.
     """
     session.execute(delete(Booking))
     session.execute(delete(SpaceAccessRequest))
     session.execute(delete(SpaceInvitation))
     session.execute(delete(SpaceMembership))
+    session.execute(delete(SpaceRule))
     session.execute(delete(Resource))
     session.execute(delete(Space))
     session.execute(delete(User))
@@ -319,19 +323,32 @@ def run(session: Session) -> None:
     session.commit()
 
     # Space A: non-UTC, owner + admin + member, one schedule shared by two
-    # identical Resources. `create_space` takes no timezone or hours argument
-    # (the config UI is task 4.12/4.13a), so both are set directly on the row
-    # it returns, overriding the defaults it was created with.
+    # identical Resources. `create_space` takes no timezone argument (the
+    # config UI is task 4.12/4.13a), so it is set directly on the row it
+    # returns; the schedule and rule parameters go through
+    # `service.update_space` — the same write-through shim onto `space_rules`
+    # a real `PATCH /spaces` uses (task 6.6) — rather than being assigned to
+    # `Space` columns nothing reads any more. `opens_at`/`closes_at` both
+    # `None` clears the `availability_hours` row `create_space` seeded by
+    # default: Space A deliberately has **no** availability hours, so
+    # `03-sad-path.spec.ts` can assert a duration denial with nothing else
+    # able to refuse first.
     space_a = service.create_space(
         session, owner, name=SPACE_A_NAME, description=SPACE_A_DESCRIPTION
     )
     space_a.timezone = SPACE_A_TIMEZONE
-    space_a.opens_at = SPACE_A_OPENS_AT
-    space_a.closes_at = SPACE_A_CLOSES_AT
-    space_a.slot_minutes = SPACE_A_SLOT_MINUTES
-    space_a.max_duration_minutes = SPACE_A_MAX_DURATION_MINUTES
-    space_a.booking_horizon_days = SPACE_A_BOOKING_HORIZON_DAYS
     session.commit()
+    service.update_space(
+        session,
+        space_a,
+        SpaceUpdate(
+            opens_at=SPACE_A_OPENS_AT,
+            closes_at=SPACE_A_CLOSES_AT,
+            slot_minutes=SPACE_A_SLOT_MINUTES,
+            max_duration_minutes=SPACE_A_MAX_DURATION_MINUTES,
+            booking_horizon_days=SPACE_A_BOOKING_HORIZON_DAYS,
+        ),
+    )
 
     _add_membership(session, space_a, admin, MembershipRole.ADMIN)
     _add_membership(session, space_a, member, MembershipRole.MEMBER)
@@ -356,12 +373,18 @@ def run(session: Session) -> None:
         session, owner, name=SPACE_B_NAME, description=SPACE_B_DESCRIPTION
     )
     space_b.timezone = SPACE_B_TIMEZONE
-    space_b.opens_at = SPACE_B_OPENS_AT
-    space_b.closes_at = SPACE_B_CLOSES_AT
-    space_b.slot_minutes = SPACE_B_SLOT_MINUTES
-    space_b.max_duration_minutes = SPACE_B_MAX_DURATION_MINUTES
-    space_b.max_bookings_per_week = SPACE_B_MAX_BOOKINGS_PER_WEEK
     session.commit()
+    service.update_space(
+        session,
+        space_b,
+        SpaceUpdate(
+            opens_at=SPACE_B_OPENS_AT,
+            closes_at=SPACE_B_CLOSES_AT,
+            slot_minutes=SPACE_B_SLOT_MINUTES,
+            max_duration_minutes=SPACE_B_MAX_DURATION_MINUTES,
+            max_bookings_per_week=SPACE_B_MAX_BOOKINGS_PER_WEEK,
+        ),
+    )
 
     # `create_space` auto-created one Resource ("Main"); add an identical
     # sibling so a manual verification of the weekly cap can put its third

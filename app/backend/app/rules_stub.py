@@ -3,57 +3,61 @@
 The name is historical: this module began as a stub standing in for the engine
 before it existed. It is now a thin **adapter** — it owns no rule logic. Every
 verdict comes from ``rules.evaluate_request`` running a canon **assembled per
-Space**, from that Space's own configuration (``.claude/rules/identity-and-
-access.md``, "A Space is the unit of configuration; a Resource is capacity").
+Space**, from that Space's own ``space_rules`` rows (task 6.6) read through
+``rules.REGISTRY`` (task 6.4) — never from a hardcoded if-chain over scalar
+columns, which is what this module used to be.
 
 Callers build a ``BookingRequest``, a ``SpaceRuleConfig`` describing the Space
-the booking is against, and (when the Space counts bookings) that user's prior
-bookings across the Space, then read ``RuleResult.allowed`` / ``.message``.
-Those three pydantic models are this module's public surface, deliberately
-distinct from the engine's frozen dataclasses of the same names — the API
-boundary validates untrusted input from the wire, the engine boundary
-enforces UTC and the history window. This module is where the two meet, and
-it stays **ORM-free**: it receives ``SpaceRuleConfig`` and history already
-extracted by the router, it does not query for either.
+the booking is against, and (when the Space's canon includes a rule that reads
+history) that user's prior bookings across the Space, then read
+``RuleResult.allowed`` / ``.message``. Those three pydantic models are this
+module's public surface, deliberately distinct from the engine's frozen
+dataclasses of the same names — the API boundary validates untrusted input
+from the wire, the engine boundary enforces UTC and the history window. This
+module is where the two meet, and it stays **ORM-free**: it receives
+``SpaceRuleConfig`` and history already extracted by the router, it does not
+query for either.
 
 Translations that happen here and nowhere else:
 
 * **Timezone.** The engine rejects a non-zero UTC offset outright; this
   boundary converts every datetime to UTC before it reaches the engine. See
-  ``_to_utc``. Availability hours are a second, distinct timezone translation:
-  a Space's ``opens_at``/``closes_at`` are *local* wall-clock hours, resolved
-  to a UTC window for the booking's own date via ``app.operating_hours``
-  before ``AvailabilityHoursRule`` — which only ever speaks UTC — is built.
-  See ``_local_date`` and ``_build_canon``. A Space's ``slot_minutes`` gets a
-  third: ``SlotAlignmentRule`` needs a UTC ``anchor`` instant, resolved as the
-  Space's own local midnight for the booking's date via ``_local_midnight_utc``
-  — never ``opens_at``, so its grid stays independent of the hours rule's own
-  parameter.
+  ``_to_utc``. A ``space_rules`` row's own local values get a second,
+  distinct timezone translation, per rule type, resolved fresh for every
+  booking's own date rather than once at write time (``CLAUDE.md``,
+  "Conversion happens at the boundary, per date, never once at write time"):
+  an ``availability_hours`` row's local ``opens_at``/``closes_at`` resolve to
+  a UTC window via ``app.operating_hours``; a ``slot_alignment`` row's
+  ``anchor`` resolves to the Space's own local midnight via
+  ``_local_midnight_utc``; and both counting rules' ``[window_start,
+  window_end)`` resolve from the local week/month via ``_local_week_bounds``
+  / ``_local_month_bounds``. See ``_resolve_for_row``.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
 * **Canon assembly.** ``_build_canon`` turns a ``SpaceRuleConfig`` into the
   ordered tuple of rules the controller runs — see its docstring for the
-  order and why a null column omits a rule rather than passing a vacuous one.
+  filtering, resolution, and ordering it performs, and for the fail-closed
+  path a row that cannot be built takes.
 """
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, model_validator
 from rules import (
     DEFAULT_CANON,
+    REGISTRY,
+    RULE_ERROR_MESSAGE,
     AvailabilityHoursRule,
     BaseRule,
     BookingHorizonRule,
     CalendarContext,
     HistoryContext,
-    MaxBookingsPerMonthRule,
-    MaxBookingsPerWeekRule,
     MaxDurationRule,
     NotInThePastRule,
-    SlotAlignmentRule,
     UserContext,
     Weekday,
     evaluate_request,
@@ -63,6 +67,8 @@ from rules import BookingRequest as EngineBookingRequest
 from rules import Context as EngineContext
 
 from app.operating_hours import resolve_operating_hours
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_MESSAGE = "Looks good — this slot is available."
 
@@ -79,16 +85,16 @@ _DEFAULT_RESOURCE_ID = "default-resource"
 #: Stated rather than defaulted because the value a weekly cap counts against
 #: must already be a decision somebody made, not whatever the constructor
 #: happened to pick — and it is now read for real, by ``MaxBookingsPerWeekRule``,
-#: whenever a Space's ``max_bookings_per_week`` is set.
+#: whenever a Space's canon includes a ``max_bookings_per_week`` row.
 WEEK_STARTS_ON = Weekday.MONDAY
 
 
 def _canon_rule(rule_type: type):
     """Return the single instance of ``rule_type`` in ``rules.DEFAULT_CANON``.
 
-    ``DEFAULT_CANON`` is no longer what the API runs — see the module
-    docstring — but it remains the *reference* canon: the hand-written values
-    the generation loop is measured against, and the ones the constants below
+    ``DEFAULT_CANON`` is not what the API runs — see the module docstring —
+    but it remains the *reference* canon: the hand-written values the
+    generation loop is measured against, and the ones the constants below
     mirror for callers (tests, the E2E copy-contract assertions) that want the
     values in force absent any per-Space override.
     """
@@ -100,7 +106,8 @@ def _canon_rule(rule_type: type):
 
 #: Reference defaults, mirrored by ``app/e2e/tests/03-sad-path.spec.ts`` and the
 #: backend suite. The canon actually run against a booking is assembled from
-#: that booking's own Space's configuration by ``_build_canon``, not from these.
+#: that booking's own Space's ``space_rules`` rows by ``_build_canon``, not
+#: from these.
 MAX_BOOKING_DURATION: timedelta = _canon_rule(MaxDurationRule).max_duration
 AVAILABILITY_OPEN: time = _canon_rule(AvailabilityHoursRule).opens_at
 AVAILABILITY_CLOSE: time = _canon_rule(AvailabilityHoursRule).closes_at
@@ -138,40 +145,81 @@ class BookingRequest(BaseModel):
 
 
 @dataclass(frozen=True)
+class SpaceRuleRow:
+    """One configured rule instance, as the adapter needs it to build a canon.
+
+    Mirrors a ``space_rules`` row (``app.identity.models.SpaceRule``) closely
+    enough to build from, while staying ORM-free like the rest of this module
+    — the router extracts these fields from the rows it queried and this
+    module never sees the ORM row itself.
+
+    ``id`` breaks ties between two instances of the same ``rule_type`` when
+    the assembled canon is sorted by declared priority
+    (``.claude/rules/rule-engine.md``) — it should be the database row id, so
+    two rows of the same type sort in the order they were created; a caller
+    with no meaningful id (a unit test building a row from scratch) may pass
+    any ``int``, since only the *relative* order across one Space's own rows
+    is ever read.
+
+    ``applies_to`` is ``None`` (always) or one of the two narrower shapes
+    documented on ``SpaceRule`` — a weekday set or a date set, never both.
+    """
+
+    id: int
+    rule_type: str
+    params: dict
+    applies_to: dict | None = None
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class SpaceRuleConfig:
     """The rule-relevant slice of one Space's configuration.
 
-    Built by the router from ``context.space_context.space``, never queried by
-    this module — see the module docstring on why ``rules_stub`` stays
-    ORM-free. ``timezone`` is the Space's IANA zone name, needed to resolve
-    ``opens_at``/``closes_at`` (local wall-clock) to a UTC window per date.
+    Built by the router from ``context.space_context.space``'s ``timezone``
+    and a query for that Space's ``space_rules`` rows — never queried by this
+    module itself (module docstring, "stays ORM-free"). ``timezone`` is the
+    Space's IANA zone name, needed to resolve every row whose registered type
+    has ``needs_local_resolution`` set.
 
-    Every field but ``timezone`` is nullable, mirroring the ``spaces`` columns:
-    null means the corresponding rule is not enforced for this Space
-    (``.claude/rules/identity-and-access.md``). ``NotInThePastRule`` has no
-    field here because it is never optional — you can never book the past,
-    Space configuration or not.
+    This used to be seven optional scalar fields, one per hardcoded rule
+    column; it is now the zone plus ``rules``, a tuple of ``SpaceRuleRow`` —
+    any number of instances of any registered type (task 6.6). A Space with
+    no rows enforces nothing beyond ``NotInThePastRule``, exactly as a Space
+    with every column null used to.
     """
 
     timezone: str
-    opens_at: time | None = None
-    closes_at: time | None = None
-    max_duration_minutes: int | None = None
-    booking_horizon_days: int | None = None
-    slot_minutes: int | None = None
-    max_bookings_per_week: int | None = None
-    max_bookings_per_month: int | None = None
+    rules: tuple[SpaceRuleRow, ...] = field(default_factory=tuple)
 
     @property
-    def counts_history(self) -> bool:
-        """Whether this Space's canon includes a rule that reads booking history.
+    def reads_history(self) -> bool:
+        """Whether *any* enabled row's registered type reads booking history.
 
         The router uses this to decide whether to run the Space-wide history
-        query at all: no counting rule configured means no query, preserving
-        the "no wasted round trip" property this adapter has always documented
-        for the case where nothing would read the result.
+        query at all: nothing configured that would read it means no query,
+        preserving the "no wasted round trip" property this adapter has
+        always documented for the case where nothing would read the result.
+
+        Deliberately over-inclusive rather than exact. Whether a row's
+        ``applies_to`` will actually match depends on the booking's own local
+        date, which is not known yet at the point the router decides whether
+        to run the history query — that decision happens once per request,
+        before ``_build_canon`` ever resolves a date. Counting a row that
+        turns out not to apply is a wasted query on the rare day it is scoped
+        away; the reverse — skipping the query for a row that reads history
+        and *would* apply — is the mistake that actually matters, since it
+        would run a counting rule against no history at all. An unregistered
+        ``rule_type`` reads as "does not read history" here; ``_build_canon``
+        is what turns that row into a denial, and this property only ever
+        decides whether to run a query, never whether to deny.
         """
-        return self.max_bookings_per_week is not None or self.max_bookings_per_month is not None
+        return any(
+            row.enabled
+            and (declared := REGISTRY.get(row.rule_type)) is not None
+            and declared.reads_history
+            for row in self.rules
+        )
 
 
 class RuleResult(BaseModel):
@@ -186,6 +234,22 @@ class RuleResult(BaseModel):
 
     allowed: bool
     message: str
+
+
+class _UnbuildableRuleRowError(Exception):
+    """A ``space_rules`` row could not be turned into a rule instance.
+
+    Raised only by ``_build_canon`` and caught only by ``evaluate`` — it never
+    crosses this module's boundary. Two causes, both configuration-integrity
+    failures rather than a booking-time verdict: ``rule_type`` names nothing
+    in ``REGISTRY`` (a type was renamed or retired out from under a live row),
+    or ``params`` no longer satisfies that type's current schema (a required
+    param went missing, or a stored value is the wrong shape) — see the
+    decisions table in ``ops/plans/stream-6-plan.md``: "a rule that cannot be
+    built is a denial, not a skip". Skipping would silently un-enforce a rule
+    an admin believes is active; this is what keeps that from happening
+    quietly.
+    """
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -213,10 +277,13 @@ def _to_utc(value: datetime) -> datetime:
 def _local_date(instant: datetime, tz_name: str) -> date:
     """The calendar date ``instant`` (any aware datetime) falls on in ``tz_name``.
 
-    Used to pick which date's operating hours to resolve — "conversion happens
-    at the boundary, per date" (``CLAUDE.md``) means the date has to be the
-    Space's own local one, not the UTC date the instant happens to also fall
-    on, which can differ by a day near midnight in either direction.
+    Used to pick which date's rules apply — "conversion happens at the
+    boundary, per date" (``CLAUDE.md``) means the date has to be the Space's
+    own local one, not the UTC date the instant happens to also fall on,
+    which can differ by a day near midnight in either direction. This is also
+    the date every ``applies_to`` weekday/date match is judged against —
+    computed in the Space's own zone, never UTC, which is the same bug class
+    5.12 fixed in the counting rules, arriving in a second place here.
     """
     return instant.astimezone(ZoneInfo(tz_name)).date()
 
@@ -224,13 +291,14 @@ def _local_date(instant: datetime, tz_name: str) -> date:
 def _local_midnight_utc(day: date, tz_name: str) -> datetime:
     """The UTC instant at which ``day`` begins in ``tz_name``.
 
-    The counting rules' boundaries are built from this and nothing else, so a
-    week or a month starts when the *venue's* day starts rather than at UTC
-    midnight. On the handful of dates a zone's DST transition falls at or near
-    local midnight, ``zoneinfo`` resolves the nonexistent or repeated instant by
-    PEP 495 — the same treatment ``app.operating_hours`` already gives operating
-    hours, and for the same reason: a second code path for a few hours a year
-    would buy correctness nobody asked for and nobody could verify by reading.
+    The counting rules' boundaries and ``slot_alignment``'s anchor are both
+    built from this and nothing else, so a week, a month, or a slot grid all
+    start when the *venue's* day starts rather than at UTC midnight. On the
+    handful of dates a zone's DST transition falls at or near local midnight,
+    ``zoneinfo`` resolves the nonexistent or repeated instant by PEP 495 — the
+    same treatment ``app.operating_hours`` already gives operating hours, and
+    for the same reason: a second code path for a few hours a year would buy
+    correctness nobody asked for and nobody could verify by reading.
     """
     return datetime.combine(day, time(0, 0), tzinfo=ZoneInfo(tz_name)).astimezone(timezone.utc)
 
@@ -284,82 +352,146 @@ def _engine_record(booking: BookingRequest) -> EngineBookingRecord:
     )
 
 
+def _row_applies(applies_to: dict | None, on_date: date) -> bool:
+    """Whether a row scoped by ``applies_to`` governs ``on_date``.
+
+    ``on_date`` must already be the booking's own **local** date
+    (``_local_date``, resolved in the Space's own zone) — computing the
+    weekday from a UTC date here would reintroduce 5.12's bug class in a
+    second place (``ops/plans/stream-6-plan.md``, "The weekday of a booking
+    is computed in the Space's zone, never UTC").
+
+    ``None`` means always, per ``SpaceRule``'s documented shape. Scoping is
+    an adapter-level concern applied uniformly before the registry ever
+    builds anything — a rule type declares no day/date handling of its own.
+    """
+    if applies_to is None:
+        return True
+
+    weekdays = applies_to.get("weekdays")
+    if weekdays is not None:
+        return on_date.weekday() in weekdays
+
+    dates = applies_to.get("dates")
+    if dates is not None:
+        return on_date.isoformat() in dates
+
+    # Neither facet key is present. Not a shape this adapter's own writers
+    # ever produce, but not ambiguous either: no restriction named means no
+    # restriction applied, matching `None`.
+    return True
+
+
+def _resolve_for_row(row: SpaceRuleRow, on_date: date, tz_name: str) -> dict:
+    """Resolve whatever ``REGISTRY[row.rule_type]`` needs, from this row's own
+    raw params, against the Space's zone and the booking's own local date.
+
+    Only called for a row whose registered type declares
+    ``needs_local_resolution`` — every local-to-UTC conversion happens here,
+    at the adapter boundary, rather than inviting a rule type to convert for
+    itself (``.claude/rules/rule-engine.md``). Each branch mirrors exactly
+    what the pre-6.6 ``_build_canon`` did inline for the equivalent column.
+
+    Raises ``KeyError``/``TypeError``/``ValueError`` for a row whose
+    ``params`` do not have what this resolution needs (a missing
+    ``opens_at``, an unparseable time string) — ``_build_canon`` treats that
+    identically to a failure inside ``RuleType.build`` itself, since both are
+    "this row's stored params no longer satisfy its type's schema".
+    """
+    if row.rule_type == "availability_hours":
+        opens_at = time.fromisoformat(row.params["opens_at"])
+        closes_at = time.fromisoformat(row.params["closes_at"])
+        utc_open, utc_close = resolve_operating_hours(opens_at, closes_at, tz_name, on_date)
+        return {"opens_at": utc_open, "closes_at": utc_close}
+
+    if row.rule_type == "slot_alignment":
+        return {"anchor": _local_midnight_utc(on_date, tz_name)}
+
+    if row.rule_type == "max_bookings_per_week":
+        window_start, window_end = _local_week_bounds(on_date, tz_name)
+        return {"window_start": window_start, "window_end": window_end}
+
+    if row.rule_type == "max_bookings_per_month":
+        window_start, window_end = _local_month_bounds(on_date, tz_name)
+        return {"window_start": window_start, "window_end": window_end}
+
+    # `REGISTRY[row.rule_type].needs_local_resolution` is true for exactly
+    # these four types today (`rules/rules/registry.py`); a fifth arriving
+    # without this adapter being taught how to resolve it is a genuine
+    # adapter bug, not a bad configuration row, so it is left to raise loudly
+    # rather than being folded into `_UnbuildableRuleRowError`.
+    raise AssertionError(
+        f"rule_type {row.rule_type!r} declares needs_local_resolution, but "
+        "app.rules_stub._resolve_for_row has no case for it"
+    )
+
+
 def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]:
-    """Assemble one Space's canon, in the order that arbitrates denial copy.
+    """Assemble one Space's canon from its ``space_rules`` rows, in priority order.
 
-    ``evaluate_request`` is fail-fast, so the first rule to deny decides the
-    single message a user sees when a request breaks several of the Space's
-    rules at once. The order mirrors ``rules.canon.default_canon``'s own
-    rationale, with ``SlotAlignmentRule`` inserted beside duration and hours
-    and the two counting rules appended after it:
+    ``NotInThePastRule`` is prepended unconditionally — it is never optional,
+    and it has no ``space_rules`` row: it takes no parameters and is always
+    part of every Space's canon, exactly as before task 6.6.
 
-    1. ``NotInThePastRule`` — always present; you can never book the past.
-    2. ``BookingHorizonRule`` — a date rule, so it runs before any remedy the
-       user could apply *within* an otherwise-bookable date.
-    3. ``MaxDurationRule`` — a remedy (shorten it) for a date that is fine.
-    4. ``SlotAlignmentRule`` — another within-date remedy (line the booking up
-       with the grid), so it sits beside duration and hours rather than with
-       the date rules above it or the counting rules below.
-    5. ``AvailabilityHoursRule`` — the other within-date remedy (pick another
-       time), so it follows duration and slot alignment for the same reason
-       duration follows the date rules.
-    6. ``MaxBookingsPerWeekRule`` / 7. ``MaxBookingsPerMonthRule`` — appended
-       last: unlike the five above, a denial here is not something changing
-       *this* request can fix at all — no shorter, earlier, or later booking
-       clears a frequency cap — so it is the least actionable reason to lead
-       with, and every rule that names a fixable problem gets first refusal.
+    Every other row is, in order:
 
-    Each rule is included only when its Space column is set; null means "not
-    enforced" (``.claude/rules/identity-and-access.md``). Availability needs
-    *both* ``opens_at`` and ``closes_at`` before it is built at all.
+    1. **Dropped if disabled.** A disabled row is never assembled — pause is
+       the entire mechanism (``ops/plans/stream-6-plan.md``).
+    2. **Dropped if ``applies_to`` does not match ``on_date``** — see
+       ``_row_applies``. Scoping happens before the registry ever builds
+       anything, uniformly for every rule type.
+    3. **Looked up in ``REGISTRY`` by ``rule_type``.** An id not registered
+       raises ``_UnbuildableRuleRowError``, caught by ``evaluate`` and turned
+       into a denial — never a skip (see that exception's docstring).
+    4. **Resolved, if its type needs it** (``_resolve_for_row``), **and
+       built** via ``RuleType.build``. A ``KeyError``/``TypeError``/
+       ``ValueError`` from either step — a required param missing, a stored
+       value that no longer satisfies the type's schema — is caught and
+       re-raised as the same ``_UnbuildableRuleRowError``.
 
-    ``on_date`` is passed to ``resolve_operating_hours`` unchanged; it is the
-    booking's start date in the Space's own local zone (``_local_date``), not
-    the UTC date, so the correct day's DST offset resolves the window.
-    ``SlotAlignmentRule``'s ``anchor`` is resolved from the same ``on_date``,
-    via ``_local_midnight_utc`` — the Space's own local midnight, never
-    ``opens_at``: anchoring the grid on the hours rule's parameter would
-    couple two independent rule instances and break the moment the two are
-    scoped to different days via a future ``applies_to``.
+    The surviving rules are then **sorted by their type's declared
+    ``priority``, then by row id** for two instances of the same type — never
+    by row insertion order or any other order (``rule-engine.md``: the order
+    arbitrates which denial message a user sees when several rules would
+    refuse the same request, and that is a product decision made once per
+    *type*, not something row order should get to redecide).
+
+    ``on_date`` is the booking's own local date (``_local_date``), not the
+    UTC date — the correct day's DST offset, and the correct local weekday
+    for ``applies_to``, both depend on that.
     """
     canon: list[BaseRule] = [NotInThePastRule()]
+    buildable: list[tuple[int, int, BaseRule]] = []
 
-    if config.booking_horizon_days is not None:
-        canon.append(BookingHorizonRule(days=config.booking_horizon_days))
+    for row in config.rules:
+        if not row.enabled:
+            continue
+        if not _row_applies(row.applies_to, on_date):
+            continue
 
-    if config.max_duration_minutes is not None:
-        canon.append(MaxDurationRule(max_duration=timedelta(minutes=config.max_duration_minutes)))
-
-    if config.slot_minutes is not None:
-        anchor = _local_midnight_utc(on_date, config.timezone)
-        canon.append(SlotAlignmentRule(slot_minutes=config.slot_minutes, anchor=anchor))
-
-    if config.opens_at is not None and config.closes_at is not None:
-        utc_open, utc_close = resolve_operating_hours(
-            config.opens_at, config.closes_at, config.timezone, on_date
-        )
-        canon.append(AvailabilityHoursRule(opens_at=utc_open, closes_at=utc_close))
-
-    if config.max_bookings_per_week is not None:
-        week_start, week_end = _local_week_bounds(on_date, config.timezone)
-        canon.append(
-            MaxBookingsPerWeekRule(
-                max_bookings=config.max_bookings_per_week,
-                window_start=week_start,
-                window_end=week_end,
+        rule_type = REGISTRY.get(row.rule_type)
+        if rule_type is None:
+            raise _UnbuildableRuleRowError(
+                f"space_rules row {row.id} names unregistered rule_type {row.rule_type!r}"
             )
-        )
 
-    if config.max_bookings_per_month is not None:
-        month_start, month_end = _local_month_bounds(on_date, config.timezone)
-        canon.append(
-            MaxBookingsPerMonthRule(
-                max_bookings=config.max_bookings_per_month,
-                window_start=month_start,
-                window_end=month_end,
+        try:
+            resolved = (
+                _resolve_for_row(row, on_date, config.timezone)
+                if rule_type.needs_local_resolution
+                else None
             )
-        )
+            rule = rule_type.build(row.params, resolved)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise _UnbuildableRuleRowError(
+                f"space_rules row {row.id} (rule_type={row.rule_type!r}, "
+                f"params={row.params!r}) could not be built: {exc!r}"
+            ) from exc
 
+        buildable.append((rule_type.priority, row.id, rule))
+
+    buildable.sort(key=lambda entry: (entry[0], entry[1]))
+    canon.extend(rule for _, _, rule in buildable)
     return tuple(canon)
 
 
@@ -374,12 +506,20 @@ def evaluate(
 
     ``history`` is this user's prior confirmed bookings **across every
     Resource in the Space** — the router loads it, capped to
-    ``rules.history_window``, only when ``config.counts_history`` is true, and
+    ``rules.history_window``, only when ``config.reads_history`` is true, and
     passes it empty otherwise. Every entry counts; nothing here filters it
     further (``.claude/rules/rule-engine.md``, "everything in it counts").
 
     ``now`` defaults to the live UTC clock; tests pin it explicitly instead of
     racing the wall clock.
+
+    A ``space_rules`` row that cannot be built into a rule — an unregistered
+    ``rule_type``, or ``params`` that no longer satisfy that type's schema —
+    denies the booking with ``RULE_ERROR_MESSAGE`` rather than skipping the
+    row or raising past this function: fail closed on a bad row, logged
+    loudly so whoever can fix the Space's configuration finds out. This is
+    checked *before* ``evaluate_request`` ever runs, since it is a
+    configuration-integrity failure, not a rule's verdict on this booking.
 
     ``ContextMismatchError`` is not caught. The request and the context are
     both built here from ``booking`` and ``history``, so a mismatch cannot be
@@ -390,8 +530,19 @@ def evaluate(
     """
     utc_now = _to_utc(now) if now is not None else datetime.now(timezone.utc)
     engine_request = _engine_request(booking)
+    on_date = _local_date(engine_request.start_at, config.timezone)
 
-    canon = _build_canon(config, _local_date(engine_request.start_at, config.timezone))
+    try:
+        canon = _build_canon(config, on_date)
+    except _UnbuildableRuleRowError:
+        logger.error(
+            "A space_rules row could not be built while evaluating a booking request for "
+            "user %s on resource %s; denying the request.",
+            booking.user_id,
+            booking.resource_id,
+            exc_info=True,
+        )
+        return RuleResult(allowed=False, message=RULE_ERROR_MESSAGE)
 
     engine_context = EngineContext(
         user=UserContext(user_id=booking.user_id),
