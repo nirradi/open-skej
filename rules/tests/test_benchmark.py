@@ -12,6 +12,7 @@ import pytest
 import benchmark
 from benchmark import (
     GOLDEN_EXAMPLES,
+    BenchmarkCheckpoint,
     BenchmarkReport,
     BenchmarkStatus,
     ExampleReport,
@@ -21,6 +22,7 @@ from benchmark import (
     build_example_report,
     resolve_examples,
     resolve_models,
+    run_benchmark,
     run_model,
 )
 from generation.errors import LLMCallError
@@ -503,3 +505,297 @@ def test_a_full_report_round_trips_through_json_dumps():
     assert restored["models"][0]["examples"][1]["status"] == "call_error"
     assert restored["models"][0]["examples"][1]["cost_usd"] is None
     assert restored["models"][0]["examples"][0]["outcomes"] == ["passed"]
+
+
+def test_example_report_round_trips_through_to_dict_and_from_dict():
+    original = ExampleReport(
+        description="max 1 hour",
+        model="qwen2.5:1.5b",
+        status=BenchmarkStatus.GAVE_UP,
+        succeeded=False,
+        attempts=2,
+        retries=1,
+        outcomes=("rule_rejected", "tests_failed"),
+        llm_calls=4,
+        input_tokens=100,
+        output_tokens=None,
+        cost_usd=0.01,
+        llm_duration_ms=5000,
+        wall_ms=6000.0,
+        last_failure="a dunder attribute",
+    )
+
+    restored = ExampleReport.from_dict(json.loads(json.dumps(original.to_dict())))
+
+    assert restored == original
+
+
+# --------------------------------------------------------------------------------------------
+# BenchmarkCheckpoint — resuming a killed run
+# --------------------------------------------------------------------------------------------
+
+
+def _example(description, model="m", status=BenchmarkStatus.VERIFIED, succeeded=True):
+    return ExampleReport(
+        description=description,
+        model=model,
+        status=status,
+        succeeded=succeeded,
+        attempts=1,
+        retries=0,
+        outcomes=("passed",) if succeeded else (),
+        llm_calls=1,
+        input_tokens=1,
+        output_tokens=1,
+        cost_usd=None,
+        llm_duration_ms=1,
+        wall_ms=1.0,
+        last_failure=None,
+    )
+
+
+def test_a_fresh_checkpoint_has_nothing_completed_for_any_model(tmp_path):
+    checkpoint = BenchmarkCheckpoint.start(
+        tmp_path / "bench.json", client_name="ollama", seed=0, temperature=0.0, retries=3
+    )
+
+    assert checkpoint.completed_for("qwen2.5:1.5b") == {}
+
+
+def test_record_flushes_to_disk_and_is_visible_through_completed_for(tmp_path):
+    path = tmp_path / "bench.json"
+    checkpoint = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    )
+
+    checkpoint.record("qwen2.5:1.5b", _example("max 1 hour"))
+
+    assert path.exists()
+    assert checkpoint.completed_for("qwen2.5:1.5b")["max 1 hour"].description == "max 1 hour"
+    on_disk = json.loads(path.read_text())
+    assert on_disk["models"][0]["examples"][0]["description"] == "max 1 hour"
+
+
+def test_starting_again_at_the_same_path_resumes_what_was_recorded(tmp_path):
+    path = tmp_path / "bench.json"
+    first = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    )
+    first.record("qwen2.5:1.5b", _example("max 1 hour"))
+    first.record("qwen2.5:1.5b", _example("only on weekends", succeeded=False))
+
+    resumed = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    )
+
+    completed = resumed.completed_for("qwen2.5:1.5b")
+    assert set(completed) == {"max 1 hour", "only on weekends"}
+    assert completed["max 1 hour"].succeeded is True
+    assert completed["only on weekends"].succeeded is False
+
+
+def test_a_model_never_recorded_resumes_with_nothing_completed(tmp_path):
+    path = tmp_path / "bench.json"
+    first = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    )
+    first.record("qwen2.5:1.5b", _example("max 1 hour"))
+
+    resumed = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    )
+
+    assert resumed.completed_for("llama3.1:8b") == {}
+
+
+def test_resuming_with_a_different_seed_raises_rather_than_mixing_results(tmp_path):
+    path = tmp_path / "bench.json"
+    BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    ).record("m", _example("max 1 hour"))
+
+    with pytest.raises(ValueError) as excinfo:
+        BenchmarkCheckpoint.start(path, client_name="ollama", seed=7, temperature=0.0, retries=3)
+
+    message = str(excinfo.value)
+    assert "seed=0" in message
+    assert "seed=7" in message
+
+
+def test_resuming_with_a_different_client_raises(tmp_path):
+    path = tmp_path / "bench.json"
+    BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=3
+    ).record("m", _example("max 1 hour"))
+
+    with pytest.raises(ValueError):
+        BenchmarkCheckpoint.start(
+            path, client_name="claude-cli", seed=None, temperature=None, retries=3
+        )
+
+
+# --------------------------------------------------------------------------------------------
+# run_model — reusing checkpointed examples instead of re-running them
+# --------------------------------------------------------------------------------------------
+
+
+def test_run_model_returns_a_cached_example_without_touching_the_client():
+    cached = _example("max 1 hour")
+
+    reports = run_model(
+        ["max 1 hour"],
+        client=_AlwaysBrokenClient(),
+        model="m",
+        retries=0,
+        completed={"max 1 hour": cached},
+    )
+
+    assert reports == [cached]
+
+
+def test_run_model_calls_on_example_only_for_freshly_computed_reports(monkeypatch):
+    fresh_result = LoopResult(
+        description="only on weekends",
+        succeeded=True,
+        attempts=(_attempt(AttemptOutcome.PASSED),),
+        rule_source="class R(BaseRule): ...",
+        model="m",
+    )
+    monkeypatch.setattr(benchmark, "run_generation_loop", lambda *a, **kw: fresh_result)
+    recorded = []
+
+    reports = run_model(
+        ["max 1 hour", "only on weekends"],
+        client=_AlwaysBrokenClient(),
+        model="m",
+        retries=0,
+        completed={"max 1 hour": _example("max 1 hour")},
+        on_example=recorded.append,
+    )
+
+    assert [r.description for r in reports] == ["max 1 hour", "only on weekends"]
+    # Only the fresh one was handed to on_example; the cached one is already persisted.
+    assert [r.description for r in recorded] == ["only on weekends"]
+
+
+def test_run_model_resuming_past_a_recorded_call_error_skips_without_recontacting_the_client(
+    monkeypatch,
+):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("run_generation_loop must not be called for an aborted model")
+
+    monkeypatch.setattr(benchmark, "run_generation_loop", fail_if_called)
+
+    reports = run_model(
+        ["max 1 hour", "only on weekends"],
+        client=_AlwaysBrokenClient(),
+        model="m",
+        retries=0,
+        completed={
+            "max 1 hour": _example("max 1 hour", status=BenchmarkStatus.CALL_ERROR, succeeded=False)
+        },
+    )
+
+    assert reports[0].status is BenchmarkStatus.CALL_ERROR
+    assert reports[1].status is BenchmarkStatus.SKIPPED
+
+
+# --------------------------------------------------------------------------------------------
+# run_benchmark + BenchmarkCheckpoint — the end-to-end resume path
+# --------------------------------------------------------------------------------------------
+
+
+def test_run_benchmark_with_a_checkpoint_skips_examples_already_recorded(tmp_path, monkeypatch):
+    path = tmp_path / "bench.json"
+    seeded = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=0
+    )
+    seeded.record("m", _example("max 1 hour"))
+
+    calls = []
+
+    def fake_loop(description, **kwargs):
+        calls.append(description)
+        return LoopResult(
+            description=description,
+            succeeded=True,
+            attempts=(_attempt(AttemptOutcome.PASSED),),
+            rule_source="class R(BaseRule): ...",
+            model="m",
+        )
+
+    monkeypatch.setattr(benchmark, "run_generation_loop", fake_loop)
+
+    checkpoint = BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=0
+    )
+    report = run_benchmark(
+        client_name="ollama",
+        client=_AlwaysBrokenClient(),
+        models=["m"],
+        descriptions=["max 1 hour", "only on weekends"],
+        retries=0,
+        seed=0,
+        temperature=0.0,
+        checkpoint=checkpoint,
+    )
+
+    # "max 1 hour" was already in the checkpoint; only the new description hit the loop.
+    assert calls == ["only on weekends"]
+    assert [e.description for e in report.models[0].examples] == ["max 1 hour", "only on weekends"]
+    on_disk = json.loads(path.read_text())
+    assert {e["description"] for e in on_disk["models"][0]["examples"]} == {
+        "max 1 hour",
+        "only on weekends",
+    }
+
+
+# --------------------------------------------------------------------------------------------
+# main — wiring --checkpoint through
+# --------------------------------------------------------------------------------------------
+
+
+def test_main_with_checkpoint_passes_a_checkpoint_matching_the_run_parameters(
+    tmp_path, monkeypatch
+):
+    captured: dict = {}
+    _stub_run(monkeypatch, captured)
+
+    benchmark.main(
+        [
+            "--example",
+            "max 1 hour",
+            "--checkpoint",
+            str(tmp_path / "bench.json"),
+        ]
+    )
+
+    checkpoint = captured["checkpoint"]
+    assert isinstance(checkpoint, BenchmarkCheckpoint)
+    assert checkpoint.client_name == "ollama"
+    assert checkpoint.seed == 0
+    assert checkpoint.temperature == pytest.approx(0.0)
+
+
+def test_main_refuses_to_resume_a_checkpoint_with_different_parameters(tmp_path, capsys):
+    path = tmp_path / "bench.json"
+    BenchmarkCheckpoint.start(
+        path, client_name="ollama", seed=0, temperature=0.0, retries=benchmark.MAX_RETRIES
+    ).record("m", _example("max 1 hour"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        benchmark.main(["--example", "max 1 hour", "--seed", "9", "--checkpoint", str(path)])
+
+    assert excinfo.value.code == 2
+    stderr = capsys.readouterr().err
+    assert "seed=0" in stderr
+    assert "seed=9" in stderr
+
+
+def test_main_without_checkpoint_flag_passes_none(monkeypatch):
+    captured: dict = {}
+    _stub_run(monkeypatch, captured)
+
+    benchmark.main(["--example", "max 1 hour"])
+
+    assert captured["checkpoint"] is None
