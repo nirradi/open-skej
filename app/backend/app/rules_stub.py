@@ -24,7 +24,11 @@ Translations that happen here and nowhere else:
   a Space's ``opens_at``/``closes_at`` are *local* wall-clock hours, resolved
   to a UTC window for the booking's own date via ``app.operating_hours``
   before ``AvailabilityHoursRule`` — which only ever speaks UTC — is built.
-  See ``_local_date`` and ``_build_canon``.
+  See ``_local_date`` and ``_build_canon``. A Space's ``slot_minutes`` gets a
+  third: ``SlotAlignmentRule`` needs a UTC ``anchor`` instant, resolved as the
+  Space's own local midnight for the booking's date via ``_local_midnight_utc``
+  — never ``opens_at``, so its grid stays independent of the hours rule's own
+  parameter.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
@@ -49,6 +53,7 @@ from rules import (
     MaxBookingsPerWeekRule,
     MaxDurationRule,
     NotInThePastRule,
+    SlotAlignmentRule,
     UserContext,
     Weekday,
     evaluate_request,
@@ -153,6 +158,7 @@ class SpaceRuleConfig:
     closes_at: time | None = None
     max_duration_minutes: int | None = None
     booking_horizon_days: int | None = None
+    slot_minutes: int | None = None
     max_bookings_per_week: int | None = None
     max_bookings_per_month: int | None = None
 
@@ -284,17 +290,21 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     ``evaluate_request`` is fail-fast, so the first rule to deny decides the
     single message a user sees when a request breaks several of the Space's
     rules at once. The order mirrors ``rules.canon.default_canon``'s own
-    rationale, with the two counting rules appended after it:
+    rationale, with ``SlotAlignmentRule`` inserted beside duration and hours
+    and the two counting rules appended after it:
 
     1. ``NotInThePastRule`` — always present; you can never book the past.
     2. ``BookingHorizonRule`` — a date rule, so it runs before any remedy the
        user could apply *within* an otherwise-bookable date.
     3. ``MaxDurationRule`` — a remedy (shorten it) for a date that is fine.
-    4. ``AvailabilityHoursRule`` — the other within-date remedy (pick another
-       time), so it follows duration for the same reason duration follows the
-       date rules.
-    5. ``MaxBookingsPerWeekRule`` / 6. ``MaxBookingsPerMonthRule`` — appended
-       last: unlike the four above, a denial here is not something changing
+    4. ``SlotAlignmentRule`` — another within-date remedy (line the booking up
+       with the grid), so it sits beside duration and hours rather than with
+       the date rules above it or the counting rules below.
+    5. ``AvailabilityHoursRule`` — the other within-date remedy (pick another
+       time), so it follows duration and slot alignment for the same reason
+       duration follows the date rules.
+    6. ``MaxBookingsPerWeekRule`` / 7. ``MaxBookingsPerMonthRule`` — appended
+       last: unlike the five above, a denial here is not something changing
        *this* request can fix at all — no shorter, earlier, or later booking
        clears a frequency cap — so it is the least actionable reason to lead
        with, and every rule that names a fixable problem gets first refusal.
@@ -306,6 +316,11 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     ``on_date`` is passed to ``resolve_operating_hours`` unchanged; it is the
     booking's start date in the Space's own local zone (``_local_date``), not
     the UTC date, so the correct day's DST offset resolves the window.
+    ``SlotAlignmentRule``'s ``anchor`` is resolved from the same ``on_date``,
+    via ``_local_midnight_utc`` — the Space's own local midnight, never
+    ``opens_at``: anchoring the grid on the hours rule's parameter would
+    couple two independent rule instances and break the moment the two are
+    scoped to different days via a future ``applies_to``.
     """
     canon: list[BaseRule] = [NotInThePastRule()]
 
@@ -314,6 +329,10 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
 
     if config.max_duration_minutes is not None:
         canon.append(MaxDurationRule(max_duration=timedelta(minutes=config.max_duration_minutes)))
+
+    if config.slot_minutes is not None:
+        anchor = _local_midnight_utc(on_date, config.timezone)
+        canon.append(SlotAlignmentRule(slot_minutes=config.slot_minutes, anchor=anchor))
 
     if config.opens_at is not None and config.closes_at is not None:
         utc_open, utc_close = resolve_operating_hours(

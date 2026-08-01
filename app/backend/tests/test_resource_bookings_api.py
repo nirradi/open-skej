@@ -256,17 +256,75 @@ def test_rule_denial_returns_422_and_persists_nothing(
 def test_overlapping_booking_returns_409(
     api: Api, owner: User, space: Space, resource: Resource
 ) -> None:
+    """A partial overlap, both ends on ``space``'s (default 60-minute) grid.
+
+    The second attempt used to start at a half-hour offset — off-grid now that
+    ``slot_minutes`` is enforced (task 6.5) — which would trip the new
+    ``SlotAlignmentRule`` before the overlap constraint ever ran. 10:00-12:00
+    partially overlaps the first booking's 10:00-11:00 just as well and stays
+    on the grid.
+    """
     first = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11))}
     )
     assert first.status_code == 201
 
     response = api.as_user(owner).post(
-        _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(12))}
+        _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(12))}
     )
 
     assert response.status_code == 409
     assert response.json()["error"] == "overlap"
+
+
+# --- Slot alignment (task 6.5) --------------------------------------------------
+
+
+def test_off_grid_booking_is_refused_by_slot_alignment(
+    api: Api,
+    driver: PostgresBookingDriver,
+    session: Session,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    """This exact request succeeds today; the point of task 6.5 is that it no longer does.
+
+    ``slot_minutes`` used to decline to *offer* an off-grid slot in the calendar UI while the API
+    accepted anything — the split ``rule-engine.md`` warns is only safe as long as the grid is
+    advisory and something else is the real boundary. Nothing enforced it server-side until now.
+    """
+    space.slot_minutes = 30
+    session.commit()
+
+    response = api.as_user(owner).post(
+        _url(space, resource), json={"start_at": iso(at(10, 7)), "end_at": iso(at(10, 22))}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "rule_denied"
+
+    bookings = driver.list_bookings(
+        start=DAY - timedelta(days=1),
+        end=DAY + timedelta(days=1),
+        resource_id=resource.id,
+        include_cancelled=True,
+    )
+    assert bookings == []
+
+
+def test_an_on_grid_booking_is_unaffected_by_slot_alignment(
+    api: Api, session: Session, owner: User, space: Space, resource: Resource
+) -> None:
+    """The new rule only refuses what is actually off-grid."""
+    space.slot_minutes = 30
+    session.commit()
+
+    response = api.as_user(owner).post(
+        _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(11))}
+    )
+
+    assert response.status_code == 201, response.text
 
 
 # --- Archived Space: create refused, reads and cancels still work. -------------

@@ -24,6 +24,7 @@ from rules.canon import (
     BookingHorizonRule,
     MaxDurationRule,
     NotInThePastRule,
+    SlotAlignmentRule,
     default_canon,
 )
 from rules.controller import evaluate_request
@@ -174,6 +175,77 @@ def test_durations_are_rendered_the_way_a_person_says_them(duration, rendered):
 def test_a_non_positive_max_duration_is_rejected_at_construction():
     with pytest.raises(ValueError):
         MaxDurationRule(max_duration=timedelta(0))
+
+
+# --- SlotAlignmentRule ----------------------------------------------------------------
+
+#: Midnight on the reference day, in UTC — the shape the adapter always hands this rule: the
+#: Space's own local midnight for the booking's date, already converted to UTC.
+MIDNIGHT = datetime(2026, 7, 20, tzinfo=timezone.utc)
+
+
+def slot_rule(slot_minutes: int = 30, anchor: datetime = MIDNIGHT) -> SlotAlignmentRule:
+    return SlotAlignmentRule(slot_minutes=slot_minutes, anchor=anchor)
+
+
+def test_a_start_and_end_both_on_the_grid_is_allowed():
+    assert slot_rule().evaluate(request(at(10, 0), at(10, 30)), context()).passed
+
+
+def test_an_off_grid_start_is_denied():
+    result = slot_rule().evaluate(request(at(10, 7), at(10, 30)), context())
+    assert not result.passed
+    assert "30-minute grid" in (result.fail_reason or "")
+
+
+def test_an_off_grid_end_with_an_otherwise_aligned_start_is_denied():
+    """Both bounds are checked: an aligned start does not excuse an off-grid end."""
+    result = slot_rule().evaluate(request(at(10, 0), at(10, 22)), context())
+    assert not result.passed
+
+
+def test_a_booking_starting_and_ending_several_slots_later_is_allowed():
+    """The exact boundary case: both bounds fall on slot lines several slots apart, not just one."""
+    assert slot_rule().evaluate(request(at(10, 0), at(11, 30)), context()).passed
+
+
+def test_the_denial_copy_names_the_grid_size():
+    result = slot_rule(slot_minutes=45).evaluate(request(at(10, 0), at(10, 20)), context())
+    assert not result.passed
+    assert "45-minute grid" in (result.fail_reason or "")
+
+
+def test_a_slot_minutes_that_does_not_divide_a_day_is_rejected_at_construction():
+    """1440 must be a whole number of slots; 7 does not divide it."""
+    with pytest.raises(ValueError):
+        SlotAlignmentRule(slot_minutes=7, anchor=MIDNIGHT)
+
+
+def test_a_non_positive_slot_minutes_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        SlotAlignmentRule(slot_minutes=0, anchor=MIDNIGHT)
+
+
+def test_a_naive_anchor_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        SlotAlignmentRule(slot_minutes=30, anchor=datetime(2026, 7, 20))
+
+
+def test_a_non_utc_anchor_offset_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        SlotAlignmentRule(
+            slot_minutes=30, anchor=datetime(2026, 7, 20, tzinfo=timezone(timedelta(hours=2)))
+        )
+
+
+def test_the_grid_is_anchored_on_the_supplied_instant_not_on_utc_midnight():
+    """A non-midnight anchor still defines a valid grid — the rule never assumes its anchor is
+    00:00."""
+    offset_anchor = MIDNIGHT + timedelta(minutes=15)
+    rule = slot_rule(slot_minutes=30, anchor=offset_anchor)
+
+    assert rule.evaluate(request(at(10, 15), at(10, 45)), context()).passed
+    assert not rule.evaluate(request(at(10, 0), at(10, 30)), context()).passed
 
 
 # --- AvailabilityHoursRule ----------------------------------------------------------

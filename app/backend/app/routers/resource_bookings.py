@@ -168,6 +168,7 @@ def _space_rule_config(space: Space) -> SpaceRuleConfig:
         closes_at=space.closes_at,
         max_duration_minutes=space.max_duration_minutes,
         booking_horizon_days=space.booking_horizon_days,
+        slot_minutes=space.slot_minutes,
         max_bookings_per_week=space.max_bookings_per_week,
         max_bookings_per_month=space.max_bookings_per_month,
     )

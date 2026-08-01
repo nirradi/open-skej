@@ -2,7 +2,7 @@
 
 Four things are pinned here, for different reasons.
 
-**The schema itself** — the six stable ids, each with the exact param names its underlying rule
+**The schema itself** — the seven stable ids, each with the exact param names its underlying rule
 class's constructor needs (read against ``canon.py`` / ``frequency.py`` directly, not against this
 module's own memory of them), the documented priority order, and which flags are set on which type.
 A registry that silently drifted from any of these would still import cleanly and would still look
@@ -30,6 +30,7 @@ from rules.canon import (
     BookingHorizonRule,
     MaxDurationRule,
     NotInThePastRule,
+    SlotAlignmentRule,
 )
 from rules.frequency import MaxBookingsPerMonthRule, MaxBookingsPerWeekRule
 from rules.interfaces import (
@@ -69,19 +70,20 @@ def existing_booking(start_at: datetime) -> BookingRecord:
     )
 
 
-# --- the six stable ids, and their declared params ------------------------------------------
+# --- the seven stable ids, and their declared params ------------------------------------------
 
 EXPECTED_IDS = {
     "not_in_the_past",
     "booking_horizon",
     "max_duration",
+    "slot_alignment",
     "availability_hours",
     "max_bookings_per_week",
     "max_bookings_per_month",
 }
 
 
-def test_all_six_stable_ids_are_registered():
+def test_all_seven_stable_ids_are_registered():
     assert set(REGISTRY) == EXPECTED_IDS
 
 
@@ -91,6 +93,7 @@ def test_all_six_stable_ids_are_registered():
         ("not_in_the_past", ()),
         ("booking_horizon", ("days",)),
         ("max_duration", ("max_duration_minutes",)),
+        ("slot_alignment", ("slot_minutes",)),
         ("availability_hours", ("opens_at", "closes_at")),
         ("max_bookings_per_week", ("max_bookings",)),
         ("max_bookings_per_month", ("max_bookings",)),
@@ -115,25 +118,37 @@ def test_stable_ids_are_never_the_python_class_name():
 
 
 def test_priorities_sort_into_the_documented_canon_order():
-    """`rule-engine.md`'s six-element assembled order, now read off declared priority."""
+    """`rule-engine.md`'s seven-element assembled order, now read off declared priority."""
     assert [declared.rule_type for declared in rule_types()] == [
         "not_in_the_past",
         "booking_horizon",
         "max_duration",
+        "slot_alignment",
         "availability_hours",
         "max_bookings_per_week",
         "max_bookings_per_month",
     ]
 
 
+def test_slot_alignment_sits_strictly_between_max_duration_and_availability_hours():
+    """`slot_alignment`'s priority is beside `max_duration`, not with the date or counting rules —
+    the plan's own reasoning for where task 6.5 inserted it."""
+    assert (
+        REGISTRY["max_duration"].priority
+        < REGISTRY["slot_alignment"].priority
+        < REGISTRY["availability_hours"].priority
+    )
+
+
 def test_priorities_are_unique_and_spaced_for_a_later_insertion():
-    """Task 6.5 adds `slot_alignment` between `max_duration` and `availability_hours`; consecutive
-    integers here would force renumbering the whole registry to make room for it."""
+    """Priorities are spaced in multiples of ten rather than consecutive integers, so a later type
+    can still be inserted between two existing ones without renumbering the rest — exactly what
+    let `slot_alignment` land at 35 without moving `availability_hours` off 40."""
     priorities = [declared.priority for declared in rule_types()]
     assert priorities == sorted(priorities)
     assert len(set(priorities)) == len(priorities)
 
-    gap = REGISTRY["availability_hours"].priority - REGISTRY["max_duration"].priority
+    gap = REGISTRY["availability_hours"].priority - REGISTRY["slot_alignment"].priority
     assert gap > 1
 
 
@@ -147,8 +162,11 @@ def test_reads_history_is_true_only_for_the_two_counting_types():
     }
 
 
-def test_needs_local_resolution_is_true_only_for_hours_and_the_two_counting_types():
+def test_needs_local_resolution_is_true_for_hours_slot_alignment_and_the_two_counting_types():
+    """`slot_alignment` needs its `anchor` resolved against the Space's zone and the booking's own
+    date, the same reason `availability_hours` and the counting rules need local resolution."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.needs_local_resolution} == {
+        "slot_alignment",
         "availability_hours",
         "max_bookings_per_week",
         "max_bookings_per_month",
@@ -156,9 +174,9 @@ def test_needs_local_resolution_is_true_only_for_hours_and_the_two_counting_type
 
 
 def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
-    """`availability_hours` and `max_duration` are meant to vary by day via `applies_to`
-    (e.g. "Mon/Wed/Fri 10-15" plus "Tue/Thu 8-12" as two `availability_hours` rows), so a second
-    instance of either is the intended pattern, not a mistake worth warning about."""
+    """`availability_hours`, `max_duration` and `slot_alignment` are meant to vary by day via
+    `applies_to` (e.g. "Mon/Wed/Fri 10-15" plus "Tue/Thu 8-12" as two `availability_hours` rows), so
+    a second instance of any of them is the intended pattern, not a mistake worth warning about."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.is_single} == {
         "not_in_the_past",
         "booking_horizon",
@@ -167,6 +185,7 @@ def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
     }
     assert {rt.rule_type for rt in REGISTRY.values() if not rt.is_single} == {
         "max_duration",
+        "slot_alignment",
         "availability_hours",
     }
 
@@ -224,6 +243,24 @@ def test_build_max_duration_behaves_like_the_class():
     over = request(NOW, NOW + timedelta(hours=2, minutes=30))
     assert built.evaluate(over, context()) == direct.evaluate(over, context())
     assert not built.evaluate(over, context()).passed
+
+
+def test_build_slot_alignment_reads_resolved_anchor_not_a_raw_param():
+    """`SlotAlignmentRule` needs a UTC `anchor` instant — the constructor this build function calls
+    takes it from `resolved`, never from `params`, since resolving the Space's local midnight for
+    the booking's own date is a future adapter's job, exactly like `availability_hours`'s UTC pair.
+    """
+    anchor = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
+    resolved = {"anchor": anchor}
+    built = REGISTRY["slot_alignment"].build({"slot_minutes": 30}, resolved)
+    direct = SlotAlignmentRule(slot_minutes=30, anchor=anchor)
+
+    off_grid = request(NOW + timedelta(minutes=7), NOW + timedelta(minutes=37))
+    assert built.evaluate(off_grid, context()) == direct.evaluate(off_grid, context())
+    assert not built.evaluate(off_grid, context()).passed
+
+    on_grid = request(NOW, NOW + timedelta(minutes=30))
+    assert built.evaluate(on_grid, context()).passed
 
 
 def test_build_availability_hours_reads_resolved_utc_times_not_raw_params():
