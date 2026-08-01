@@ -114,40 +114,63 @@ generic copy and nothing naming the configuration as the cause.
 
 ## The canon
 
-`canon.py` holds the four hand-written request-local rules: `NotInThePastRule()`,
-`BookingHorizonRule(days)`, `MaxDurationRule(max_duration)`, `AvailabilityHoursRule(opens_at,
-closes_at)`. They are written by hand rather than generated — they are the reference the generation
-loop is measured against, and the worked example of the rule shape.
+`canon.py` holds five hand-written request-local rules: `NotInThePastRule()`,
+`BookingHorizonRule(days)`, `MaxDurationRule(max_duration)`, `SlotAlignmentRule(slot_minutes,
+anchor)`, `AvailabilityHoursRule(opens_at, closes_at)`. They are written by hand rather than
+generated — they are the reference the generation loop is measured against, and the worked example
+of the rule shape.
 
 **Parameters live on the instance, never as module constants.** A Space allowing 45-minute bookings
 and one allowing two hours are the same rule with different arguments, so per-Space configuration is
 a change to how the canon is built rather than a change to any rule. `DEFAULT_CANON` is the reference
-assembly of these four at their default values; the canon the API actually runs is built per Space
-(see Backend integration), where a null column omits its rule entirely. `NotInThePastRule` is the
-only one always present — you can never book the past, whatever a Space configures.
+assembly of four of these five at their default values — every one except `SlotAlignmentRule`, whose
+`anchor` is a UTC *instant* tied to a specific date rather than a literal that means the same thing
+on every date it is asked about; a value baked into a module-level constant at import time would be
+correct for the day it was written and silently wrong every day after, the same cached-offset mistake
+`CLAUDE.md` warns against elsewhere. The canon the API actually runs is built per Space (see Backend
+integration), where a null column omits its rule entirely and `SlotAlignmentRule` is constructed
+fresh, with a freshly resolved `anchor`, for every booking. `NotInThePastRule` is the only one always
+present — you can never book the past, whatever a Space configures.
 
-**A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the six
-classes above a runtime identity separate from being importable Python. A registered type declares: a
-**stable string id** (`not_in_the_past`, `max_duration`, `availability_hours`, …) that a future
-`space_rules.rule_type` column stores — never the Python class name, since renaming the class must
-not silently orphan every row that named it; an **ordered parameter schema**, one `RuleParam` per
-constructor argument (name, kind, label, unit, required, a minimum), rich enough to render an admin
-form field and to validate a request body's params against — one schema for both jobs, because two
-independently written ones would drift, and the drift would show up as a form whose own submission
-gets refused; a declared **priority**; **`reads_history`**, true only for the two counting rules, so
-a caller can skip the Space-wide history query when nothing configured would read it;
-**`needs_local_resolution`**, true for `availability_hours` and both counting rules — the three whose
-constructor needs values resolved against the Space's own zone and the booking's own date rather than
-the raw stored params, which is what keeps every local-to-UTC conversion at the adapter boundary
-instead of inviting a rule type to convert for itself; **`is_single`**, advisory only and never a
-uniqueness constraint, since the engine's flat AND makes two instances of one type coherent — they AND
-to the stricter, which is true for every type whether or not it is flagged. For a type like
-`max_bookings_per_week` a second instance is almost certainly not what an admin meant, so it is
-`is_single`; `availability_hours` and `max_duration` are deliberately **not**, because scoping each
-instance to a different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as
-two `availability_hours` rows — is the intended way to use them, not a mistake to warn about. And a
-**build function** from validated params (plus, for a type with `needs_local_resolution`, a second
-mapping of already-resolved values) to a constructed instance of the class it names.
+**`SlotAlignmentRule` denies a booking whose `start_at` or `end_at` is not on the grid** defined by
+`slot_minutes` and an `anchor` UTC instant — both bounds are checked, so an aligned start with an
+off-grid end is denied on the end. The adapter resolves `anchor` as the booking's own **local
+midnight**, converted to UTC, never `opens_at`: anchoring one rule's grid on another rule's parameter
+would couple two independent rule instances, and it breaks the moment the two are scoped to different
+days via `applies_to` — local midnight is a property of the date and the zone alone, both of which
+the adapter already resolves for `AvailabilityHoursRule` and the counting rules for the same reason.
+This closes a real gap rather than tightening a theoretical one: `slot_minutes` was, until this rule
+existed, the one Space column nothing on the server read — the calendar UI declined to *offer* an
+off-grid slot, but the API accepted one anyway, which is exactly the split this document warns about
+elsewhere (the grid is advisory, the engine is the only boundary that counts).
+
+**A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the
+seven classes above a runtime identity separate from being importable Python. A registered type
+declares: a **stable string id** (`not_in_the_past`, `max_duration`, `slot_alignment`,
+`availability_hours`, …) that a future `space_rules.rule_type` column stores — never the Python class
+name, since renaming the class must not silently orphan every row that named it; an **ordered
+parameter schema**, one `RuleParam` per constructor argument (name, kind, label, unit, required, a
+minimum), rich enough to render an admin form field and to validate a request body's params against
+— one schema for both jobs, because two independently written ones would drift, and the drift would
+show up as a form whose own submission gets refused; a declared **priority**; **`reads_history`**,
+true only for the two counting rules, so a caller can skip the Space-wide history query when nothing
+configured would read it; **`needs_local_resolution`**, true for `slot_alignment`,
+`availability_hours` and both counting rules — the four whose constructor needs values resolved
+against the Space's own zone and the booking's own date rather than the raw stored params, which is
+what keeps every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to
+convert for itself; **`is_single`**, advisory only and never a uniqueness constraint, since the
+engine's flat AND makes two instances of one type coherent — they AND to the stricter, which is true
+for every type whether or not it is flagged. For a type like `max_bookings_per_week` a second
+instance is almost certainly not what an admin meant, so it is `is_single`; `availability_hours`,
+`max_duration` and `slot_alignment` are deliberately **not**, because scoping each instance to a
+different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as two
+`availability_hours` rows, or a finer grid on weekday evenings than on a Sunday morning — is the
+intended way to use them, not a mistake to warn about. And a **build function** from validated params
+(plus, for a type with `needs_local_resolution`, a second mapping of already-resolved values) to a
+constructed instance of the class it names. `slot_minutes` must divide 1440 so a day holds a whole
+number of slots; the schema has no field to express that bound yet, so it is enforced only inside
+`SlotAlignmentRule`'s own constructor, a defensive invariant until a later task validates it at the
+API boundary.
 
 **Rule order comes from a type's declared priority, never from row order, insertion order, or an
 admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of
@@ -155,16 +178,20 @@ the same type. Priorities are spaced in multiples of ten rather than assigned co
 later type can be inserted between two existing ones without renumbering the rest of the registry.
 
 **The order a canon assembled this way runs in reproduces `(NotInThePast, BookingHorizon,
-MaxDuration, AvailabilityHours, MaxBookingsPerWeek, MaxBookingsPerMonth)` because that is what each
-type's declared priority sorts to, and it arbitrates user-facing copy.** The controller is fail-fast,
-so the first rule to deny decides the single message shown when a request breaks several rules at
-once. The date rules run first because they reject a booking on *when* it is, which no shortening or
-shifting within the day can fix; telling someone to trim a three-hour booking that sits 90 days out
-sends them to fix the one thing that is not the problem. Duration and availability hours are remedies
-the user can apply to an otherwise bookable date, so they follow. Past and horizon are mutually
-exclusive and never arbitrate against each other. **The counting rules come last** because a
-frequency cap is the one denial no change to *this* request can fix — no shorter, earlier or later
-booking clears it — so every rule naming a fixable problem gets first refusal.
+MaxDuration, SlotAlignment, AvailabilityHours, MaxBookingsPerWeek, MaxBookingsPerMonth)` because that
+is what each type's declared priority sorts to, and it arbitrates user-facing copy.** The controller
+is fail-fast, so the first rule to deny decides the single message shown when a request breaks
+several rules at once. The date rules run first because they reject a booking on *when* it is, which
+no shortening or shifting within the day can fix; telling someone to trim a three-hour booking that
+sits 90 days out sends them to fix the one thing that is not the problem. Duration, slot alignment
+and availability hours are all remedies the user can apply to an otherwise bookable date and time —
+shorten it, line it up with the grid, pick another time — so they follow, in that order: slot
+alignment sits beside duration rather than with the date rules above it or the counting rules below,
+because "line up with the grid" is exactly as fixable-within-the-date as "shorten it" or "pick another
+time" is. Past and horizon are mutually exclusive and never arbitrate against each other. **The
+counting rules come last** because a frequency cap is the one denial no change to *this* request can
+fix — no shorter, earlier or later booking clears it — so every rule naming a fixable problem gets
+first refusal.
 
 **Denial copy is contract, not wording.** `app/e2e/tests/03-sad-path.spec.ts` asserts the
 max-duration message as a full-string match and reproduces the singular/plural and `" and "` join of
@@ -197,11 +224,13 @@ midnight would be admitted deliberately, rather than arriving by accident throug
 `frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n, window_start, window_end)` and
 `MaxBookingsPerMonthRule(n, window_start, window_end)`, the only ones whose verdict depends on
 anything beyond the request.
-They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of the four
-request-local rules in `canon.py`. The API does not run `DEFAULT_CANON`; it assembles a per-Space
-canon that *includes* these two when a Space sets `max_bookings_per_week` / `max_bookings_per_month`.
-Keeping them out of the reference canon is what lets the end-to-end suite assert against a seeded Space
-configured to those four rules' values without a counting rule silently changing the outcome.
+They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of four
+of `canon.py`'s five hand-written rules (every one except `SlotAlignmentRule`, excluded for its own,
+different reason — see "The canon" above). The API does not run `DEFAULT_CANON`; it assembles a
+per-Space canon that *includes* these two when a Space sets `max_bookings_per_week` /
+`max_bookings_per_month`. Keeping them out of the reference canon is what lets the end-to-end suite
+assert against a seeded Space configured to those four rules' values without a counting rule silently
+changing the outcome.
 
 **Neither rule derives its own window — both are handed one.** The window is a half-open
 `[window_start, window_end)` pair of UTC instants passed at construction, and the rule does nothing

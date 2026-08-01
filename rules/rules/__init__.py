@@ -6,6 +6,7 @@ from .canon import (
     BookingHorizonRule,
     MaxDurationRule,
     NotInThePastRule,
+    SlotAlignmentRule,
     default_canon,
 )
 from .controller import RULE_ERROR_MESSAGE, ContextMismatchError, evaluate_request
@@ -46,6 +47,7 @@ __all__ = [
     "NotInThePastRule",
     "BookingHorizonRule",
     "MaxDurationRule",
+    "SlotAlignmentRule",
     "AvailabilityHoursRule",
     "default_canon",
     "DEFAULT_CANON",

@@ -1,4 +1,4 @@
-"""The hand-written canon: the four rules every Space enforces.
+"""The hand-written canon: five rules, four of which form ``DEFAULT_CANON``.
 
 These are hand-written, not generated. They are the reference the AI generation loop is measured
 against, so they are also the worked example of what a rule looks like: parameters on the instance,
@@ -16,18 +16,29 @@ are **UTC clock times**, and ``start_at.time()`` is a UTC wall clock. A Space wh
 06:00 local does not open at ``time(6, 0)`` here unless it happens to sit on UTC. Rendering those
 bounds in a viewer's own timezone is the UI's job; the engine has no timezone to convert from and
 deliberately gains no DST cases.
+
+**``SlotAlignmentRule`` is the fifth rule and the one exception to "four rules, one canon".** Every
+other rule here takes a literal that means the same thing on every date it is asked about — a
+duration, a day count, a clock time. ``SlotAlignmentRule`` takes an ``anchor`` **instant**, which is
+inherently date-bound (the Space's own local midnight on the booking's date, converted to UTC), so a
+literal baked into ``DEFAULT_CANON`` at import time would be correct for the day it was written and
+silently wrong every day after — precisely the cached-offset bug ``CLAUDE.md`` warns against. It is
+therefore never part of ``DEFAULT_CANON``, the same way the frequency rules in ``frequency.py`` are
+registered and importable but kept out of it: an adapter resolves ``anchor`` per booking date and
+builds the rule fresh, never once at start-up.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
 
-from .interfaces import BaseRule, BookingRequest, Context, RuleResult
+from .interfaces import BaseRule, BookingRequest, Context, RuleResult, _require_utc
 
 __all__ = [
     "NotInThePastRule",
     "BookingHorizonRule",
     "MaxDurationRule",
+    "SlotAlignmentRule",
     "AvailabilityHoursRule",
     "DEFAULT_CANON",
     "default_canon",
@@ -112,6 +123,47 @@ class MaxDurationRule(BaseRule):
                 f"Bookings can be at most {_format_duration(self.max_duration)} long,"
                 f" and this one is {_format_duration(request.duration)}."
                 " Please shorten it and try again."
+            )
+        return RuleResult.allow()
+
+
+class SlotAlignmentRule(BaseRule):
+    """Bookings must start and end on the ``slot_minutes`` grid anchored at ``anchor``.
+
+    ``anchor`` is a UTC instant, not a clock time: the adapter resolves it as the Space's own local
+    midnight on the booking's date, converted to UTC, never ``opens_at``. Anchoring this rule's grid
+    on ``AvailabilityHoursRule``'s parameter would couple two independent rule instances, and it
+    breaks outright the moment the two are scoped to different day sets — local midnight is a
+    property of the date and the zone alone, both of which the adapter already resolves for exactly
+    this reason.
+
+    Both bounds are checked independently and **both must land on the grid**: a booking with an
+    aligned start and an off-grid end is denied on the end just as an off-grid start is, since the
+    calendar this Space renders has no row for either.
+    """
+
+    def __init__(self, slot_minutes: int, anchor: datetime) -> None:
+        if slot_minutes <= 0:
+            raise ValueError(
+                f"SlotAlignmentRule.slot_minutes must be positive; got {slot_minutes!r}"
+            )
+        if 1440 % slot_minutes != 0:
+            raise ValueError(
+                "SlotAlignmentRule.slot_minutes must divide 1440 (a whole number of slots per day);"
+                f" got {slot_minutes!r}"
+            )
+        self.slot_minutes = slot_minutes
+        self.anchor = _require_utc(anchor, "SlotAlignmentRule.anchor")
+
+    def _on_grid(self, instant: datetime) -> bool:
+        return (instant - self.anchor) % timedelta(minutes=self.slot_minutes) == timedelta(0)
+
+    def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
+        if not self._on_grid(request.start_at) or not self._on_grid(request.end_at):
+            return RuleResult.deny(
+                f"Bookings must start and end on this Space's {self.slot_minutes}-minute grid,"
+                " and this one doesn't line up with it."
+                " Please pick a start and end time from the calendar's own slots."
             )
         return RuleResult.allow()
 

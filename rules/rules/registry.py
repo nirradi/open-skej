@@ -37,7 +37,9 @@ hand-coding a third of it.
   says the opposite: multiple instances scoped to different days or dates via ``applies_to`` are the
   intended pattern, not a mistake — ``availability_hours`` and ``max_duration`` are both meant to
   vary by day (e.g. "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as two separate ``availability_hours``
-  rows), so a second instance of either warrants no warning at all.
+  rows), so a second instance of either warrants no warning at all. ``slot_alignment`` is the same
+  shape — a club running a finer grid on weekday evenings than on a lazy Sunday morning is scoping
+  slot size by day exactly the way it already scopes hours — so it is ``is_single=False`` too.
 * a **build function** from validated params (and, for a type with ``needs_local_resolution``, a
   second mapping of resolved values) to a constructed instance of the rule it names.
 
@@ -56,7 +58,13 @@ from datetime import timedelta
 from enum import Enum
 from typing import Any
 
-from .canon import AvailabilityHoursRule, BookingHorizonRule, MaxDurationRule, NotInThePastRule
+from .canon import (
+    AvailabilityHoursRule,
+    BookingHorizonRule,
+    MaxDurationRule,
+    NotInThePastRule,
+    SlotAlignmentRule,
+)
 from .frequency import MaxBookingsPerMonthRule, MaxBookingsPerWeekRule
 from .interfaces import BaseRule
 
@@ -72,10 +80,10 @@ __all__ = [
 class ParamKind(str, Enum):
     """The shape of one declared parameter.
 
-    Only two values, because only two are needed by the six types registered below: a plain positive
-    integer (a day count, a minute count, a booking count) and a local wall-clock time of day (an
-    opening or closing hour). A ``str`` subclass so a future API boundary serialises this as the
-    plain string a form or a JSON body already expects, without a translation table.
+    Only two values, because only two are needed by the seven types registered below: a plain
+    positive integer (a day count, a minute count, a booking count) and a local wall-clock time of
+    day (an opening or closing hour). A ``str`` subclass so a future API boundary serialises this as
+    the plain string a form or a JSON body already expects, without a translation table.
     """
 
     INTEGER = "integer"
@@ -92,10 +100,13 @@ class RuleParam:
     those exists. One schema serves both, because two independently written ones would drift, and
     the drift would show up as a form whose own submission gets refused.
 
-    ``minimum`` is the only bound these six types need: every integer parameter registered below
-    must be positive (a zero-day horizon or a zero-minute duration means nothing), and a local time
-    of day has no numeric bound to speak of. Nothing here declares a maximum or a step, because
-    nothing registered needs one — add a bound against the type that actually requires it.
+    ``minimum`` is the only bound these seven types need: every integer parameter registered below
+    must be positive (a zero-day horizon, a zero-minute duration or a zero-minute slot means
+    nothing), and a local time of day has no numeric bound to speak of. Nothing here declares a
+    maximum or a step, because nothing registered needs one — add a bound against the type that
+    actually requires it. ``slot_minutes`` additionally must *divide* 1440, which this schema has no
+    field to express; that enforcement stays inside ``SlotAlignmentRule``'s own constructor until a
+    future task adds it at the API boundary (see the module docstring's build-function note).
     """
 
     name: str
@@ -176,6 +187,17 @@ def _build_max_duration(
     return MaxDurationRule(max_duration=timedelta(minutes=params["max_duration_minutes"]))
 
 
+def _build_slot_alignment(
+    params: Mapping[str, Any], resolved: Mapping[str, Any] | None
+) -> BaseRule:
+    # `SlotAlignmentRule` needs a UTC `anchor` instant, never a stored param: `params` holds only
+    # `slot_minutes`, and `resolved` carries the Space's local midnight for the booking's own date,
+    # converted to UTC by the adapter — the same split `_build_availability_hours` draws between
+    # raw local params and the adapter-resolved UTC values its rule actually speaks.
+    assert resolved is not None
+    return SlotAlignmentRule(slot_minutes=params["slot_minutes"], anchor=resolved["anchor"])
+
+
 def _build_availability_hours(
     params: Mapping[str, Any], resolved: Mapping[str, Any] | None
 ) -> BaseRule:
@@ -210,11 +232,13 @@ def _build_max_bookings_per_month(
 
 # --- the starter registry --------------------------------------------------------------------
 #
-# The six predicates already in force today (`rule-engine.md`, "The canon"). Priority reproduces
-# that section's documented assembled order exactly, spaced in multiples of 10 rather than
-# consecutive integers: a later `SlotAlignmentRule` sits between `MaxDurationRule` and
-# `AvailabilityHoursRule` (its priority "sits beside MaxDurationRule" per the plan this registry
-# comes from), and consecutive integers would force renumbering everything to make room for it.
+# The seven predicates in force today (`rule-engine.md`, "The canon"). Priority reproduces that
+# section's documented assembled order exactly, spaced in multiples of 10 rather than consecutive
+# integers: `slot_alignment` sits at 35, strictly between `max_duration` (30) and
+# `availability_hours` (40) — beside `max_duration` rather than with the date rules or the counting
+# rules, because it is a remedy the user can apply within an otherwise-bookable date and time, the
+# same class of denial as duration and hours. The gap either side is what let it land here without
+# renumbering anything else.
 
 _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
@@ -264,6 +288,25 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         needs_local_resolution=False,
         is_single=False,
         build=_build_max_duration,
+    ),
+    RuleType(
+        rule_type="slot_alignment",
+        label="Slot alignment",
+        priority=35,
+        params=(
+            RuleParam(
+                name="slot_minutes",
+                kind=ParamKind.INTEGER,
+                label="Slot size",
+                unit="minutes",
+                required=True,
+                minimum=1,
+            ),
+        ),
+        reads_history=False,
+        needs_local_resolution=True,
+        is_single=False,
+        build=_build_slot_alignment,
     ),
     RuleType(
         rule_type="availability_hours",
