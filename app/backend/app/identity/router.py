@@ -21,6 +21,7 @@ almost nothing, and the ``POST`` writes a row that grants no access by itself.
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from rules import rule_types
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
@@ -38,13 +39,22 @@ from app.identity.schemas import (
     ResourceCreate,
     ResourceRead,
     ResourceUpdate,
+    RuleTypeRead,
     SpaceCreate,
     SpacePreview,
     SpaceRead,
+    SpaceRuleCreate,
+    SpaceRuleRead,
+    SpaceRuleUpdate,
     SpaceUpdate,
 )
 
 router = APIRouter(prefix="/spaces", tags=["spaces"])
+
+# Rule types are a product-wide description (`rules.REGISTRY`), not one
+# tenant's configuration of them, so this router carries no `/spaces` prefix
+# and no `require_space_role` — see `list_rule_types` below.
+rule_types_router = APIRouter(prefix="/rule-types", tags=["rule-types"])
 
 SessionDep = Annotated[Session, Depends(get_session)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
@@ -78,6 +88,8 @@ AMBIGUOUS_RULE_INSTANCE_DETAIL = (
     "This Space already has more than one instance of that rule configured."
     " Use the rules page to edit a specific one."
 )
+RULE_NOT_FOUND_DETAIL = "No such rule instance in this Space."
+INVALID_OPERATING_HOURS_DETAIL = "Opening time must be earlier than closing time."
 
 
 def _archived() -> HTTPException:
@@ -146,6 +158,33 @@ def _ambiguous_rule_instance() -> HTTPException:
     return HTTPException(
         status_code=status.HTTP_409_CONFLICT, detail=AMBIGUOUS_RULE_INSTANCE_DETAIL
     )
+
+
+def _rule_not_found() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=RULE_NOT_FOUND_DETAIL)
+
+
+def _invalid_operating_hours() -> HTTPException:
+    # Same 422, same copy, as `update_space`'s own inverted-hours check
+    # below: one rule, enforced at two write paths onto the same
+    # `availability_hours` row shape, so it gets one exception type
+    # (`service.InvalidOperatingHoursError`) and one piece of copy rather
+    # than a second implementation of either.
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=INVALID_OPERATING_HOURS_DETAIL,
+    )
+
+
+def _unknown_rule_type(rule_type: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"{rule_type!r} is not a registered rule type.",
+    )
+
+
+def _invalid_rule_params(message: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=message)
 
 
 @router.post("", response_model=SpaceRead, status_code=status.HTTP_201_CREATED)
@@ -222,10 +261,7 @@ def update_space(payload: SpaceUpdate, context: AdminContext, session: SessionDe
         # payload that fails validation, and to the admin filling in the panel
         # it is one — the pair is only invalid once combined with what is
         # already stored, which is why the schema cannot catch it.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Opening time must be earlier than closing time.",
-        )
+        raise _invalid_operating_hours()
     except service.AmbiguousRuleInstanceError:
         raise _ambiguous_rule_instance()
 
@@ -608,3 +644,107 @@ def revoke_invitation(
         raise _invitation_resolved()
 
     return InvitationRead.build(invitation)
+
+
+@router.get("/{public_id}/rules", response_model=list[SpaceRuleRead])
+def list_space_rules(context: MemberContext, session: SessionDep) -> list[SpaceRuleRead]:
+    """Every rule instance configured for this Space, scoped and unscoped,
+    enabled and disabled alike. Members+.
+    """
+    return [SpaceRuleRead.build(rule) for rule in service.list_space_rules(session, context.space)]
+
+
+@router.post(
+    "/{public_id}/rules",
+    response_model=SpaceRuleRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_space_rule(
+    payload: SpaceRuleCreate, context: AdminContext, session: SessionDep
+) -> SpaceRuleRead:
+    """Configure a new rule instance for this Space. Admin+.
+
+    This is the real multi-instance editing path task 6.6's ``PATCH
+    /spaces`` shim explicitly deferred here: creating a second instance of
+    an ``is_single`` type is not refused, since ``is_single`` is advisory
+    only and 6.8's form is where that warning belongs, not this API.
+    """
+    try:
+        rule = service.create_space_rule(
+            session,
+            context.space,
+            rule_type=payload.rule_type,
+            params=payload.params,
+            applies_to=payload.applies_to,
+            enabled=payload.enabled,
+        )
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.UnknownRuleTypeError as exc:
+        raise _unknown_rule_type(exc.rule_type)
+    except service.InvalidRuleParamsError as exc:
+        raise _invalid_rule_params(exc.message)
+    except service.InvalidOperatingHoursError:
+        raise _invalid_operating_hours()
+
+    return SpaceRuleRead.build(rule)
+
+
+@router.patch("/{public_id}/rules/{rule_id}", response_model=SpaceRuleRead)
+def update_space_rule(
+    rule_id: int, payload: SpaceRuleUpdate, context: AdminContext, session: SessionDep
+) -> SpaceRuleRead:
+    """Edit one rule instance in place. Admin+.
+
+    A ``rule_id`` belonging to another Space gets the identical 404 as one
+    that names nothing — see ``service.RuleNotFoundError``. ``rule_type``
+    itself is not an editable field; see ``SpaceRuleUpdate`` for why.
+    """
+    try:
+        rule = service.update_space_rule(session, context.space, rule_id=rule_id, payload=payload)
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.RuleNotFoundError:
+        raise _rule_not_found()
+    except service.UnknownRuleTypeError as exc:
+        raise _unknown_rule_type(exc.rule_type)
+    except service.InvalidRuleParamsError as exc:
+        raise _invalid_rule_params(exc.message)
+    except service.InvalidOperatingHoursError:
+        raise _invalid_operating_hours()
+
+    return SpaceRuleRead.build(rule)
+
+
+@router.delete("/{public_id}/rules/{rule_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_space_rule(rule_id: int, context: AdminContext, session: SessionDep) -> Response:
+    """Remove a rule instance outright. Admin+.
+
+    Unlike every other ``DELETE`` in this module, this is a real delete
+    rather than a status transition or an ``archived_at`` stamp: pause is
+    ``enabled``, and removal here removes the row (``app.identity.models``,
+    ``SpaceRule`` docstring).
+    """
+    try:
+        service.delete_space_rule(session, context.space, rule_id=rule_id)
+    except service.SpaceArchivedError:
+        raise _archived()
+    except service.RuleNotFoundError:
+        raise _rule_not_found()
+
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@rule_types_router.get("", response_model=list[RuleTypeRead])
+def list_rule_types(user: CurrentUser) -> list[RuleTypeRead]:
+    """Every registered rule type (``rules.REGISTRY``), in the order an
+    assembled canon runs them — declared priority, not registration order.
+
+    Authenticated (any signed-in user), but deliberately not Space-scoped:
+    this describes what the product can configure at all, never one
+    tenant's configuration of it, so it carries no ``require_space_role``
+    and is not a candidate for the cross-tenant isolation sweep in
+    ``test_spaces_api.py``, which only walks routes under
+    ``/spaces/{public_id}``.
+    """
+    return [RuleTypeRead.build(rule_type) for rule_type in rule_types()]

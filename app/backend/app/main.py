@@ -6,6 +6,7 @@ from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthError
 from app.identity.models import User
 from app.identity.router import router as spaces_router
+from app.identity.router import rule_types_router
 from app.routers import resource_bookings
 from app.settings import get_settings
 
@@ -26,6 +27,7 @@ app.add_middleware(
 
 app.include_router(resource_bookings.router)
 app.include_router(spaces_router)
+app.include_router(rule_types_router)
 
 if get_settings().sandbox_auth:
     # Conditional on purpose: `/sandbox/token` must not exist at all on a

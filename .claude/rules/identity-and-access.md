@@ -184,6 +184,29 @@ A `timezone` is validated as a real IANA name at the boundary — an unknown nam
 (`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
 operating-hours resolution far from where it was set.
 
+**The rules API is the real multi-instance editing `PATCH /spaces` only ever shimmed toward.**
+`GET /rule-types` describes the product's registered rule types (`rules.REGISTRY`) — authenticated,
+but not Space-scoped, since it names nothing about any one tenant's configuration. Every other route
+is Space-scoped and reads or writes one Space's own `space_rules` rows directly, not through the
+seven-scalar-field shim: `GET`/`POST /spaces/{public_id}/rules` are member+/admin+, and
+`PATCH`/`DELETE /spaces/{public_id}/rules/{id}` are admin+. `POST` and `PATCH` validate `params`
+against the row's own registered type's schema at the boundary — an unknown `rule_type`, a missing
+required parameter, an unknown parameter, or one of the wrong kind or below its declared `minimum`
+is refused with **422** naming the specific parameter, so a later admin form can attach the message
+to the right field rather than a generic complaint. `slot_alignment`'s `slot_minutes` must divide
+1440, enforced here rather than left to surface only at booking time. `availability_hours` reuses the
+identical inverted-hours check `PATCH /spaces` already enforces — an `opens_at` at or after
+`closes_at` on the Space's own wall clock is the same **422**, whichever of the two paths wrote it,
+because the engine cannot tell an inverted pair from a legitimate UTC-day-crossing window and is not
+asked to. A `PATCH` naming only one of `opens_at`/`closes_at` resolves the effective pair against
+what the row already has stored, the same way `PATCH /spaces` does, rather than failing "missing
+required" on a bound the caller never meant to touch. A rule id that names nothing, or names a row
+in another Space, gets the identical **404** on `PATCH`/`DELETE` — the same 404-not-403 treatment a
+foreign Resource id gets, since the lookup is scoped to `space_id` in one query and a foreign id
+discloses nothing about being live elsewhere. `DELETE` is a real delete, unlike everywhere else in
+this schema: `enabled` is already the pause mechanism, so a row nobody wants paused forever should
+not have to exist at all.
+
 **No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
 reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a
 cascade would destroy booking history the moment a Resource or user was removed. A Resource retires

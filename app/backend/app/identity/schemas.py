@@ -23,11 +23,12 @@ is never reachable without first being a member of its Space and its sequential
 id discloses nothing to anyone who is not already there.
 """
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from rules import ParamKind, RuleParam, RuleType
 
 from app.identity.models import (
     AccessRequestStatus,
@@ -38,6 +39,7 @@ from app.identity.models import (
     SpaceAccessRequest,
     SpaceInvitation,
     SpaceMembership,
+    SpaceRule,
     User,
 )
 
@@ -414,3 +416,203 @@ class InvitationRead(BaseModel):
             created_at=invitation.created_at,
             accepted_at=invitation.accepted_at,
         )
+
+
+# --- Rule types and rule instances (task 6.7). -------------------------------
+#
+# `GET /rule-types` describes the product's registered rule types
+# (`rules.REGISTRY`) and is not Space-scoped; the rest of this section is the
+# `/spaces/{public_id}/rules` CRUD onto one Space's `space_rules` rows.
+
+_RULE_TYPE_MAX = 64
+
+
+def _validate_applies_to(value: Optional[dict]) -> Optional[dict]:
+    """Enforce the three legal shapes ``SpaceRule.applies_to`` documents:
+    ``None`` (always), ``{"weekdays": [...]}``, or ``{"dates": [...]}`` —
+    never both facets, never neither, never an extra key. This is a pure
+    shape check with no registry dependency, so it runs here at the wire
+    boundary rather than in ``app.identity.service``, which only validates
+    ``params`` against a rule type's own schema.
+    """
+    if value is None:
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("applies_to must be an object or null")
+
+    has_weekdays = "weekdays" in value
+    has_dates = "dates" in value
+    if has_weekdays and has_dates:
+        raise ValueError("applies_to may carry weekdays or dates, never both")
+    if not has_weekdays and not has_dates:
+        raise ValueError("applies_to must carry exactly one of weekdays or dates")
+
+    extra = set(value) - {"weekdays", "dates"}
+    if extra:
+        raise ValueError(f"applies_to has unexpected key(s): {', '.join(sorted(extra))}")
+
+    if has_weekdays:
+        weekdays = value["weekdays"]
+        if not isinstance(weekdays, list) or not weekdays:
+            raise ValueError("applies_to.weekdays must be a non-empty list")
+        for day in weekdays:
+            if type(day) is not int or not (0 <= day <= 6):
+                raise ValueError(
+                    "applies_to.weekdays must contain integers 0 (Monday) through 6 (Sunday)"
+                )
+    else:
+        dates = value["dates"]
+        if not isinstance(dates, list) or not dates:
+            raise ValueError("applies_to.dates must be a non-empty list")
+        for one_date in dates:
+            if not isinstance(one_date, str):
+                raise ValueError("applies_to.dates must contain ISO date strings")
+            try:
+                date.fromisoformat(one_date)
+            except ValueError:
+                raise ValueError(f"{one_date!r} is not a valid ISO date")
+
+    return value
+
+
+class RuleParamRead(BaseModel):
+    """One parameter a rule type's ``params`` dict accepts.
+
+    Mirrors ``rules.RuleParam`` field-for-field rather than reinventing a
+    second shape for it — the same schema a future admin form (6.8) renders
+    a field from is what ``app.identity.service`` validates a request's
+    ``params`` against, so the two cannot drift into disagreeing about a
+    parameter.
+    """
+
+    name: str
+    kind: ParamKind
+    label: str
+    unit: Optional[str]
+    required: bool
+    minimum: Optional[int]
+
+    @classmethod
+    def build(cls, param: RuleParam) -> "RuleParamRead":
+        return cls(
+            name=param.name,
+            kind=param.kind,
+            label=param.label,
+            unit=param.unit,
+            required=param.required,
+            minimum=param.minimum,
+        )
+
+
+class RuleTypeRead(BaseModel):
+    """One registered rule type (``rules.REGISTRY``), as ``GET /rule-types`` serves it.
+
+    Describes the product's available rule types, not any one Space's
+    configuration — that is ``SpaceRuleRead`` below.
+    """
+
+    rule_type: str
+    label: str
+    priority: int
+    reads_history: bool
+    needs_local_resolution: bool
+    is_single: bool
+    params: list[RuleParamRead]
+
+    @classmethod
+    def build(cls, rule_type: RuleType) -> "RuleTypeRead":
+        return cls(
+            rule_type=rule_type.rule_type,
+            label=rule_type.label,
+            priority=rule_type.priority,
+            reads_history=rule_type.reads_history,
+            needs_local_resolution=rule_type.needs_local_resolution,
+            is_single=rule_type.is_single,
+            params=[RuleParamRead.build(param) for param in rule_type.params],
+        )
+
+
+class SpaceRuleRead(BaseModel):
+    """One configured ``space_rules`` row, as members of the Space see it."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    rule_type: str
+    params: dict
+    applies_to: Optional[dict]
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def build(cls, rule: SpaceRule) -> "SpaceRuleRead":
+        return cls.model_validate(rule)
+
+
+class SpaceRuleCreate(BaseModel):
+    """The body of ``POST /spaces/{public_id}/rules``.
+
+    ``rule_type`` and ``params`` are validated against ``rules.REGISTRY`` in
+    ``app.identity.service``, not here — only the service layer knows the
+    per-type schema (and this module already keeps its own shape checks,
+    like ``applies_to``, separate from registry-dependent ones for the same
+    reason ``SpaceUpdate``'s timezone check stays here while ``space_rules``
+    row-level checks live in ``service.py``).
+
+    Creating a second instance of an ``is_single`` type is not refused here:
+    ``is_single`` is advisory only (``rules/rules/registry.py``) and a
+    warning task 6.8's form surfaces, never a constraint this API enforces.
+    """
+
+    rule_type: str = Field(min_length=1, max_length=_RULE_TYPE_MAX)
+    params: dict = Field(default_factory=dict)
+    applies_to: Optional[dict] = None
+    enabled: bool = True
+
+    @field_validator("applies_to")
+    @classmethod
+    def _check_applies_to(cls, value: Optional[dict]) -> Optional[dict]:
+        return _validate_applies_to(value)
+
+
+class SpaceRuleUpdate(BaseModel):
+    """The body of ``PATCH /spaces/{public_id}/rules/{id}``.
+
+    All fields optional; omitted leaves the field alone, following the same
+    convention as ``SpaceUpdate``. ``rule_type`` is deliberately not a field
+    here at all — there is no sane way to reinterpret one type's stored
+    ``params`` as another's, so changing it is a delete-and-recreate, not an
+    edit.
+
+    ``params``, if present, is a **wholesale replacement**, re-validated
+    against the row's own (unchanged) ``rule_type`` schema — not merged with
+    what is already stored. An explicit null is rejected the same way a null
+    ``name`` is on ``SpaceUpdate``: a rule row cannot hold no params at all.
+
+    ``applies_to`` follows the omit-leaves-alone / explicit-null-clears
+    convention: omitted leaves the row's scoping untouched, ``null`` clears
+    it back to "always".
+
+    ``enabled`` follows the same omit/explicit-null split as ``applies_to``
+    for *presence*, but the column itself is not nullable, so an explicit
+    null is rejected rather than accepted as "clear it" — there is no
+    "neither enabled nor disabled" state to clear it to.
+    """
+
+    params: Optional[dict] = None
+    applies_to: Optional[dict] = None
+    enabled: Optional[bool] = None
+
+    @field_validator("applies_to")
+    @classmethod
+    def _check_applies_to(cls, value: Optional[dict]) -> Optional[dict]:
+        return _validate_applies_to(value)
+
+    @model_validator(mode="after")
+    def _reject_explicit_nulls(self) -> "SpaceRuleUpdate":
+        if "params" in self.model_fields_set and self.params is None:
+            raise ValueError("params may not be null; omit it to leave it unchanged")
+        if "enabled" in self.model_fields_set and self.enabled is None:
+            raise ValueError("enabled may not be null; omit it to leave it unchanged")
+        return self

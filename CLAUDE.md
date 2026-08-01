@@ -32,8 +32,13 @@ cannot degrade the whole system by asking a broader question than the engine pro
 ```
 app/backend/app/
   auth/          JWT verification (Auth0 JWKS, RS256) and the current-user dependency
-  identity/      Users, Spaces, memberships, access requests, invitations
+  identity/      Users, Spaces, memberships, access requests, invitations, and each Space's own
+                   rule configuration (`space_rules` rows, read and written through the
+                   `/spaces/{public_id}/rules` API)
                    authz.py — require_space_role, the per-Space authorization dependency
+                   router.py — also carries `rule_types_router` (`GET /rule-types`), the one route
+                     here that is deliberately not Space-scoped: it describes the product's
+                     registered rule types, not one tenant's configuration of them
   db/            Declarative Base, session, UtcDateTime, driver abstraction
   routers/       Booking endpoints. `resource_bookings.py` is Space-scoped and authenticated: a
                    booking is made against a Resource inside a Space the caller belongs to, resolved
