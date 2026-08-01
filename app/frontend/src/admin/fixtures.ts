@@ -21,7 +21,10 @@ import type {
   Invitation,
   Member,
   Resource,
+  RuleParamRead,
+  RuleTypeRead,
   Space,
+  SpaceRuleRead,
 } from '../api'
 
 export function ok<T>(data: T): ApiOk<T> {
@@ -119,6 +122,57 @@ export function makeResource(overrides: Partial<Resource> = {}): Resource {
     name: 'Court A',
     created_at: '2026-07-01T10:00:00.000Z',
     archived_at: null,
+    ...overrides,
+  }
+}
+
+/**
+ * One `RuleParamRead` — the same five facts (`kind`/`label`/`unit`/`required`/
+ * `minimum`) that serve both `RuleParamsForm`'s field and `ruleParamsAreValid`'s
+ * own check of it.
+ */
+export function makeRuleParam(overrides: Partial<RuleParamRead> = {}): RuleParamRead {
+  return {
+    name: 'max_duration_minutes',
+    kind: 'integer',
+    label: 'Max duration',
+    unit: 'minutes',
+    required: true,
+    minimum: 1,
+    ...overrides,
+  }
+}
+
+/**
+ * A registered rule type, as `GET /rule-types` serves it. Defaults to a
+ * `max_duration`-shaped type — one required integer parameter — since that is
+ * the simplest real member of `rules.REGISTRY`. `SpaceRulesPage.test.tsx`
+ * overrides `params` with an invented type to prove the page never branches on
+ * `rule_type`.
+ */
+export function makeRuleType(overrides: Partial<RuleTypeRead> = {}): RuleTypeRead {
+  return {
+    rule_type: 'max_duration',
+    label: 'Maximum booking duration',
+    priority: 30,
+    reads_history: false,
+    needs_local_resolution: false,
+    is_single: false,
+    params: [makeRuleParam()],
+    ...overrides,
+  }
+}
+
+/** One configured `space_rules` row, as `SpaceRuleRead` describes it. */
+export function makeSpaceRule(overrides: Partial<SpaceRuleRead> = {}): SpaceRuleRead {
+  return {
+    id: 100,
+    rule_type: 'max_duration',
+    params: { max_duration_minutes: 90 },
+    applies_to: null,
+    enabled: true,
+    created_at: '2026-07-01T10:00:00.000Z',
+    updated_at: '2026-07-01T10:00:00.000Z',
     ...overrides,
   }
 }

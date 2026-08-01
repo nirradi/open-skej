@@ -26,10 +26,25 @@
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { MemoryRouter } from 'react-router-dom'
 
 import { listAccessRequests, listInvitations, listMembers, listSpaces } from '../api'
 import { AdminPage } from './AdminPage'
 import { failed, makeMember, makeSpace, ok } from './fixtures'
+
+/**
+ * `AdminPage` links to `/s/{public_id}/rules` (the "Manage rules" panel added
+ * in task 6.8), so it needs a router in the tree the same way any other
+ * screen with a `<Link>` does — rendering it bare throws on the `useContext`
+ * that `<Link>` reads.
+ */
+function renderAdminPage() {
+  return render(
+    <MemoryRouter>
+      <AdminPage />
+    </MemoryRouter>,
+  )
+}
 
 vi.mock('../api', () => ({
   listSpaces: vi.fn(),
@@ -73,7 +88,7 @@ describe('AdminPage', () => {
   it('shows a loading state before the Spaces arrive', () => {
     vi.mocked(listSpaces).mockReturnValue(new Promise(() => {}))
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     expect(screen.getByTestId('spaces-loading')).toBeTruthy()
   })
@@ -81,7 +96,7 @@ describe('AdminPage', () => {
   it('reports an error instead of an empty dashboard', async () => {
     vi.mocked(listSpaces).mockResolvedValue(failed('The network went away.'))
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     const error = await screen.findByTestId('spaces-error')
     expect(error.textContent).toBe('The network went away.')
@@ -93,7 +108,7 @@ describe('AdminPage', () => {
   it('explains the empty case without making it look broken', async () => {
     vi.mocked(listSpaces).mockResolvedValue(ok([]))
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     const empty = await screen.findByTestId('spaces-empty')
     expect(empty.textContent).toContain('not in any Spaces')
@@ -103,7 +118,7 @@ describe('AdminPage', () => {
   })
 
   it('includes archived Spaces so they can still be seen', async () => {
-    render(<AdminPage />)
+    renderAdminPage()
     await screen.findByTestId('space-picker')
 
     // An archived Space that vanished from the picker would look deleted, and
@@ -112,7 +127,7 @@ describe('AdminPage', () => {
   })
 
   it('renders the full set of panels for an owner', async () => {
-    render(<AdminPage />)
+    renderAdminPage()
 
     expect(await screen.findByTestId('space-admin')).toBeTruthy()
 
@@ -130,7 +145,7 @@ describe('AdminPage', () => {
   it('hides every admin control from a plain member', async () => {
     vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'member' })]))
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     expect(await screen.findByTestId('member-notice')).toBeTruthy()
     // Absent, not disabled. In particular the invitation list names people who
@@ -146,7 +161,7 @@ describe('AdminPage', () => {
   it('does not even ask the server for what a member may not see', async () => {
     vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'member' })]))
 
-    render(<AdminPage />)
+    renderAdminPage()
     await screen.findByTestId('member-notice')
 
     // Rendering the panels and letting them 403 would work, but it would fill a
@@ -159,7 +174,7 @@ describe('AdminPage', () => {
   it('does not offer archiving to an admin who is not the owner', async () => {
     vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'admin' })]))
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     // Archiving is owner-only on the server, so offering it would be a button
     // that always 403s.
@@ -172,7 +187,7 @@ describe('AdminPage', () => {
       ok([makeSpace({ archived_at: '2026-07-20T09:00:00.000Z' })]),
     )
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     expect(await screen.findByTestId('archived-banner')).toBeTruthy()
   })
@@ -185,7 +200,7 @@ describe('AdminPage', () => {
       ]),
     )
 
-    render(<AdminPage />)
+    renderAdminPage()
 
     const picker = (await screen.findByTestId('space-picker')) as HTMLSelectElement
     const labels = Array.from(picker.options).map((option) => option.textContent)
@@ -200,7 +215,7 @@ describe('AdminPage', () => {
       ]),
     )
 
-    render(<AdminPage />)
+    renderAdminPage()
     await screen.findByTestId('members-panel')
 
     fireEvent.change(screen.getByTestId('space-picker'), { target: { value: 'sp_other' } })
@@ -212,7 +227,7 @@ describe('AdminPage', () => {
   })
 
   it('shows the share link for the selected Space', async () => {
-    render(<AdminPage />)
+    renderAdminPage()
 
     const link = await screen.findByTestId('share-link')
     expect(link.textContent).toContain('/s/sp_7f3a9c')
@@ -223,7 +238,7 @@ describe('AdminPage', () => {
     // proof: with Auth0 unconfigured there is no provider in the tree, and a
     // hook call would take this page down exactly as it took the calendar down
     // in 2.8.
-    render(<AdminPage />)
+    renderAdminPage()
 
     expect(await screen.findByTestId('space-admin')).toBeTruthy()
   })

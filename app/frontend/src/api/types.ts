@@ -374,6 +374,95 @@ export interface Resource {
   archived_at: string | null
 }
 
+/** Mirrors `ParamKind` in `rules/rules/registry.py`. */
+export type RuleParamKind = 'integer' | 'local_time'
+
+/**
+ * Mirrors `RuleParamRead` in `app/backend/app/identity/schemas.py` — one
+ * parameter a rule type's `params` accepts. The same five facts serve both a
+ * form field (`kind`/`label`/`unit`/`required`) and its own client-side
+ * validation (`required`/`minimum`), which is what keeps a rendered field and
+ * the check that gates its submit button from disagreeing about a parameter.
+ */
+export interface RuleParamRead {
+  name: string
+  kind: RuleParamKind
+  label: string
+  unit: string | null
+  required: boolean
+  minimum: number | null
+}
+
+/**
+ * Mirrors `RuleTypeRead` — one registered rule type (`rules.REGISTRY`), as
+ * `GET /rule-types` serves it. Describes what the product can configure at
+ * all, never one Space's configuration of it — see `SpaceRuleRead` below.
+ */
+export interface RuleTypeRead {
+  rule_type: string
+  label: string
+  priority: number
+  reads_history: boolean
+  needs_local_resolution: boolean
+  is_single: boolean
+  params: RuleParamRead[]
+}
+
+/**
+ * The three legal shapes of `SpaceRule.applies_to` — `null` means "always".
+ * Mirrors `_validate_applies_to` in `app/backend/app/identity/schemas.py`:
+ * never both keys, never neither.
+ */
+export type RuleAppliesTo = { weekdays: number[] } | { dates: string[] }
+
+/**
+ * Mirrors `SpaceRuleRead` — one configured `space_rules` row, as members of
+ * the Space see it (scoped and unscoped, enabled and disabled alike).
+ *
+ * `params` is an untyped `Record<string, unknown>` rather than a per-type
+ * shape: this client has no compile-time knowledge of any one rule type, only
+ * the registry's runtime description of it (`RuleTypeRead.params`) — the same
+ * genericity `RuleParamsForm` is built around.
+ */
+export interface SpaceRuleRead {
+  id: number
+  rule_type: string
+  params: Record<string, unknown>
+  applies_to: RuleAppliesTo | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * The body of `POST /spaces/{public_id}/rules`. Mirrors `SpaceRuleCreate`.
+ *
+ * Creating a second instance of an `is_single` type is not refused by the
+ * server — `is_single` is advisory only (`rules/rules/registry.py`) — so this
+ * type carries nothing to enforce that; the UI surfaces it as a warning
+ * instead.
+ */
+export interface SpaceRuleCreateInput {
+  rule_type: string
+  params: Record<string, unknown>
+  applies_to?: RuleAppliesTo | null
+  enabled?: boolean
+}
+
+/**
+ * The body of `PATCH /spaces/{public_id}/rules/{id}`. Mirrors `SpaceRuleUpdate`.
+ *
+ * All fields optional and omit-leaves-alone, matching the server: there is no
+ * `rule_type` field here at all, since there is no sane way to reinterpret
+ * one type's stored `params` as another's — changing it is delete-and-recreate,
+ * not an edit.
+ */
+export interface SpaceRuleUpdateInput {
+  params?: Record<string, unknown>
+  applies_to?: RuleAppliesTo | null
+  enabled?: boolean
+}
+
 /**
  * Mirrors `SpacePreview` — the thin view for someone holding the link.
  *
