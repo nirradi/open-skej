@@ -155,8 +155,20 @@ def test_needs_local_resolution_is_true_only_for_hours_and_the_two_counting_type
     }
 
 
-def test_is_single_is_true_for_all_six_starter_types():
-    assert all(rt.is_single for rt in REGISTRY.values())
+def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
+    """`availability_hours` and `max_duration` are meant to vary by day via `applies_to`
+    (e.g. "Mon/Wed/Fri 10-15" plus "Tue/Thu 8-12" as two `availability_hours` rows), so a second
+    instance of either is the intended pattern, not a mistake worth warning about."""
+    assert {rt.rule_type for rt in REGISTRY.values() if rt.is_single} == {
+        "not_in_the_past",
+        "booking_horizon",
+        "max_bookings_per_week",
+        "max_bookings_per_month",
+    }
+    assert {rt.rule_type for rt in REGISTRY.values() if not rt.is_single} == {
+        "max_duration",
+        "availability_hours",
+    }
 
 
 # --- bounds -----------------------------------------------------------------------------------

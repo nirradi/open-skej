@@ -30,10 +30,14 @@ hand-coding a third of it.
   every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to convert
   for itself — the same discipline ``CalendarContext``'s missing timezone field enforces on the
   engine itself.
-* **``is_single``** — advisory only, never a uniqueness constraint. It says a second instance of
+* **``is_single``** — advisory only, never a uniqueness constraint. True says a second instance of
   the type is probably a mistake worth a warning, not a state the storage layer refuses to
-  represent; the engine's flat AND makes two instances of the same type coherent (they AND to the
-  stricter), just rarely what anyone meant.
+  represent — the engine's flat AND makes two instances of the same type coherent (they AND to
+  the stricter), which is coherent for ``max_bookings_per_week`` but rarely what anyone meant. False
+  says the opposite: multiple instances scoped to different days or dates via ``applies_to`` are the
+  intended pattern, not a mistake — ``availability_hours`` and ``max_duration`` are both meant to
+  vary by day (e.g. "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as two separate ``availability_hours``
+  rows), so a second instance of either warrants no warning at all.
 * a **build function** from validated params (and, for a type with ``needs_local_resolution``, a
   second mapping of resolved values) to a constructed instance of the rule it names.
 
@@ -258,7 +262,7 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         ),
         reads_history=False,
         needs_local_resolution=False,
-        is_single=True,
+        is_single=False,
         build=_build_max_duration,
     ),
     RuleType(
@@ -283,7 +287,7 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         ),
         reads_history=False,
         needs_local_resolution=True,
-        is_single=True,
+        is_single=False,
         build=_build_availability_hours,
     ),
     RuleType(
