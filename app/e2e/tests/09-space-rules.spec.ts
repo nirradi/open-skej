@@ -102,9 +102,14 @@ test.describe('the Space rules page', () => {
     await expect(ruleRowAfterReload).toHaveCount(0)
 
     // A reload proves the delete persisted too, not just the local list —
-    // and that Space A's own pre-existing row is untouched.
+    // and that Space A's own pre-existing row is untouched. `rules-list`
+    // renders empty (no rows at all) for the instant between navigation and
+    // the fetch resolving, and that instant would also vacuously satisfy
+    // "the deleted row is gone" and "no unexpected row survived" — so both
+    // checks below poll rather than read the DOM once, the same reason
+    // `idsAfterCreate` above polls for the created row to appear.
     await page.reload()
-    await expect(page.getByTestId(newRowTestId!)).toHaveCount(0)
-    expect(await maxDurationRowTestIds(page)).toEqual([...idsBeforeCreate])
+    await expect.poll(async () => maxDurationRowTestIds(page)).toEqual([...idsBeforeCreate])
+    expect(await page.getByTestId(newRowTestId!).count()).toBe(0)
   })
 })
