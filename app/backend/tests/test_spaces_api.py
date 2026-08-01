@@ -184,6 +184,10 @@ ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
         "DELETE",
         "/spaces/{public_id}/resources/{resource_id}/bookings/{booking_id}",
     ): MembershipRole.MEMBER,
+    ("GET", "/spaces/{public_id}/rules"): MembershipRole.MEMBER,
+    ("POST", "/spaces/{public_id}/rules"): MembershipRole.ADMIN,
+    ("PATCH", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
+    ("DELETE", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
 }
 
 # One rank below each non-member minimum — the caller the under-privileged half
@@ -311,9 +315,10 @@ def _fill(path: str, public_id: str, member: User) -> str:
 
     ``{user_id}`` resolves to a genuine member of the Space under test, so a 404
     cannot be explained away as "that user does not exist". ``{request_id}``,
-    ``{invitation_id}``, ``{resource_id}`` and ``{booking_id}`` are arbitrary
-    integers — the authorization dependency rejects the caller before any row
-    with that id is looked up, which is the property being asserted.
+    ``{invitation_id}``, ``{resource_id}``, ``{booking_id}`` and ``{rule_id}``
+    are arbitrary integers — the authorization dependency rejects the caller
+    before any row with that id is looked up, which is the property being
+    asserted.
 
     Every path parameter a swept route declares must be substituted here. An
     unsubstituted ``{...}`` would fail FastAPI's ``int`` parsing and return 422,
@@ -328,6 +333,7 @@ def _fill(path: str, public_id: str, member: User) -> str:
         .replace("{invitation_id}", "1")
         .replace("{resource_id}", "1")
         .replace("{booking_id}", "1")
+        .replace("{rule_id}", "1")
     )
 
 

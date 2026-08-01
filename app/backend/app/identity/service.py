@@ -22,6 +22,7 @@ router — the same split ``app.db.driver`` uses with ``OverlapError``.
 from datetime import datetime, time
 from typing import Optional, Sequence
 
+from rules import REGISTRY, ParamKind
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -40,7 +41,7 @@ from app.identity.models import (
     SpaceRule,
     User,
 )
-from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceUpdate
+from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceRuleUpdate, SpaceUpdate
 
 # The name the auto-created first Resource is given. A fresh Space is a venue with
 # one bookable calendar rather than an empty shell, so the admin's primary flow
@@ -101,6 +102,50 @@ class AmbiguousRuleInstanceError(Exception):
     def __init__(self, rule_type: str) -> None:
         super().__init__(rule_type)
         self.rule_type = rule_type
+
+
+class UnknownRuleTypeError(Exception):
+    """A ``rule_type`` was submitted that names nothing in ``rules.REGISTRY``.
+
+    Raised by ``POST``/``PATCH`` on ``/spaces/{public_id}/rules`` — task
+    6.7's write path, the first one that lets a caller name an arbitrary
+    ``rule_type`` string directly (task 6.6's shim always names one of its
+    own seven hardcoded types). The router translates this to 422: a bad
+    type name is a client mistake, not a state the database should ever be
+    asked to hold.
+    """
+
+    def __init__(self, rule_type: str) -> None:
+        super().__init__(rule_type)
+        self.rule_type = rule_type
+
+
+class InvalidRuleParamsError(Exception):
+    """A rule instance's ``params`` do not satisfy its type's own schema.
+
+    Covers every shape failure ``_validate_rule_params`` checks: a missing
+    required parameter, an unknown key, a wrong-kind or out-of-bounds value,
+    and (for ``slot_alignment`` alone) a ``slot_minutes`` that does not
+    divide 1440. ``message`` is the ready-to-serve 422 detail, naming the
+    specific offending parameter — the router has no schema knowledge of its
+    own to build one from, so this exception carries the finished sentence
+    rather than structured fields the router would have to reassemble.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class RuleNotFoundError(Exception):
+    """No ``SpaceRule`` with that id belongs to this Space.
+
+    Raised identically for an id that names nothing and one that names a row
+    in another Space — the same 404-not-403 treatment
+    :class:`ResourceNotFoundError` gives a foreign Resource id, for the same
+    reason: the lookup is scoped to ``space_id`` in one query, so a foreign
+    id discloses nothing about being live elsewhere.
+    """
 
 
 class ResourceNotFoundError(Exception):
@@ -600,6 +645,197 @@ def list_space_rules(session: Session, space: Space) -> Sequence[SpaceRule]:
         .scalars()
         .all()
     )
+
+
+def _validate_rule_params(rule_type_id: str, params: dict) -> None:
+    """Validate ``params`` against ``REGISTRY[rule_type_id]``'s own schema —
+    the API-boundary counterpart of ``app.rules_stub``'s booking-time
+    checks, run at write time so a bad row is refused with a 422 naming the
+    problem rather than silently stored and only discovered as a denial (or
+    a fail-closed 500-avoided-by-luck) the next time someone books.
+
+    Four checks, in order: an unregistered ``rule_type`` raises
+    :class:`UnknownRuleTypeError`; everything else raises
+    :class:`InvalidRuleParamsError` naming the specific parameter — an
+    unknown key, a missing required one, or one present but the wrong kind
+    or below its declared ``minimum``. Two rule-type-specific checks follow
+    the per-parameter loop: ``slot_alignment.slot_minutes`` must divide
+    1440, mirroring ``SlotAlignmentRule.__init__``'s own booking-time check
+    (``rules/rules/registry.py``'s own docstring names this API boundary as
+    where that would eventually be enforced); and ``availability_hours``
+    rejects an ``opens_at`` at or after ``closes_at`` on the Space's own
+    wall clock, reusing :class:`InvalidOperatingHoursError` rather than a
+    second exception for the identical rule ``update_space`` already
+    enforces for the pre-6.7 shim.
+
+    Callers pass the **effective** params dict — the full set this row would
+    be given, after any PATCH merge — never a partial submission, so
+    "missing required" and the two type-specific checks below always see a
+    complete picture.
+    """
+    rule_type = REGISTRY.get(rule_type_id)
+    if rule_type is None:
+        raise UnknownRuleTypeError(rule_type_id)
+
+    schema = {param.name: param for param in rule_type.params}
+
+    unknown = sorted(set(params) - set(schema))
+    if unknown:
+        raise InvalidRuleParamsError(
+            f"Unknown parameter(s) for rule type {rule_type_id!r}: {', '.join(unknown)}"
+        )
+
+    for param in rule_type.params:
+        if param.name not in params:
+            if param.required:
+                raise InvalidRuleParamsError(
+                    f"Missing required parameter {param.name!r} for rule type {rule_type_id!r}"
+                )
+            continue
+
+        value = params[param.name]
+        if param.kind is ParamKind.INTEGER:
+            # `type(value) is not int` rather than `isinstance`: a bool is an
+            # int under `isinstance` (`True` would silently pass as `1`),
+            # and `type()` is what excludes it.
+            if type(value) is not int:
+                raise InvalidRuleParamsError(f"Parameter {param.name!r} must be an integer")
+            if param.minimum is not None and value < param.minimum:
+                raise InvalidRuleParamsError(
+                    f"Parameter {param.name!r} must be at least {param.minimum}"
+                )
+        elif param.kind is ParamKind.LOCAL_TIME:
+            if not isinstance(value, str):
+                raise InvalidRuleParamsError(
+                    f"Parameter {param.name!r} must be a local time string (HH:MM[:SS])"
+                )
+            try:
+                time.fromisoformat(value)
+            except ValueError:
+                raise InvalidRuleParamsError(f"Parameter {param.name!r} is not a valid local time")
+
+    if rule_type_id == "slot_alignment":
+        slot_minutes = params.get("slot_minutes")
+        if isinstance(slot_minutes, int) and slot_minutes > 0 and 1440 % slot_minutes != 0:
+            raise InvalidRuleParamsError(
+                "Parameter 'slot_minutes' must divide 1440 (a whole number of slots per day);"
+                f" got {slot_minutes!r}"
+            )
+
+    if rule_type_id == "availability_hours":
+        opens_at_raw = params.get("opens_at")
+        closes_at_raw = params.get("closes_at")
+        if opens_at_raw is not None and closes_at_raw is not None:
+            opens_at = time.fromisoformat(opens_at_raw)
+            closes_at = time.fromisoformat(closes_at_raw)
+            if opens_at >= closes_at:
+                raise InvalidOperatingHoursError(opens_at, closes_at)
+
+
+def get_space_rule(session: Session, space: Space, rule_id: int) -> SpaceRule:
+    """One ``SpaceRule`` of this Space, or raise :class:`RuleNotFoundError`.
+
+    The ``space_id`` term is the access control, mirroring
+    :func:`get_resource`: a rule id belonging to another Space returns
+    nothing here and so is indistinguishable from one that does not exist,
+    in one query so both also take the same time.
+    """
+    rule = session.execute(
+        select(SpaceRule).where(SpaceRule.id == rule_id, SpaceRule.space_id == space.id)
+    ).scalar_one_or_none()
+    if rule is None:
+        raise RuleNotFoundError(rule_id)
+    return rule
+
+
+def create_space_rule(
+    session: Session,
+    space: Space,
+    *,
+    rule_type: str,
+    params: dict,
+    applies_to: Optional[dict],
+    enabled: bool,
+) -> SpaceRule:
+    """Configure a new rule instance for this Space. Refused on an archived
+    Space, matching every other mutation in this module.
+
+    Unlike :func:`_write_through_unscoped_rule`, this never refuses on a
+    second instance of the same type: ``is_single`` is advisory only
+    (``rules/rules/registry.py``), and this is the real multi-instance
+    editing path task 6.6's shim explicitly deferred to 6.7.
+    """
+    _require_active(space)
+    _validate_rule_params(rule_type, params)
+
+    rule = SpaceRule(
+        space_id=space.id,
+        rule_type=rule_type,
+        params=params,
+        applies_to=applies_to,
+        enabled=enabled,
+    )
+    session.add(rule)
+    session.commit()
+    return rule
+
+
+def update_space_rule(
+    session: Session, space: Space, *, rule_id: int, payload: SpaceRuleUpdate
+) -> SpaceRule:
+    """Apply a partial update to one rule instance. Omitted fields are left alone.
+
+    ``params``, when present, wholesale-replaces what is stored — except for
+    ``availability_hours``, where a submission naming only one of
+    ``opens_at``/``closes_at`` is first merged over the row's own currently
+    stored pair before validation, the same way ``update_space`` computes
+    its effective pair from ``current_hours.params``. Every other type gets
+    no such merge: its schema requires whatever it requires of the
+    submitted dict alone, which is what "wholesale replacement" means for
+    it. The merge is what lets the inverted-hours check below see a real
+    pair instead of failing "missing required" on a bound the caller never
+    meant to touch.
+    """
+    _require_active(space)
+    rule = get_space_rule(session, space, rule_id)
+
+    fields = payload.model_fields_set
+
+    if "params" in fields:
+        new_params = payload.params
+        assert new_params is not None  # SpaceRuleUpdate rejects an explicit null.
+        if rule.rule_type == "availability_hours":
+            effective_params = dict(rule.params)
+            effective_params.update(new_params)
+        else:
+            effective_params = dict(new_params)
+        _validate_rule_params(rule.rule_type, effective_params)
+        rule.params = effective_params
+
+    if "applies_to" in fields:
+        rule.applies_to = payload.applies_to
+
+    if "enabled" in fields:
+        assert payload.enabled is not None  # SpaceRuleUpdate rejects an explicit null.
+        rule.enabled = payload.enabled
+
+    session.commit()
+    return rule
+
+
+def delete_space_rule(session: Session, space: Space, *, rule_id: int) -> None:
+    """Remove a rule instance outright.
+
+    Unlike everything else in this schema, this is a real ``DELETE``: a
+    ``SpaceRule`` row is configuration, not admission history, and
+    ``enabled`` is already the pause mechanism (``app.identity.models``,
+    ``SpaceRule`` docstring) — a row nobody wants paused-forever should not
+    have to exist at all.
+    """
+    _require_active(space)
+    rule = get_space_rule(session, space, rule_id)
+    session.delete(rule)
+    session.commit()
 
 
 def archive_space(session: Session, space: Space) -> Space:
