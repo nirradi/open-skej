@@ -126,14 +126,39 @@ assembly of these four at their default values; the canon the API actually runs 
 (see Backend integration), where a null column omits its rule entirely. `NotInThePastRule` is the
 only one always present — you can never book the past, whatever a Space configures.
 
-**The assembled order is `(NotInThePast, BookingHorizon, MaxDuration, AvailabilityHours,
-MaxBookingsPerWeek, MaxBookingsPerMonth)`, and it arbitrates user-facing copy.** The controller is
-fail-fast, so the first rule to deny decides the single message shown when a request breaks several
-rules at once. The date rules run first because they reject a booking on *when* it is, which no
-shortening or shifting within the day can fix; telling someone to trim a three-hour booking that sits
-90 days out sends them to fix the one thing that is not the problem. Duration and availability hours
-are remedies the user can apply to an otherwise bookable date, so they follow. Past and horizon are
-mutually exclusive and never arbitrate against each other. **The counting rules come last** because a
+**A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the six
+classes above a runtime identity separate from being importable Python. A registered type declares: a
+**stable string id** (`not_in_the_past`, `max_duration`, `availability_hours`, …) that a future
+`space_rules.rule_type` column stores — never the Python class name, since renaming the class must
+not silently orphan every row that named it; an **ordered parameter schema**, one `RuleParam` per
+constructor argument (name, kind, label, unit, required, a minimum), rich enough to render an admin
+form field and to validate a request body's params against — one schema for both jobs, because two
+independently written ones would drift, and the drift would show up as a form whose own submission
+gets refused; a declared **priority**; **`reads_history`**, true only for the two counting rules, so
+a caller can skip the Space-wide history query when nothing configured would read it;
+**`needs_local_resolution`**, true for `availability_hours` and both counting rules — the three whose
+constructor needs values resolved against the Space's own zone and the booking's own date rather than
+the raw stored params, which is what keeps every local-to-UTC conversion at the adapter boundary
+instead of inviting a rule type to convert for itself; **`is_single`**, advisory only and never a
+uniqueness constraint, since the engine's flat AND makes two instances of one type coherent — they AND
+to the stricter — even when that is almost certainly not what an admin meant; and a **build function**
+from validated params (plus, for a type with `needs_local_resolution`, a second mapping of
+already-resolved values) to a constructed instance of the class it names.
+
+**Rule order comes from a type's declared priority, never from row order, insertion order, or an
+admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of
+the same type. Priorities are spaced in multiples of ten rather than assigned consecutively, so a
+later type can be inserted between two existing ones without renumbering the rest of the registry.
+
+**The order a canon assembled this way runs in reproduces `(NotInThePast, BookingHorizon,
+MaxDuration, AvailabilityHours, MaxBookingsPerWeek, MaxBookingsPerMonth)` because that is what each
+type's declared priority sorts to, and it arbitrates user-facing copy.** The controller is fail-fast,
+so the first rule to deny decides the single message shown when a request breaks several rules at
+once. The date rules run first because they reject a booking on *when* it is, which no shortening or
+shifting within the day can fix; telling someone to trim a three-hour booking that sits 90 days out
+sends them to fix the one thing that is not the problem. Duration and availability hours are remedies
+the user can apply to an otherwise bookable date, so they follow. Past and horizon are mutually
+exclusive and never arbitrate against each other. **The counting rules come last** because a
 frequency cap is the one denial no change to *this* request can fix — no shorter, earlier or later
 booking clears it — so every rule naming a fixable problem gets first refusal.
 
