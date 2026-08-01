@@ -23,6 +23,7 @@ from .interfaces import (
     Weekday,
     history_window,
 )
+from .registry import REGISTRY, ParamKind, RuleParam, RuleType, rule_types
 from .safety import UnsafeRuleError, validate_source
 
 __all__ = [
@@ -51,4 +52,10 @@ __all__ = [
     # Exported but deliberately not in DEFAULT_CANON — see frequency.py.
     "MaxBookingsPerWeekRule",
     "MaxBookingsPerMonthRule",
+    # The rule type registry — a separate, additive description of the same rule classes.
+    "REGISTRY",
+    "ParamKind",
+    "RuleParam",
+    "RuleType",
+    "rule_types",
 ]
