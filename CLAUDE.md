@@ -54,8 +54,10 @@ app/frontend/    React SPA
   src/space/     The Space list at `/`; `/s/{public_id}` — the cold link-holder preview and access
                    request for a non-member, and for a member the Space itself with a picker onto its
                    Resources; and `/s/{public_id}/resources/{id}` — the calendar for one Resource
-  src/admin/     Space creation, members, invitations, the access-request queue, and the minimal
-                   Space schedule (operating hours, slot interval, timezone) configuration surface
+  src/admin/     Space creation, members, invitations, the access-request queue, the Space's
+                   timezone, and — at `/s/{public_id}/rules` — a generic editor over the Space's
+                   own rule instances, built from each rule type's declared parameter schema rather
+                   than one form per type
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/
   interfaces.py  The rule contract — authoritative, read before writing any rule
