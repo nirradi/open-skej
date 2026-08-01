@@ -8,6 +8,8 @@ against synthetic data instead. Run it directly:
     python benchmark.py --client ollama --model qwen2.5:1.5b
     python benchmark.py --client ollama --model qwen2.5:1.5b --model llama3.1:8b
     python benchmark.py --client ollama --example weekends --example "max 1 hour"
+    python benchmark.py --client ollama --model qwen2.5:1.5b --model llama3.1:8b \\
+        --checkpoint bench.json   # safe to kill and re-run verbatim; resumes past what finished
 
 **Token usage and cost come from a recording wrapper around the ``LLMClient``, not from a change
 to ``run_generation_loop``.** The loop returns strings and discards every ``LLMResponse`` it saw —
@@ -34,7 +36,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from generation.errors import LLMCallError
 from generation.llm import (
@@ -56,6 +58,7 @@ __all__ = [
     "ModelReport",
     "BenchmarkReport",
     "RecordingClient",
+    "BenchmarkCheckpoint",
     "build_example_report",
     "run_model",
     "run_benchmark",
@@ -138,6 +141,31 @@ class ExampleReport:
             "wall_ms": self.wall_ms,
             "last_failure": self.last_failure,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ExampleReport":
+        """The inverse of ``to_dict``, for reading a checkpoint back off disk.
+
+        Every field round-trips through JSON unchanged except ``status`` (a string in the file,
+        the ``BenchmarkStatus`` enum here) and ``outcomes`` (a list in the file, a tuple here) —
+        the same two conversions ``to_dict`` made going the other way.
+        """
+        return cls(
+            description=data["description"],
+            model=data["model"],
+            status=BenchmarkStatus(data["status"]),
+            succeeded=data["succeeded"],
+            attempts=data["attempts"],
+            retries=data["retries"],
+            outcomes=tuple(data["outcomes"]),
+            llm_calls=data["llm_calls"],
+            input_tokens=data["input_tokens"],
+            output_tokens=data["output_tokens"],
+            cost_usd=data["cost_usd"],
+            llm_duration_ms=data["llm_duration_ms"],
+            wall_ms=data["wall_ms"],
+            last_failure=data["last_failure"],
+        )
 
 
 @dataclass(frozen=True)
@@ -226,6 +254,115 @@ class BenchmarkReport:
             "generated_at": self.generated_at,
             "models": [model.to_dict() for model in self.models],
         }
+
+
+@dataclass
+class BenchmarkCheckpoint:
+    """Persists a run's ``ExampleReport``s to ``path`` after every example, so a run killed partway
+    — a session limit, a laptop sleeping, a `^C` — resumes from its last completed example on the
+    next invocation instead of repeating (and re-billing, for a paid client) every example already
+    settled.
+
+    The file at ``path`` is a valid ``BenchmarkReport.to_dict()`` at every point, partial or
+    complete — the same shape ``--output`` writes — which is what lets ``start`` read one back.
+    """
+
+    path: Path
+    client_name: str
+    seed: int | None
+    temperature: float | None
+    retries: int
+    generated_at: str
+    _completed: dict[str, dict[str, ExampleReport]] = field(default_factory=dict)
+
+    @classmethod
+    def start(
+        cls,
+        path: Path,
+        *,
+        client_name: str,
+        seed: int | None,
+        temperature: float | None,
+        retries: int,
+    ) -> "BenchmarkCheckpoint":
+        """Resume from ``path`` if it holds a checkpoint for these exact run parameters; start a
+        fresh one if ``path`` does not exist yet.
+
+        A checkpoint written under a different client, seed, temperature or retry count is not
+        safe to resume into silently: the examples already on disk and the ones about to run would
+        not have been produced under comparable conditions, which is the same reasoning
+        ``BenchmarkReport`` records its own parameters for. Raise rather than guess which half of
+        a mismatched pair to trust.
+        """
+        if not path.exists():
+            return cls(
+                path=path,
+                client_name=client_name,
+                seed=seed,
+                temperature=temperature,
+                retries=retries,
+                generated_at=datetime.now(timezone.utc).isoformat(),
+            )
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        found = (data["client"], data["seed"], data["temperature"], data["retries"])
+        wanted = (client_name, seed, temperature, retries)
+        if found != wanted:
+            raise ValueError(
+                f"checkpoint at {path} was started with client={data['client']!r} "
+                f"seed={data['seed']!r} temperature={data['temperature']!r} "
+                f"retries={data['retries']!r}, which does not match this run's "
+                f"client={client_name!r} seed={seed!r} temperature={temperature!r} "
+                f"retries={retries!r}. Use a different --checkpoint path, or delete the existing "
+                "file to start that run over."
+            )
+
+        completed = {
+            model_report["model"]: {
+                example["description"]: ExampleReport.from_dict(example)
+                for example in model_report["examples"]
+            }
+            for model_report in data["models"]
+        }
+        return cls(
+            path=path,
+            client_name=client_name,
+            seed=seed,
+            temperature=temperature,
+            retries=retries,
+            generated_at=data["generated_at"],
+            _completed=completed,
+        )
+
+    def completed_for(self, model: str) -> dict[str, ExampleReport]:
+        """Every example already recorded for ``model``, keyed by description. Empty for a model
+        this checkpoint has never seen — including one added to ``--model`` after the checkpoint
+        was started, which simply runs in full."""
+        return self._completed.get(model, {})
+
+    def record(self, model: str, example: ExampleReport) -> None:
+        """Record one finished example for ``model`` and flush the whole checkpoint to disk.
+
+        Flushing after every single example, rather than batching, is the point of this class: the
+        file on disk is never more than one example stale, so a kill at any moment loses at most
+        the example that was in flight.
+        """
+        self._completed.setdefault(model, {})[example.description] = example
+        self.path.write_text(json.dumps(self._report().to_dict(), indent=2), encoding="utf-8")
+
+    def _report(self) -> BenchmarkReport:
+        models = tuple(
+            ModelReport(client=self.client_name, model=model, examples=tuple(examples.values()))
+            for model, examples in self._completed.items()
+        )
+        return BenchmarkReport(
+            client=self.client_name,
+            seed=self.seed,
+            temperature=self.temperature,
+            retries=self.retries,
+            generated_at=self.generated_at,
+            models=models,
+        )
 
 
 def _sum_optional(values: Iterable[int | float | None]) -> int | float | None:
@@ -339,49 +476,69 @@ def run_model(
     client: LLMClient,
     model: str,
     retries: int,
+    completed: Mapping[str, ExampleReport] | None = None,
+    on_example: Callable[[ExampleReport], None] | None = None,
 ) -> list[ExampleReport]:
     """Run every description in ``descriptions`` against ``model``, one loop per description.
 
     ``output_dir=None`` on every call: a benchmark is not a source of artifacts for a human to
     review, and five examples times several models writing candidate directories would bury the
     real generation-loop output under a run that was never meant to produce any.
+
+    ``completed`` is this model's already-recorded examples, keyed by description — a resumed
+    run's checkpoint, or empty for a fresh one. A description found there, including a previous
+    ``SKIPPED`` one, is reused as-is and never re-run; a ``CALL_ERROR`` found there re-arms
+    ``aborted`` exactly as hitting one fresh would, so a resumed run does not retry a model whose
+    daemon was unreachable last time by way of running every remaining example again first.
+
+    ``on_example`` is called with each freshly-computed report — never with one reused from
+    ``completed``, which is already persisted — immediately after it is produced, so a caller can
+    checkpoint progress before moving to the next description.
     """
     reports: list[ExampleReport] = []
     aborted = False
+    completed = completed or {}
 
     for description in descriptions:
+        cached = completed.get(description)
+        if cached is not None:
+            reports.append(cached)
+            if cached.status is BenchmarkStatus.CALL_ERROR:
+                aborted = True
+            continue
+
         if aborted:
-            reports.append(_skipped_report(description, model=model))
-            continue
+            report = _skipped_report(description, model=model)
+        else:
+            recording = RecordingClient(client)
+            started = time.perf_counter()
+            try:
+                result = run_generation_loop(
+                    description,
+                    client=recording,
+                    model=model,
+                    max_retries=retries,
+                    output_dir=None,
+                )
+            except LLMCallError as exc:
+                wall_ms = (time.perf_counter() - started) * 1000
+                report = _call_error_report(
+                    description, model=model, detail=str(exc), wall_ms=wall_ms
+                )
+                aborted = True
+            else:
+                wall_ms = (time.perf_counter() - started) * 1000
+                report = build_example_report(
+                    description,
+                    model=model,
+                    result=result,
+                    responses=recording.responses,
+                    wall_ms=wall_ms,
+                )
 
-        recording = RecordingClient(client)
-        started = time.perf_counter()
-        try:
-            result = run_generation_loop(
-                description,
-                client=recording,
-                model=model,
-                max_retries=retries,
-                output_dir=None,
-            )
-        except LLMCallError as exc:
-            wall_ms = (time.perf_counter() - started) * 1000
-            reports.append(
-                _call_error_report(description, model=model, detail=str(exc), wall_ms=wall_ms)
-            )
-            aborted = True
-            continue
-
-        wall_ms = (time.perf_counter() - started) * 1000
-        reports.append(
-            build_example_report(
-                description,
-                model=model,
-                result=result,
-                responses=recording.responses,
-                wall_ms=wall_ms,
-            )
-        )
+        reports.append(report)
+        if on_example is not None:
+            on_example(report)
 
     return reports
 
@@ -395,18 +552,37 @@ def run_benchmark(
     retries: int,
     seed: int | None,
     temperature: float | None,
+    checkpoint: BenchmarkCheckpoint | None = None,
 ) -> BenchmarkReport:
     """Run every model over every description and assemble the whole report.
 
     One model erroring out does not touch another: each gets its own call to ``run_model`` and its
     own fresh abort state, so a daemon that has ``llama3.1:8b`` pulled but not ``qwen2.5:14b`` still
     reports a full run for the one it has.
+
+    With a ``checkpoint``, each model's already-recorded examples are reused rather than re-run,
+    and every freshly-computed one is handed to ``checkpoint.record`` as it finishes — so a run
+    resumed from a checkpoint costs nothing beyond re-checking work already done, and one killed
+    partway through has lost at most its one in-flight example.
     """
     model_reports = tuple(
         ModelReport(
             client=client_name,
             model=model,
-            examples=tuple(run_model(descriptions, client=client, model=model, retries=retries)),
+            examples=tuple(
+                run_model(
+                    descriptions,
+                    client=client,
+                    model=model,
+                    retries=retries,
+                    completed=checkpoint.completed_for(model) if checkpoint else None,
+                    on_example=(
+                        (lambda report, _model=model: checkpoint.record(_model, report))
+                        if checkpoint
+                        else None
+                    ),
+                )
+            ),
         )
         for model in models
     )
@@ -415,7 +591,9 @@ def run_benchmark(
         seed=seed,
         temperature=temperature,
         retries=retries,
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=(
+            checkpoint.generated_at if checkpoint else datetime.now(timezone.utc).isoformat()
+        ),
         models=model_reports,
     )
 
@@ -545,6 +723,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the JSON report to this path. The terminal summary always prints regardless.",
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Persist progress to this path after every example, and resume from it if it already "
+            "exists — makes a long multi-model run safe to kill and re-invoke with the same "
+            "arguments. --client/--seed/--temperature/--retries must match the checkpoint's own "
+            "run, or it refuses to resume rather than mix incomparable results."
+        ),
+    )
     return parser
 
 
@@ -597,6 +786,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     # Only the ollama client is handed these, so only an ollama run may claim them.
     sampling_applies = args.client == "ollama"
+    seed = args.seed if sampling_applies else None
+    temperature = args.temperature if sampling_applies else None
+
+    checkpoint = None
+    if args.checkpoint is not None:
+        try:
+            checkpoint = BenchmarkCheckpoint.start(
+                args.checkpoint,
+                client_name=args.client,
+                seed=seed,
+                temperature=temperature,
+                retries=args.retries,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+            return 2  # pragma: no cover - parser.error always raises SystemExit first
 
     report = run_benchmark(
         client_name=args.client,
@@ -604,8 +809,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         models=models,
         descriptions=descriptions,
         retries=args.retries,
-        seed=args.seed if sampling_applies else None,
-        temperature=args.temperature if sampling_applies else None,
+        seed=seed,
+        temperature=temperature,
+        checkpoint=checkpoint,
     )
 
     print_summary(report)

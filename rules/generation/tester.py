@@ -58,11 +58,19 @@ Return ONLY Python source for one pytest module. No explanation, no commentary, 
 The rule is in a module called `candidate_rule`, next to your file. The engine types are in a \
 module called `{_ENGINE_MODULE}`. Import what you need:
 
+    from datetime import datetime, timedelta, timezone
     from candidate_rule import TheRuleClass
     from {_ENGINE_MODULE} import (
         BaseRule, BookingRecord, BookingRequest, CalendarContext,
         Context, HistoryContext, RuleResult, UserContext, Weekday,
     )
+
+NOTHING IS A FREE NAME IN YOUR MODULE. Unlike the rule you are testing, your file is loaded as \
+an ordinary module and no namespace binds anything for you: every name you use, you import. \
+`datetime` and `timezone` are the ones this costs a whole run when they are missing, because \
+every test writes `datetime(2026, 3, 2, 9, 0, tzinfo=timezone.utc)` and a missing import fails \
+every one of them with `NameError` before the rule is ever called — reported as the rule being \
+wrong, which it is not.
 
 Import the rule class by the exact name it is defined with in the source you were given. Construct \
 it with the parameters its `__init__` takes. Do not rewrite, patch, subclass or monkeypatch the \

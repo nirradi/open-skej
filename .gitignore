@@ -13,6 +13,11 @@ ops
 # in here is imported by the engine or the app. Adopting one means porting it into rules/rules/.
 rules/generated/
 
+# benchmark.py run state: --checkpoint/--output JSON and hand-redirected logs. Local run state for
+# a hand-invoked benchmark, not an artifact for review.
+rules/.benchmark-*.json
+rules/.benchmark-*.log
+
 # Python
 venv/
 __pycache__/

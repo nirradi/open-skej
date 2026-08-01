@@ -347,18 +347,39 @@ predicted — and the only checks made are that the module parses and defines a 
 with that class's parameters, so a suite carried over from a previous attempt fails against a renamed
 class and reports it as the rule being wrong.
 
-**Model: `claude-opus-4-8` by default, model ID configurable.**
+**Model: `claude-opus-4-8` by default, model ID configurable — settled by the benchmark, not by
+assumption, and the numbers say stay on Opus.**
 
 > Do **not** use `claude-3-haiku-20240307` — retired 2026-04-19, now returns 404. Its live successor
 > is `claude-haiku-4-5` ($1/$5 per MTok).
 
 Opus is the default deliberately: a subtly wrong rule silently mis-enforces real bookings, and every
 Tester retry costs a full generate-plus-test cycle, so the cheaper model is not obviously cheaper end
-to end. `benchmark.py` compares models on the golden examples, and what it can
-compare is bounded by which clients exist: `OllamaClient` serves it, `ClaudeCliClient` cannot (the
-harness preamble above), and no SDK-backed client ships — so a local model is what the numbers
-currently describe. **When a benchmark run settles which model holds the contract, flip the default
-and rewrite this paragraph.** Settle it with the benchmark, not by assumption.
+to end. `benchmark.py` compares models on the golden examples, and what it can compare is bounded by
+which clients exist: `OllamaClient` serves it, `ClaudeCliClient` cannot (the harness preamble above),
+and no SDK-backed client ships — so a local model is what the numbers describe.
+
+**No local model tested holds the contract.** `qwen2.5:1.5b`, `qwen2.5:7b` and `llama3.1:8b`, run
+against all five golden examples with three retries each (fifteen runs, `--seed 0 --temperature 0`),
+gave up on every one — `0/5` for every model. The failure shapes differ by size and are worth keeping
+separate, per this section's own point that a success rate erases exactly the thing worth knowing:
+
+* `qwen2.5:1.5b` mostly never reaches a working candidate at all — `RULE_REJECTED` on an unsafe
+  comprehension, and `TESTS_REJECTED` from Tester output that does not parse as Python (an unclosed
+  paren, a test module defining no test function). One example crashed outright: the Tester pasted
+  the rule's own class definition into the test file instead of importing it from `candidate_rule`,
+  producing a bare `NameError: name 'BaseRule' is not defined` — the free-name promise this package's
+  prelude keeps for a *rule* module does not extend to a test module that redefines the rule inline.
+* `qwen2.5:7b` and `llama3.1:8b` clear validation far more often — most attempts reach a real
+  `pytest` run against a loaded candidate — and lose there: `TESTS_FAILED` with genuine assertion
+  failures, meaning the rule's *logic* is wrong, not its shape. This is the harder failure to fix by
+  prompting alone, since the model produced code that runs and is confidently incorrect.
+
+This is a negative result recorded as the deliverable it is, not a gap to fill later: Stream 7's
+premise of "wired to ollama mode" does not hold against any model benchmarked so far, and needs
+either a larger local model, a different prompting strategy, or replanning before it is built on top
+of this. If a future benchmark run against a different model changes this, rewrite this paragraph
+and flip the default — the instruction to settle it with evidence rather than assumption still holds.
 
 ## Benchmarking
 
@@ -400,6 +421,16 @@ not be reached exits non-zero, because otherwise an unreachable daemon looks lik
 mean something. For the same reason the report records the parameters it ran under, and records
 `seed` and `temperature` as unset for a client that never received them: two reports agreeing on a
 sampling parameter neither applied is worse than two reports that say nothing about it.
+
+**`--checkpoint` makes a multi-model run safe to kill and re-invoke verbatim.** A full run across
+several models is a multi-hour, hand-invoked process with nothing supervising it, and a run that dies
+partway with no record of what finished forces a full re-run to get one number. `BenchmarkCheckpoint`
+persists every `ExampleReport` to the checkpoint path immediately after it finishes — not batched —
+so the file on disk is never more than one in-flight example stale, and re-invoking the identical
+command line reuses everything already recorded rather than repeating it. It refuses to resume a
+checkpoint written under a different `--client`/`--seed`/`--temperature`/`--retries` rather than
+silently mixing two runs that were not produced under comparable conditions — the same reasoning
+`BenchmarkReport` already records its own parameters for.
 
 Ollama is passed a fixed `seed` and `temperature` so two runs are comparable — a benchmark whose
 rerun differs for unrecorded reasons cannot settle the question it was built to settle.
