@@ -27,12 +27,30 @@ import {
   slotsPerDayFor,
   type CalendarConfig,
 } from './config'
+import { SYSTEM_TIME_ZONE, zonedParts } from './timezone'
+
+// Every fixture below that does not test cross-zone behaviour explicitly
+// pins `timeZone` to the environment's own zone, so a bare `.getHours()` /
+// `.getMinutes()` read on a `slotStart` result still means what it always
+// meant here: this suite runs correctly under any system zone, not just one
+// CI happens to pin.
+const SYSTEM_TZ = SYSTEM_TIME_ZONE
 
 /** No hours restriction, 30-minute slots — the shipped default. */
-const DEFAULT: CalendarConfig = { slotMinutes: 30, openMinutes: null, closeMinutes: null }
+const DEFAULT: CalendarConfig = {
+  slotMinutes: 30,
+  openMinutes: null,
+  closeMinutes: null,
+  timeZone: SYSTEM_TZ,
+}
 
 /** The same slot size, with hours matching the grid's old hardcoded window. */
-const NINE_TO_FIVE: CalendarConfig = { slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 17 * 60 }
+const NINE_TO_FIVE: CalendarConfig = {
+  slotMinutes: 30,
+  openMinutes: 9 * 60,
+  closeMinutes: 17 * 60,
+  timeZone: SYSTEM_TZ,
+}
 
 /** The same day, at a finer granularity — the documented future change. */
 const TEN_MINUTE: CalendarConfig = { ...DEFAULT, slotMinutes: 10 }
@@ -105,7 +123,11 @@ describe('the config pivot: 30 to 10 minutes changes nothing but the config', ()
 })
 
 describe('slotStart', () => {
-  it('places a slot on the given calendar date at local wall-clock time', () => {
+  // `DEFAULT.timeZone` is pinned to the environment's own zone, so a plain
+  // local `.getHours()` / `.getMinutes()` read on the result means what it
+  // says here — the cross-zone claim (a Space's own zone, not the
+  // environment's) gets its own describe block below.
+  it('places a slot on the given calendar date at the Space\'s wall-clock time', () => {
     const slot = slotStart(new Date(2026, 6, 20, 17, 45), 12, DEFAULT)
     expect(slot.getFullYear()).toBe(2026)
     expect(slot.getMonth()).toBe(6)
@@ -124,6 +146,60 @@ describe('slotStart', () => {
     const slot = slotStart(new Date(2026, 6, 20, 9, 30, 44, 512), 5, DEFAULT)
     expect(slot.getSeconds()).toBe(0)
     expect(slot.getMilliseconds()).toBe(0)
+  })
+})
+
+describe('slotStart resolves through the Space\'s own timezone, not the viewer\'s', () => {
+  // The DEFERRED.md item 19 repro: a Space at 13:00 in `Europe/Berlin`
+  // (UTC+2 in July) must resolve to 11:00Z regardless of what zone this
+  // suite happens to run in — never a fixed offset computed once.
+  it('resolves the exact item 19 repro: Berlin 13:00 in July is 11:00Z', () => {
+    const berlin: CalendarConfig = { ...DEFAULT, timeZone: 'Europe/Berlin' }
+    const slot = slotStart(new Date(2026, 7, 3), 26 /* 13:00 at 30-minute slots */, berlin)
+    expect(slot.toISOString()).toBe('2026-08-03T11:00:00.000Z')
+  })
+
+  // "Both directions" — a viewer's own zone ahead of the venue's, and one
+  // behind it. Neither changes what gets booked (the venue's zone is what
+  // `slotStart` resolves through); reading the *same* resulting instant back
+  // in each viewer zone is what proves the two are honestly different clocks
+  // on one real instant, not two different bookings.
+  it('reads the same instant differently for a viewer ahead of the venue', () => {
+    const berlin: CalendarConfig = { ...DEFAULT, timeZone: 'Europe/Berlin' }
+    const slot = slotStart(new Date(2026, 7, 3), 26, berlin) // 13:00 Berlin
+    expect(zonedParts(slot, 'Europe/Berlin')).toMatchObject({ hour: 13, minute: 0 })
+    // Asia/Jerusalem is UTC+3 in August, an hour ahead of Berlin's UTC+2.
+    expect(zonedParts(slot, 'Asia/Jerusalem')).toMatchObject({ hour: 14, minute: 0 })
+  })
+
+  it('reads the same instant differently for a viewer behind the venue', () => {
+    const berlin: CalendarConfig = { ...DEFAULT, timeZone: 'Europe/Berlin' }
+    const slot = slotStart(new Date(2026, 7, 3), 26, berlin) // 13:00 Berlin, 11:00Z
+    // Pacific/Honolulu is UTC-10 year-round.
+    expect(zonedParts(slot, 'Pacific/Honolulu')).toMatchObject({
+      year: 2026,
+      month: 7,
+      day: 3,
+      hour: 1,
+      minute: 0,
+    })
+  })
+
+  it('resolves a venue behind UTC correctly too — not just ahead', () => {
+    const honolulu: CalendarConfig = { ...DEFAULT, timeZone: 'Pacific/Honolulu' }
+    const slot = slotStart(new Date(2026, 7, 3), 16 /* 08:00 */, honolulu)
+    expect(slot.toISOString()).toBe('2026-08-03T18:00:00.000Z')
+  })
+
+  it('resolves the identical wall-clock label to different instants across a DST boundary', () => {
+    // Mirrors `operating_hours.py`'s own docstring example: 07:00
+    // Europe/Berlin is 05:00Z in July (CEST, UTC+2) and 06:00Z in January
+    // (CET, UTC+1) — the same config, only the date changes.
+    const berlin: CalendarConfig = { ...DEFAULT, timeZone: 'Europe/Berlin' }
+    const july = slotStart(new Date(2026, 6, 20), 14 /* 07:00 */, berlin)
+    const january = slotStart(new Date(2026, 0, 20), 14, berlin)
+    expect(july.toISOString()).toBe('2026-07-20T05:00:00.000Z')
+    expect(january.toISOString()).toBe('2026-01-20T06:00:00.000Z')
   })
 })
 
@@ -150,7 +226,7 @@ describe('isSlotOutOfHours', () => {
     // Opens at 09:15: the 09:00-09:30 slot contains a minute the backend
     // would refuse, so the whole slot reads as out-of-hours — the grid must
     // never offer what the server will refuse.
-    const config = { slotMinutes: 30, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }
+    const config = { ...DEFAULT, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }
     expect(isSlotOutOfHours(18, config)).toBe(true)
     expect(isSlotOutOfHours(19, config)).toBe(false)
   })
@@ -179,24 +255,24 @@ describe('coherenceIssue', () => {
 
   it('rejects an opening time that does not land on a slot boundary', () => {
     expect(
-      coherenceIssue({ slotMinutes: 30, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }),
+      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }),
     ).toMatch(/Opening time must land/)
   })
 
   it('rejects a closing time that does not land on a slot boundary', () => {
     expect(
-      coherenceIssue({ slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 17 * 60 + 15 }),
+      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60, closeMinutes: 17 * 60 + 15 }),
     ).toMatch(/Closing time must land/)
   })
 
   it('rejects a closing time at or before the opening time', () => {
-    // DEFERRED.md item 17, seen from this frontend's browser-local model: a
-    // window that cannot resolve to a real span at all.
+    // DEFERRED.md item 18's shape, on the Space's own wall clock: a window
+    // that does not advance at all cannot describe a span.
     expect(
-      coherenceIssue({ slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 9 * 60 }),
+      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60, closeMinutes: 9 * 60 }),
     ).toMatch(/Closing time must be after/)
     expect(
-      coherenceIssue({ slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 8 * 60 }),
+      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60, closeMinutes: 8 * 60 }),
     ).toMatch(/Closing time must be after/)
   })
 })
@@ -207,18 +283,29 @@ describe('buildCalendarConfig', () => {
       slot_minutes: 30,
       opens_at: '09:00:00',
       closes_at: '17:00:00',
+      timezone: 'Europe/Berlin',
     })
     expect(result).toEqual({
       status: 'ok',
-      config: { slotMinutes: 30, openMinutes: 9 * 60, closeMinutes: 17 * 60 },
+      config: {
+        slotMinutes: 30,
+        openMinutes: 9 * 60,
+        closeMinutes: 17 * 60,
+        timeZone: 'Europe/Berlin',
+      },
     })
   })
 
   it('renders the whole day bookable for a Space with hours unset — never the old default window', () => {
-    const result = buildCalendarConfig({ slot_minutes: 30, opens_at: null, closes_at: null })
+    const result = buildCalendarConfig({
+      slot_minutes: 30,
+      opens_at: null,
+      closes_at: null,
+      timezone: 'UTC',
+    })
     expect(result).toEqual({
       status: 'ok',
-      config: { slotMinutes: 30, openMinutes: null, closeMinutes: null },
+      config: { slotMinutes: 30, openMinutes: null, closeMinutes: null, timeZone: 'UTC' },
     })
   })
 
@@ -227,25 +314,32 @@ describe('buildCalendarConfig', () => {
       slot_minutes: null,
       opens_at: '09:00:00',
       closes_at: '17:00:00',
+      timezone: 'UTC',
     })
     expect(result.status).toBe('ok')
     expect(result.status === 'ok' && result.config.slotMinutes).toBe(calendarConfig.slotMinutes)
   })
 
   it('degrades to a notice, never a throw, for a slot size that cannot tile the day', () => {
-    const result = buildCalendarConfig({ slot_minutes: 13, opens_at: null, closes_at: null })
+    const result = buildCalendarConfig({
+      slot_minutes: 13,
+      opens_at: null,
+      closes_at: null,
+      timezone: 'UTC',
+    })
     expect(result.status).toBe('incoherent')
     expect(result.status === 'incoherent' && result.message).toMatch(/must divide a day evenly/)
   })
 
   it('degrades to a notice for hours that cannot resolve to a real window', () => {
-    // The DEFERRED.md item 17 shape: an admin-configured Space whose hours
-    // are unusable. 5.9 does not repair this (that is engine work, out of
-    // scope) — it must not white-screen on it either.
+    // The DEFERRED.md item 18 shape: an admin-configured Space whose hours
+    // cross its own local midnight. This task does not repair that (it is
+    // out of scope, per the item) — it must not white-screen on it either.
     const result = buildCalendarConfig({
       slot_minutes: 30,
       opens_at: '21:00:00',
       closes_at: '09:00:00',
+      timezone: 'UTC',
     })
     expect(result.status).toBe('incoherent')
     expect(result.status === 'incoherent' && result.message).toMatch(/Closing time must be after/)

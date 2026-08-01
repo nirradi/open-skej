@@ -21,13 +21,6 @@ import type { SelectedInterval } from '../calendar/CalendarGrid'
 const MS_PER_MINUTE = 60 * 1000
 const MINUTES_PER_HOUR = 60
 
-const dayFormat = new Intl.DateTimeFormat(undefined, {
-  weekday: 'long',
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-})
-
 /** What the confirm panel shows about a pending booking. */
 export interface IntervalSummary {
   /** The calendar day, e.g. `Friday, Jul 24, 2026`. */
@@ -62,13 +55,25 @@ export function formatDuration(minutes: number): string {
   return `${plural(hours, 'hour')} ${plural(rest, 'minute')}`
 }
 
-/** Describes `interval` in the browser's local timezone. */
-export function summariseInterval(interval: SelectedInterval): IntervalSummary {
+/**
+ * Describes `interval` in `timeZone` — the Space's own zone, so the confirm
+ * panel states the same clock the grid the user clicked on did. A caller
+ * passing anything else would show a time the venue does not use and the
+ * server does not read.
+ */
+export function summariseInterval(interval: SelectedInterval, timeZone: string): IntervalSummary {
   const minutes = (interval.end.getTime() - interval.start.getTime()) / MS_PER_MINUTE
+  const dayFormat = new Intl.DateTimeFormat(undefined, {
+    weekday: 'long',
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone,
+  })
   return {
     day: dayFormat.format(interval.start),
-    start: formatClockTime(interval.start),
-    end: formatClockTime(interval.end),
+    start: formatClockTime(interval.start, timeZone),
+    end: formatClockTime(interval.end, timeZone),
     duration: formatDuration(minutes),
   }
 }

@@ -34,6 +34,7 @@ import { test as base, expect, type APIRequestContext, type Page } from '@playwr
 
 import { slotStartMinutes, slotsPerDay } from '../../frontend/src/config'
 import { dateFromKey, slotTestId } from '../../frontend/src/calendar/week'
+import { zonedTimeToInstant } from '../../frontend/src/timezone'
 
 export const BACKEND_URL = 'http://localhost:8000'
 
@@ -67,6 +68,13 @@ const SWEEP_YEARS = 1
  * does. `06-deep-link-login.spec.ts` mirrors the same string independently.
  */
 const SANDBOX_SPACE_A_NAME = 'Sandbox Space A (Berlin)'
+
+/**
+ * `app/backend/app/sandbox_seed.py`'s `SPACE_A_TIMEZONE`, mirrored for the
+ * same reason as `SANDBOX_SPACE_A_NAME` above — what `slotInstant` resolves
+ * a slot's wall-clock time through.
+ */
+const SANDBOX_SPACE_A_TIMEZONE = 'Europe/Berlin'
 
 export interface Booking {
   id: number
@@ -323,14 +331,25 @@ export function slotId(key: string, index: number): string {
 /**
  * The instant slot `index` on `key` begins, as the backend will record it.
  *
- * Valid only because the browser is pinned to UTC (see `playwright.config.ts`):
- * the grid builds slot times in *local* time, which under that pin is UTC.
+ * Resolved through `SANDBOX_SPACE_A_TIMEZONE` — every fixture in this file
+ * books against Space A — with the same `zonedTimeToInstant` seam the grid
+ * itself uses (`src/timezone.ts`), not an assumption about what zone the
+ * browser happens to be in. `playwright.config.ts` still pins the browser to
+ * a fixed zone for the suite's own determinism, but the grid no longer
+ * depends on it: DEFERRED.md item 19 is what made this helper's old
+ * UTC-offset shortcut wrong the moment the grid started resolving through
+ * the Space's own zone instead of the browser's.
  */
 export function slotInstant(key: string, index: number): Date {
   const [year, month, day] = key.split('-').map(Number)
   const minutes = slotStartMinutes(index)
-  return new Date(
-    Date.UTC(year, month - 1, day, Math.floor(minutes / 60), minutes % 60, 0, 0),
+  return zonedTimeToInstant(
+    year,
+    month - 1,
+    day,
+    Math.floor(minutes / 60),
+    minutes % 60,
+    SANDBOX_SPACE_A_TIMEZONE,
   )
 }
 

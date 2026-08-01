@@ -85,15 +85,15 @@ export default defineConfig({
     /**
      * Pin the browser clock to UTC.
      *
-     * The grid builds slot times in the browser's local timezone and the client
-     * serialises them with `toISOString()`, while the backend's availability
-     * rule compares the *UTC* wall clock against `AVAILABILITY_OPEN` /
-     * `AVAILABILITY_CLOSE`. Under a non-zero offset those two disagree, so a
-     * 06:30 slot the grid renders as bookable can come back `rule_denied`.
-     * Pinning to UTC makes them agree and keeps this suite deterministic on any
-     * developer's machine. It does **not** fix the underlying mismatch — see the
-     * note in the PR; that is a product decision for the Stream 3 integration,
-     * not something an E2E config should paper over silently.
+     * No longer load-bearing for the grid itself: it resolves every slot
+     * through the Space's own `timezone` (`DEFERRED.md` item 19), not the
+     * browser's, so this suite would pass identically under any pin. The pin
+     * stays for the suite's *own* determinism — `fixtures.ts`'s `slotInstant`
+     * and any other Node-side date math run in this process, not the page's,
+     * and a fixed zone here is what keeps their output identical on any
+     * developer's machine and in CI. See `slotInstant`'s own docblock for how
+     * it resolves a slot's instant now: through the Space's zone via the same
+     * `zonedTimeToInstant` seam the grid uses, not through this pin.
      */
     timezoneId: 'UTC',
 
