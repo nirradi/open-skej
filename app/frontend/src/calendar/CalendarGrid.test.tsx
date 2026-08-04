@@ -218,7 +218,7 @@ describe('a heterogeneous week (task 6.9)', () => {
     await renderGrid({ schedule })
 
     const friday = addDays(MONDAY, 4)
-    expect(screen.getByTestId(`calendar-day-notice-${toDateKey(friday)}`).textContent).toBe(message)
+    expect(screen.getByTestId(`calendar-notice-${toDateKey(friday)}`).textContent).toBe(message)
 
     // Advisory only: Friday's own slots are still rendered and selectable —
     // day offset 4 is entirely in the future relative to `NOW` (Wednesday),
@@ -228,7 +228,7 @@ describe('a heterogeneous week (task 6.9)', () => {
 
     // A day with no issue renders the identical testid, empty — never
     // absent, so "no issue" is distinguishable from "nothing rendered yet".
-    expect(screen.getByTestId(`calendar-day-notice-${toDateKey(MONDAY)}`).textContent).toBe('')
+    expect(screen.getByTestId(`calendar-notice-${toDateKey(MONDAY)}`).textContent).toBe('')
   })
 })
 

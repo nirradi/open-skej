@@ -47,13 +47,13 @@
  * grid — so a misaligned bound never lets the grid *offer* a slot the
  * backend would refuse; it is just wasted capacity an admin might want to
  * tidy up. It is surfaced as a small per-day note in that day's header
- * (`data-testid="calendar-day-notice-{dateKey}"`) rather than a notice that
- * replaces the grid — see the PR description for why a whole-grid notice
- * (still used one level up, in `ResourceCalendarPage`, for a `/schedule`
- * fetch that fails outright) is the wrong shape for something this
- * inconsequential to a booking's own correctness.
- *
-
+ * (`data-testid="calendar-notice-{dateKey}"` — deliberately *not* under the
+ * `calendar-day-` prefix, which the E2E suite selects on to count the seven
+ * day headers) rather than a notice that replaces the grid. A whole-grid
+ * notice is still right one level up, in `ResourceCalendarPage`, for a
+ * `/schedule` fetch that fails outright — with no resolved schedule at all
+ * there is nothing honest to draw — but it is the wrong shape here, where
+ * every other day is describable and this one is merely untidy.
  * ## What this component does not do
  *
  * It selects; it does not book and it does not cancel. It reports two kinds of
@@ -712,7 +712,7 @@ export function CalendarGrid({
                     alignment. */}
                 <div
                   className="flex h-4 items-center justify-center truncate px-1 text-[9px] leading-none text-amber-700"
-                  data-testid={`calendar-day-notice-${dateKey}`}
+                  data-testid={`calendar-notice-${dateKey}`}
                   title={daySchedule.coherenceIssue ?? undefined}
                 >
                   {daySchedule.coherenceIssue}
