@@ -40,3 +40,10 @@ node_modules/
 *.db
 *.db-wal
 *.db-shm
+
+# Scratch written by this repo's own agent loop (`ops/agent-protocol.md`) — a task prompt, a resume
+# note, a run log. Per-run orchestration state that describes one attempt at one task, never the
+# repository, and it has been committed by accident once already.
+.task*-prompt.md
+.task*-resume.md
+.task*-out.log
