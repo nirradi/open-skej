@@ -42,6 +42,7 @@ from app.identity.models import (
     SpaceRule,
     User,
 )
+from app.rules_stub import DaySchedule
 
 # The four states a link-holder can be in with respect to a Space, as reported by
 # ``GET /spaces/{public_id}/preview``.
@@ -616,3 +617,42 @@ class SpaceRuleUpdate(BaseModel):
         if "enabled" in self.model_fields_set and self.enabled is None:
             raise ValueError("enabled may not be null; omit it to leave it unchanged")
         return self
+
+
+# --- The resolved schedule (task 6.9). ---------------------------------------
+#
+# `GET /spaces/{public_id}/schedule` is the server-resolves-the-frontend-
+# renders endpoint: for each date in the requested range it reports the slot
+# size and operating window a booking on that date would actually be judged
+# against, so the calendar never has to re-derive rule semantics itself (see
+# `app.rules_stub.resolve_day_schedule`, which does all the actual work —
+# this model only shapes its output for the wire).
+
+
+class DayScheduleRead(BaseModel):
+    """One date's resolved schedule, as ``GET /spaces/{public_id}/schedule`` serves it.
+
+    ``opens_at`` / ``closes_at`` stay the Space's own **local** wall-clock
+    times — this endpoint, unlike ``app.rules_stub``'s booking-evaluation
+    path, never converts to UTC (see that function's docstring). ``None``
+    means the corresponding rule type is not enforced on this date at all;
+    ``coherence_issue`` is ``None`` unless the resolved window and slot size
+    genuinely conflict (a zero-width "closed all day" window is not a
+    conflict — see ``resolve_day_schedule``).
+    """
+
+    date: date
+    slot_minutes: Optional[int]
+    opens_at: Optional[time]
+    closes_at: Optional[time]
+    coherence_issue: Optional[str]
+
+    @classmethod
+    def build(cls, on_date: date, schedule: DaySchedule) -> "DayScheduleRead":
+        return cls(
+            date=on_date,
+            slot_minutes=schedule.slot_minutes,
+            opens_at=schedule.opens_at,
+            closes_at=schedule.closes_at,
+            coherence_issue=schedule.coherence_issue,
+        )

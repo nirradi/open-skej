@@ -20,7 +20,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import type { Booking, ListResourceBookingsResult } from '../api'
 import type { CalendarConfig } from '../config'
 import { CalendarGrid } from './CalendarGrid'
-import { slotsPerDayFor } from '../config'
+import { buildWeekSchedule, slotsPerDayFor, uniformWeekSchedule } from '../config'
 import { addDays, DAYS_PER_WEEK, slotTestId, startOfWeek, toDateKey } from './week'
 import { SYSTEM_TIME_ZONE } from '../timezone'
 
@@ -135,7 +135,7 @@ afterEach(cleanup)
 
 describe('the grid is driven by config.ts', () => {
   it('renders one row per day for every 30-minute slot', async () => {
-    await renderGrid({ config: THIRTY })
+    await renderGrid({ schedule: uniformWeekSchedule(THIRTY) })
     // The grid always spans the full day (task 5.9) — 24 hours at 30 minutes
     // is 48 rows, whatever a Space's own hours say.
     expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('48')
@@ -146,14 +146,14 @@ describe('the grid is driven by config.ts', () => {
   })
 
   it('renders one row per configured slot at 10 minutes with no other change', async () => {
-    await renderGrid({ config: TEN })
+    await renderGrid({ schedule: uniformWeekSchedule(TEN) })
     expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('144')
     expect(slot(0, 143)).toBeTruthy()
     expect(screen.queryByTestId(slotTestId(MONDAY, 144))).toBeNull()
   })
 
   it('labels slots starting at midnight, whatever the configured hours', async () => {
-    await renderGrid({ config: TEN })
+    await renderGrid({ schedule: uniformWeekSchedule(TEN) })
     expect(slot(0, 0).getAttribute('aria-label')).toContain('00:00')
     expect(slot(0, 6).getAttribute('aria-label')).toContain('01:00')
   })
@@ -163,6 +163,72 @@ describe('the grid is driven by config.ts', () => {
     for (let offset = 0; offset < 7; offset += 1) {
       expect(slot(offset, 0)).toBeTruthy()
     }
+  })
+})
+
+describe('a heterogeneous week (task 6.9)', () => {
+  // Monday resolves to 15-minute slots; every other day resolves to the
+  // ordinary 30-minute default — genuinely different slot sizes inside the
+  // same visible week, the shape `applies_to` makes possible once a rule can
+  // be scoped to particular weekdays or dates rather than the whole Space.
+  function heterogeneousEntries(
+    coherenceIssues: Partial<Record<number, string>> = {},
+  ): Parameters<typeof buildWeekSchedule>[0] {
+    return Array.from({ length: DAYS_PER_WEEK }, (_, i) => ({
+      date: toDateKey(addDays(MONDAY, i)),
+      slot_minutes: i === 0 ? 15 : 30,
+      opens_at: null,
+      closes_at: null,
+      coherence_issue: coherenceIssues[i] ?? null,
+    }))
+  }
+
+  it('renders the shared axis at the finest slot size configured anywhere in the week', async () => {
+    const schedule = buildWeekSchedule(heterogeneousEntries(), SYSTEM_TZ)
+    await renderGrid({ schedule })
+
+    // 1440 / 15 = 96 — the axis is Monday's 15-minute grid, the finest of the
+    // two configured this week, not the 30-minute default every other day uses.
+    expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('96')
+  })
+
+  it("lays out each day's own buttons at that day's own slot size, not the shared axis's", async () => {
+    const schedule = buildWeekSchedule(heterogeneousEntries(), SYSTEM_TZ)
+    await renderGrid({ schedule })
+
+    // Monday (15-minute) renders 96 of its own buttons — flush with the axis.
+    expect(slot(0, 95)).toBeTruthy()
+    expect(screen.queryByTestId(slotTestId(MONDAY, 96))).toBeNull()
+
+    // Tuesday (the ordinary 30-minute default) renders only 48 — half the
+    // axis row count. It shares the same total `dayHeight` as Monday (both
+    // fill the identical pixel height in normal document flow, per
+    // `config.ts`'s `finestSlotMinutes` docblock) but not its row lines. This
+    // is the readability limit the PR description records as a finding: a
+    // 30-minute day beside a 15-minute one lines up on overall height, not on
+    // where each row falls.
+    const tuesday = addDays(MONDAY, 1)
+    expect(slot(1, 47)).toBeTruthy()
+    expect(screen.queryByTestId(slotTestId(tuesday, 48))).toBeNull()
+  })
+
+  it("shows a day's own coherence issue as an advisory note without blocking that day's grid", async () => {
+    const message = 'Opening time must land on a 15-minute slot boundary.'
+    const schedule = buildWeekSchedule(heterogeneousEntries({ 4: message }), SYSTEM_TZ)
+    await renderGrid({ schedule })
+
+    const friday = addDays(MONDAY, 4)
+    expect(screen.getByTestId(`calendar-notice-${toDateKey(friday)}`).textContent).toBe(message)
+
+    // Advisory only: Friday's own slots are still rendered and selectable —
+    // day offset 4 is entirely in the future relative to `NOW` (Wednesday),
+    // so nothing else would block index 0.
+    expect(slot(4, 0)).toBeTruthy()
+    expect(slot(4, 0).disabled).toBe(false)
+
+    // A day with no issue renders the identical testid, empty — never
+    // absent, so "no issue" is distinguishable from "nothing rendered yet".
+    expect(screen.getByTestId(`calendar-notice-${toDateKey(MONDAY)}`).textContent).toBe('')
   })
 })
 
@@ -181,7 +247,7 @@ describe('the DEFERRED.md item 19 repro: a Space in one zone, a viewer in anothe
   const AUGUST_MONDAY = new Date(2026, 7, 3)
 
   it('renders the 13:00 row as bookable, not greyed', async () => {
-    await renderGrid({ config: BERLIN, initialWeekStart: AUGUST_MONDAY })
+    await renderGrid({ schedule: uniformWeekSchedule(BERLIN), initialWeekStart: AUGUST_MONDAY })
     // 13:00 at 30-minute slots, from midnight, is index 26.
     const row = screen.getByTestId(slotTestId(AUGUST_MONDAY, 26))
     expect(row.dataset.blocked).toBeUndefined()
@@ -193,7 +259,7 @@ describe('the DEFERRED.md item 19 repro: a Space in one zone, a viewer in anothe
 
   it('selects the exact instant the backend accepts — 11:00Z, not 10:00Z', async () => {
     const onSelectionChange = vi.fn()
-    await renderGrid({ config: BERLIN, initialWeekStart: AUGUST_MONDAY, onSelectionChange })
+    await renderGrid({ schedule: uniformWeekSchedule(BERLIN), initialWeekStart: AUGUST_MONDAY, onSelectionChange })
 
     const row = screen.getByTestId(slotTestId(AUGUST_MONDAY, 26))
     fireEvent.pointerDown(row)
@@ -206,7 +272,7 @@ describe('the DEFERRED.md item 19 repro: a Space in one zone, a viewer in anothe
 
 describe('out-of-hours slots', () => {
   it('greys slots before opening and from closing onward, without disappearing', async () => {
-    await renderGrid({ config: NINE_TO_FIVE })
+    await renderGrid({ schedule: uniformWeekSchedule(NINE_TO_FIVE) })
     // 08:30 is one slot before opening; 09:00 is the first open slot.
     expect(slot(4, 17).dataset.blocked).toBe('out-of-hours')
     expect(slot(4, 17).disabled).toBe(true)
@@ -217,7 +283,7 @@ describe('out-of-hours slots', () => {
   })
 
   it('still renders the full day rather than clipping it to the open window', async () => {
-    await renderGrid({ config: NINE_TO_FIVE })
+    await renderGrid({ schedule: uniformWeekSchedule(NINE_TO_FIVE) })
     expect(screen.getByTestId('calendar-grid').dataset.slotsPerDay).toBe('48')
     expect(slot(4, 0)).toBeTruthy()
     expect(slot(4, 47)).toBeTruthy()
@@ -230,7 +296,7 @@ describe('out-of-hours slots', () => {
     const day = new Date(MONDAY.getFullYear(), MONDAY.getMonth(), MONDAY.getDate() + 4)
     const start = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 7, 0)
     resolveWith([booking(21, start, new Date(start.getTime() + 30 * 60_000))])
-    await renderGrid({ config: NINE_TO_FIVE })
+    await renderGrid({ schedule: uniformWeekSchedule(NINE_TO_FIVE) })
 
     expect(screen.getByTestId('booking-21')).toBeTruthy()
     expect(slot(4, 14).dataset.blocked).toBe('out-of-hours')
@@ -638,7 +704,7 @@ describe('selecting a booking to cancel it', () => {
     // hit-testing itself is unobservable here. Asserting the geometric
     // invariant is what actually holds the guarantee up.
     withBooking()
-    await renderGrid({ config: THIRTY })
+    await renderGrid({ schedule: uniformWeekSchedule(THIRTY) })
 
     const slotHeight = parseFloat(slot(4, 0).style.height)
     const block = screen.getByTestId('booking-11')

@@ -42,6 +42,7 @@ Translations that happen here and nowhere else:
 """
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -352,7 +353,7 @@ def _engine_record(booking: BookingRequest) -> EngineBookingRecord:
     )
 
 
-def _row_applies(applies_to: dict | None, on_date: date) -> bool:
+def row_applies(applies_to: dict | None, on_date: date) -> bool:
     """Whether a row scoped by ``applies_to`` governs ``on_date``.
 
     ``on_date`` must already be the booking's own **local** date
@@ -364,6 +365,12 @@ def _row_applies(applies_to: dict | None, on_date: date) -> bool:
     ``None`` means always, per ``SpaceRule``'s documented shape. Scoping is
     an adapter-level concern applied uniformly before the registry ever
     builds anything — a rule type declares no day/date handling of its own.
+
+    Exported (task 6.9, no leading underscore) so ``resolve_day_schedule``
+    can filter ``space_rules`` rows by the identical rule this module's own
+    booking-evaluation path uses — a second implementation of "does this row
+    apply to this date" could silently disagree with this one, which is
+    exactly the bug class this codebase's docs keep warning about.
     """
     if applies_to is None:
         return True
@@ -443,6 +450,8 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     3. **Looked up in ``REGISTRY`` by ``rule_type``.** An id not registered
        raises ``_UnbuildableRuleRowError``, caught by ``evaluate`` and turned
        into a denial — never a skip (see that exception's docstring).
+       (``row_applies`` above, not this step, is what ``resolve_day_schedule``
+       reuses; it needs no registry lookup at all — see that function.)
     4. **Resolved, if its type needs it** (``_resolve_for_row``), **and
        built** via ``RuleType.build``. A ``KeyError``/``TypeError``/
        ``ValueError`` from either step — a required param missing, a stored
@@ -466,7 +475,7 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     for row in config.rules:
         if not row.enabled:
             continue
-        if not _row_applies(row.applies_to, on_date):
+        if not row_applies(row.applies_to, on_date):
             continue
 
         rule_type = REGISTRY.get(row.rule_type)
@@ -493,6 +502,126 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     buildable.sort(key=lambda entry: (entry[0], entry[1]))
     canon.extend(rule for _, _, rule in buildable)
     return tuple(canon)
+
+
+@dataclass(frozen=True)
+class DaySchedule:
+    """What a booking on one date would actually be judged against, resolved
+    entirely in the Space's own local wall clock — never converted to UTC,
+    unlike every other resolution this module performs.
+
+    Built by ``resolve_day_schedule`` for ``GET /spaces/{public_id}/schedule``
+    (task 6.9), the endpoint the calendar UI reads instead of re-deriving
+    rule semantics itself: the engine stays the sole validator, so a second
+    implementation of "what hours/slot size govern this date" in TypeScript
+    is exactly the duplication ``DEFERRED.md`` item 13 warns against.
+
+    ``slot_minutes`` / ``opens_at`` / ``closes_at`` are ``None`` when no
+    enabled, date-matching row of that type governs this date at all — the
+    same "not enforced" convention ``SpaceRuleConfig`` and the frontend's
+    ``CalendarConfig`` already use. ``coherence_issue`` is set only when a
+    *real* (non-zero-width) resolved window's bounds do not land on the
+    resolved slot grid; see ``resolve_day_schedule`` for why a zero-width
+    window is not one of these cases.
+    """
+
+    slot_minutes: int | None
+    opens_at: time | None
+    closes_at: time | None
+    coherence_issue: str | None
+
+
+def _minutes_since_midnight(value: time) -> int:
+    return value.hour * 60 + value.minute
+
+
+def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
+    """What a booking on ``on_date`` would actually be judged against, in the
+    Space's own local wall clock.
+
+    Mirrors ``_build_canon``'s own filtering (``row.enabled`` and
+    ``row_applies``) but stays local rather than resolving to UTC — this
+    endpoint's whole point is to report the Space's own wall-clock hours and
+    slot size, the shape ``buildCalendarConfig`` (frontend, pre-6.9) used to
+    read straight off Space columns. Unlike ``_build_canon`` this never
+    touches ``REGISTRY`` or ``RuleType.build``: an ``availability_hours``
+    row's local ``opens_at``/``closes_at`` and a ``slot_alignment`` row's
+    local ``slot_minutes`` are read directly off ``params``, with no anchor
+    to resolve — the anchor is always the date's own local midnight, which
+    is irrelevant to what this endpoint reports.
+
+    **Every matching row of a type must hold simultaneously** — "the engine
+    stays a flat AND of deny predicates" (``ops/plans/stream-6-plan.md``,
+    Decisions) — so two or more matching rows of one type are *combined*,
+    never picked from:
+
+    * ``availability_hours`` — the **intersection** of every matching row's
+      own window: ``effective_open = max(opens_at)``,
+      ``effective_close = min(closes_at)``. A single row can never itself be
+      inverted (``opens_at < closes_at`` is enforced at write time,
+      ``.claude/rules/identity-and-access.md``), but the intersection of two
+      or more legitimately can be — "9-12" and "14-18" together permit
+      nothing. That is a real flat-AND outcome ("closed all day on this
+      date"), not a coherence error, so it is normalised to a **zero-width**
+      window (``effective_close = effective_open``) rather than reported as
+      broken.
+    * ``slot_alignment`` — the **LCM** of every matching row's own
+      ``slot_minutes``: a date must land on a multiple of *every* matching
+      row's own grid simultaneously, and being divisible by the LCM is
+      exactly that (not the minimum, which does not make every row's grid a
+      subset of it). Every individually stored ``slot_minutes`` already
+      divides 1440 (``SlotAlignmentRule.__init__``), so the LCM of any two
+      such divisors also divides 1440 — this can never itself produce an
+      incoherent day length.
+
+    No matching row of a type at all resolves to ``None`` for it, matching
+    ``SpaceRuleConfig``'s and the frontend's ``CalendarConfig``'s "not
+    configured" shape.
+
+    ``coherence_issue`` fires only when there is a **real** (non-zero-width)
+    resolved window *and* a resolved slot size whose boundaries do not land
+    on it — mirroring ``config.ts``'s own ``coherenceIssue`` wording. A
+    zero-width "closed all day" window is never flagged: there is no grid to
+    misalign with nothing bookable in it.
+    """
+    matching = [row for row in config.rules if row.enabled and row_applies(row.applies_to, on_date)]
+
+    hours_rows = [row for row in matching if row.rule_type == "availability_hours"]
+    if hours_rows:
+        opens_at = max(time.fromisoformat(row.params["opens_at"]) for row in hours_rows)
+        closes_at = min(time.fromisoformat(row.params["closes_at"]) for row in hours_rows)
+        if closes_at <= opens_at:
+            # The intersection of two or more matching windows can
+            # legitimately come out empty or inverted (see docstring above) —
+            # normalise to a zero-width window rather than report it broken.
+            closes_at = opens_at
+    else:
+        opens_at = None
+        closes_at = None
+
+    slot_rows = [row for row in matching if row.rule_type == "slot_alignment"]
+    slot_minutes = (
+        math.lcm(*(int(row.params["slot_minutes"]) for row in slot_rows)) if slot_rows else None
+    )
+
+    coherence_issue: str | None = None
+    if (
+        opens_at is not None
+        and closes_at is not None
+        and closes_at != opens_at
+        and slot_minutes is not None
+    ):
+        if _minutes_since_midnight(opens_at) % slot_minutes != 0:
+            coherence_issue = f"Opening time must land on a {slot_minutes}-minute slot boundary."
+        elif _minutes_since_midnight(closes_at) % slot_minutes != 0:
+            coherence_issue = f"Closing time must land on a {slot_minutes}-minute slot boundary."
+
+    return DaySchedule(
+        slot_minutes=slot_minutes,
+        opens_at=opens_at,
+        closes_at=closes_at,
+        coherence_issue=coherence_issue,
+    )
 
 
 def evaluate(

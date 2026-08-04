@@ -32,7 +32,8 @@ The mapping of outcomes to status codes:
 **The rule-engine call's shape changes here, by design (task 4.13b).** It was
 ``evaluate(request)`` against the module-level ``DEFAULT_CANON``; it is now
 ``evaluate(request, config, history)`` against a canon assembled from the
-Space's own configuration — see ``_space_rule_config`` and
+Space's own configuration — see ``app.identity.service.space_rule_config``
+(shared, task 6.9, with ``GET /spaces/{public_id}/schedule``) and
 ``_load_space_history`` below. The verdict is still read the same way:
 ``verdict.allowed`` / ``verdict.message``.
 """
@@ -59,7 +60,7 @@ from app.identity import service
 from app.identity.authz import SpaceContext, require_space_role, role_at_least
 from app.identity.models import MembershipRole, Resource, Space, User
 from app.db.session import get_session
-from app.rules_stub import BookingRequest, SpaceRuleConfig, SpaceRuleRow, evaluate
+from app.rules_stub import BookingRequest, evaluate
 from app.schemas import (
     BookingAlreadyCancelled,
     BookingAlreadyStarted,
@@ -155,30 +156,6 @@ def resolve_resource(
 ResourceCtx = Annotated[ResourceBookingContext, Depends(resolve_resource)]
 
 
-def _space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
-    """Build this Space's rule configuration for the engine adapter.
-
-    ``rules_stub`` stays ORM-free (its own module docstring), so this is the
-    one place a ``Space`` row and its ``space_rules`` rows meet
-    ``SpaceRuleConfig``. Since task 6.6 this is a query — ``service.
-    list_space_rules`` — rather than a field-for-field copy off scalar
-    columns on ``Space`` itself; those columns are read by nothing any more.
-    """
-    return SpaceRuleConfig(
-        timezone=space.timezone,
-        rules=tuple(
-            SpaceRuleRow(
-                id=row.id,
-                rule_type=row.rule_type,
-                params=row.params,
-                applies_to=row.applies_to,
-                enabled=row.enabled,
-            )
-            for row in service.list_space_rules(session, space)
-        ),
-    )
-
-
 def _load_space_history(
     session: Session, space: Space, user_id: int, *, now: datetime
 ) -> tuple[BookingRequest, ...]:
@@ -268,7 +245,7 @@ def create_resource_booking(
         )
 
     space = context.space_context.space
-    config = _space_rule_config(session, space)
+    config = service.space_rule_config(session, space)
 
     # One instant, shared by the history query and the engine's own clock, so a
     # request straddling a window boundary cannot see one "now" build the

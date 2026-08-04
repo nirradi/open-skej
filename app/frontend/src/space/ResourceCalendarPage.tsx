@@ -27,16 +27,24 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 
-import { getSpace, listResources, type Booking, type Resource, type Space } from '../api'
+import {
+  getSpace,
+  getSpaceSchedule,
+  listResources,
+  type Booking,
+  type Resource,
+  type Space,
+} from '../api'
 import { BookingPanel, CancelPanel } from '../booking'
 import {
   CalendarGrid,
+  DAYS_PER_WEEK,
   parseWeekStartParam,
   startOfWeek,
   toDateKey,
   type SelectedInterval,
 } from '../calendar'
-import { buildCalendarConfig } from '../config'
+import { buildWeekSchedule, type WeekSchedule } from '../config'
 import { SYSTEM_TIME_ZONE, zonedCalendarDate } from '../timezone'
 import { NotFoundCard, SpaceAccessGate } from './SpaceAccessGate'
 
@@ -81,6 +89,9 @@ export function ResourceCalendarRoute() {
 }
 
 type HeaderLoad = { space: Space; resource: Resource | null; resourceCount: number } | null
+
+/** Copy for a `/schedule` fetch that failed in a way the user cannot act on. */
+const SCHEDULE_LOAD_ERROR_FALLBACK = "We couldn't load this Space's schedule."
 
 export function ResourceCalendarPage() {
   const { publicId, resourceId: resourceIdParam } = useParams<{
@@ -219,33 +230,64 @@ export function ResourceCalendarPage() {
     header !== null && (header.space.my_role === 'admin' || header.space.my_role === 'owner')
 
   /**
-   * The grid's layout, built from this Space's own schedule once the header
-   * fetch resolves it. `null` while pending, so `CalendarGrid` renders on its
-   * own fallback (the whole day, unrestricted) rather than waiting on a
-   * second request it does not otherwise need — the same "independent of the
-   * header fetch" property the component's own docblock already claims.
-   *
-   * An `'incoherent'` result (see `coherenceIssue` in `config.ts`) means this
-   * Space's `slot_minutes` / `opens_at` / `closes_at` cannot describe a valid
-   * grid — a bad admin edit, or the `DEFERRED.md` item 18 shape where a
-   * Space's local hours cross its own local midnight and are unrepresentable
-   * in the first place. Rather than guess at a grid from data that cannot
-   * produce one, the calendar is replaced with a notice: the grid must never
-   * offer what the server will refuse, and a best-effort window built from
-   * nonsense data is exactly that risk.
-   *
-   * Memoized on `header`: `CalendarGrid` puts this in the dependency array of
-   * both `selectedInterval` and the effect that reports it upward through
-   * `onSelectionChange`, so a fresh object here on every render — even one
-   * describing the same schedule — retriggers that effect, which calls back
-   * into this component's own `setSelection` and re-renders it, rebuilding
-   * this object again. That feedback loop doesn't converge: selecting a
-   * single slot hangs the page in an infinite render loop.
+   * `GET /spaces/{public_id}/schedule` for the visible week — the
+   * server-resolved per-date slot size and operating window `CalendarGrid`
+   * renders instead of re-deriving rule semantics itself (task 6.9). Keyed on
+   * `weekStart` and `timeZone` by value, the same idiom `CalendarGrid`'s own
+   * `requestKey` uses for its booking fetch: a re-render with an equal-but-
+   * new `weekStart` object (see the stabilisation comment above) must not
+   * re-fire this fetch, but a genuine change to either — paging the week, or
+   * `timeZone` moving off its bootstrapping placeholder once the header
+   * resolves — must.
    */
-  const configResult = useMemo(
-    () => (header !== null ? buildCalendarConfig(header.space) : null),
-    [header],
-  )
+  const scheduleKey = `${weekStart.getTime()}:${timeZone}`
+
+  const [scheduleState, setScheduleState] = useState<
+    | { status: 'ok'; key: string; schedule: WeekSchedule }
+    | { status: 'error'; key: string; message: string }
+    | null
+  >(null)
+
+  useEffect(() => {
+    if (!validParams || !publicId) return
+    let cancelled = false
+
+    void getSpaceSchedule(publicId, weekStart, DAYS_PER_WEEK).then((result) => {
+      if (cancelled) return
+      if (result.outcome === 'ok') {
+        setScheduleState({
+          status: 'ok',
+          key: scheduleKey,
+          schedule: buildWeekSchedule(result.data, timeZone),
+        })
+        return
+      }
+      // Every failure outcome here is a genuine "we don't know this Space's
+      // schedule" — unlike a per-day `coherence_issue` (advisory, rendered
+      // inside `CalendarGrid` itself), this is the one case task 6.9 keeps a
+      // whole-grid notice for: with no resolved schedule at all there is
+      // nothing honest to render as a grid.
+      const message =
+        result.outcome === 'invalid_request' ? SCHEDULE_LOAD_ERROR_FALLBACK : result.message
+      setScheduleState({ status: 'error', key: scheduleKey, message })
+    })
+
+    return () => {
+      cancelled = true
+    }
+    // `weekStart` and `timeZone` are read inside this effect only to compute
+    // the request, and `scheduleKey` already encodes both by value — see its
+    // own docblock. Listing the values themselves here instead would risk
+    // re-firing on a fresh-but-equal `Date`, the same hazard `CalendarGrid`'s
+    // own booking fetch already guards against one layer down.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publicId, scheduleKey, validParams])
+
+  // Stale once the visible week or zone has moved on from the request this
+  // state answers — derived during render, not reset by an effect, so a page
+  // navigating to a new week does not flash last week's resolved schedule
+  // against this week's grid before the new fetch settles.
+  const schedule = scheduleState !== null && scheduleState.key === scheduleKey ? scheduleState : null
 
   // The route pattern makes this unreachable in practice; TypeScript does not
   // know the params are well-formed, and a crash here is not worth asserting
@@ -289,14 +331,14 @@ export function ResourceCalendarPage() {
 
       <div className="mt-6 flex flex-col gap-6 lg:flex-row lg:items-start">
         <div className="min-w-0 flex-1">
-          {configResult?.status === 'incoherent' ? (
+          {schedule?.status === 'error' ? (
             <p
               role="alert"
               data-testid="calendar-config-notice"
               className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800"
             >
-              This Space&rsquo;s schedule can&rsquo;t be shown: {configResult.message} An admin
-              needs to fix it in Schedule settings before this calendar can be used.
+              {schedule.message} Try again shortly, or contact this Space&rsquo;s admin if it keeps
+              happening.
             </p>
           ) : (
             <CalendarGrid
@@ -304,7 +346,7 @@ export function ResourceCalendarPage() {
               resourceId={resourceId}
               now={now}
               weekStart={weekStart}
-              config={configResult?.status === 'ok' ? configResult.config : undefined}
+              schedule={schedule?.status === 'ok' ? schedule.schedule : undefined}
               onWeekChange={handleWeekChange}
               onSelectionChange={handleSelectionChange}
               onBookingSelect={handleBookingSelect}

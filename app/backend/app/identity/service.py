@@ -42,6 +42,7 @@ from app.identity.models import (
     User,
 )
 from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceRuleUpdate, SpaceUpdate
+from app.rules_stub import SpaceRuleConfig, SpaceRuleRow
 
 # The name the auto-created first Resource is given. A fresh Space is a venue with
 # one bookable calendar rather than an empty shell, so the admin's primary flow
@@ -644,6 +645,35 @@ def list_space_rules(session: Session, space: Space) -> Sequence[SpaceRule]:
         )
         .scalars()
         .all()
+    )
+
+
+def space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
+    """Build this Space's rule configuration for the engine adapter.
+
+    ``app.rules_stub`` stays ORM-free by its own module docstring, so this is
+    the one place a ``Space`` row and its ``space_rules`` rows meet
+    ``SpaceRuleConfig`` — moved here (task 6.9) from a router-local helper of
+    the same shape in ``app.routers.resource_bookings``, so that module and
+    the new ``GET /spaces/{public_id}/schedule`` handler both build a
+    ``SpaceRuleConfig`` the same way, once. It could not live inside
+    ``app.rules_stub`` itself: that module is deliberately ORM-free (its own
+    docstring — "it receives ``SpaceRuleConfig`` ... it does not query for
+    either"), and this function's whole job is the query
+    (``list_space_rules``) that ``rules_stub`` refuses to own.
+    """
+    return SpaceRuleConfig(
+        timezone=space.timezone,
+        rules=tuple(
+            SpaceRuleRow(
+                id=row.id,
+                rule_type=row.rule_type,
+                params=row.params,
+                applies_to=row.applies_to,
+                enabled=row.enabled,
+            )
+            for row in list_space_rules(session, space)
+        ),
     )
 
 

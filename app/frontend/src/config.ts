@@ -275,3 +275,155 @@ export function buildCalendarConfig(space: {
   if (issue !== null) return { status: 'incoherent', message: issue }
   return { status: 'ok', config }
 }
+
+// --- The resolved per-day schedule (task 6.9) -------------------------------
+//
+// `buildCalendarConfig` above builds one `CalendarConfig` for the whole
+// Space, which cannot express "Tuesdays are different" now that a rule's
+// `applies_to` can narrow it to particular weekdays or dates. It stays —
+// 6.10 is what removes it, once the Space columns it reads are dropped —
+// but `CalendarGrid` no longer uses it for layout. This is what replaces it:
+// a per-date resolution read from `GET /spaces/{public_id}/schedule`
+// (`app.rules_stub.resolve_day_schedule`, the backend's own flat-AND
+// resolution), never re-derived here.
+
+/**
+ * One date's resolved slot size and operating window, in minutes since
+ * midnight — the per-day counterpart to `CalendarConfig`'s single global
+ * values, built from one entry of `GET /spaces/{public_id}/schedule`'s
+ * response (`DayScheduleRead` in `api/types.ts`).
+ *
+ * `openMinutes` / `closeMinutes` `null` means the Space enforces no bound on
+ * this date, exactly like `CalendarConfig`'s fields. `slotMinutes` falls
+ * back to the shipped default (`calendarConfig.slotMinutes`) when the Space
+ * configures no slot rule for the date at all, mirroring
+ * `buildCalendarConfig`'s identical fallback for the single-config shape.
+ *
+ * `coherenceIssue` is carried straight through from the server's own
+ * `DayScheduleRead.coherence_issue` rather than recomputed by this file's
+ * `coherenceIssue()` function: the two happen to check the same thing today
+ * (an hours bound that does not land on the slot grid), but only one of them
+ * may be the source of truth for a per-date resolution driven by `applies_to`,
+ * and it is the server's — this module must never re-derive rule semantics
+ * (`.claude/rules/rule-engine.md`).
+ */
+export interface DaySchedule {
+  slotMinutes: number
+  openMinutes: number | null
+  closeMinutes: number | null
+  coherenceIssue: string | null
+}
+
+/**
+ * A week's resolved layout: what `slotStart` etc. get called with. Reduces
+ * to one `DaySchedule` per date, sharing one `timeZone` — `timezone` is the
+ * one genuinely per-Space column left (`.claude/rules/identity-and-access.md`),
+ * so it is never per-day the way hours and slot size now are.
+ *
+ * `forDate` rather than a plain `Record` keyed by date: a `CalendarGrid`
+ * asking about a date this `WeekSchedule` was never built for (nothing
+ * fetched yet, or a date outside the requested range) needs an honest answer
+ * rather than a lookup a caller has to null-check everywhere, and the
+ * fallback — the shipped default, matching `uniformWeekSchedule` below and
+ * `calendarConfig`'s own module default — is exactly what a `CalendarConfig`
+ * built with `?? calendarConfig` already resolved to before this task.
+ */
+export interface WeekSchedule {
+  timeZone: string
+  forDate: (dateKey: string) => DaySchedule
+}
+
+/** The shipped default, in `DaySchedule` shape — no hours restriction, the default slot size. */
+const DEFAULT_DAY_SCHEDULE: DaySchedule = {
+  slotMinutes: calendarConfig.slotMinutes,
+  openMinutes: calendarConfig.openMinutes,
+  closeMinutes: calendarConfig.closeMinutes,
+  coherenceIssue: null,
+}
+
+/** One `DayScheduleRead` (the wire shape) parsed into a `DaySchedule`. */
+function parseDaySchedule(entry: {
+  slot_minutes: number | null
+  opens_at: string | null
+  closes_at: string | null
+  coherence_issue: string | null
+}): DaySchedule {
+  return {
+    slotMinutes: entry.slot_minutes ?? calendarConfig.slotMinutes,
+    openMinutes: entry.opens_at === null ? null : parseClockMinutes(entry.opens_at),
+    closeMinutes: entry.closes_at === null ? null : parseClockMinutes(entry.closes_at),
+    coherenceIssue: entry.coherence_issue,
+  }
+}
+
+/**
+ * Builds a `WeekSchedule` from `GET /spaces/{public_id}/schedule`'s response.
+ *
+ * `entries[i].date` (`YYYY-MM-DD`) is used verbatim as the lookup key — the
+ * identical shape `toDateKey` (`calendar/week.ts`) produces for every other
+ * per-day computation, so `CalendarGrid` addresses a day's resolved schedule
+ * with the same key it already uses for everything else about that day.
+ */
+export function buildWeekSchedule(
+  entries: readonly {
+    date: string
+    slot_minutes: number | null
+    opens_at: string | null
+    closes_at: string | null
+    coherence_issue: string | null
+  }[],
+  timeZone: string,
+): WeekSchedule {
+  const byDate = new Map<string, DaySchedule>()
+  for (const entry of entries) {
+    byDate.set(entry.date, parseDaySchedule(entry))
+  }
+  return { timeZone, forDate: (dateKey) => byDate.get(dateKey) ?? DEFAULT_DAY_SCHEDULE }
+}
+
+/**
+ * A `WeekSchedule` that resolves every date to the identical `DaySchedule` —
+ * the pre-6.9 single-`CalendarConfig`-for-the-whole-week shape, expressed in
+ * the new per-day interface. Two callers: `CalendarGrid` itself, as its
+ * fallback when no real `WeekSchedule` prop is supplied (matching the old
+ * `config ?? calendarConfig` default), and this module's own test suite,
+ * whose fixtures still think in one `CalendarConfig` for a whole week.
+ */
+export function uniformWeekSchedule(config: CalendarConfig): WeekSchedule {
+  const day: DaySchedule = {
+    slotMinutes: config.slotMinutes,
+    openMinutes: config.openMinutes,
+    closeMinutes: config.closeMinutes,
+    coherenceIssue: null,
+  }
+  return { timeZone: config.timeZone, forDate: () => day }
+}
+
+/** `schedule`'s resolved `CalendarConfig` for one date — what feeds `slotStart` / `dayBounds` / `isSlotOutOfHours` / `slotInterval`, each still single-config functions that `CalendarGrid` now calls once per day rather than once per week. */
+export function calendarConfigForDay(schedule: WeekSchedule, dateKey: string): CalendarConfig {
+  const day = schedule.forDate(dateKey)
+  return {
+    slotMinutes: day.slotMinutes,
+    openMinutes: day.openMinutes,
+    closeMinutes: day.closeMinutes,
+    timeZone: schedule.timeZone,
+  }
+}
+
+/**
+ * The smallest `slotMinutes` across `dateKeys`' own resolved schedule — the
+ * shared row-axis granularity a heterogeneous week's grid renders at (see
+ * `CalendarGrid`'s module docblock). Every day's own grid lines land on a
+ * *subset* of the axis rows only when every configured `slotMinutes` in the
+ * week is a multiple of this value; when it is not (a 20-minute day beside a
+ * 30-minute one), the axis is still the finest of the two, per the plan, and
+ * the mismatch is a readability finding recorded in the PR rather than a
+ * case this function papers over.
+ */
+export function finestSlotMinutes(schedule: WeekSchedule, dateKeys: readonly string[]): number {
+  let finest = Infinity
+  for (const key of dateKeys) {
+    finest = Math.min(finest, schedule.forDate(key).slotMinutes)
+  }
+  return Number.isFinite(finest) ? finest : calendarConfig.slotMinutes
+}

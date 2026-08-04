@@ -450,6 +450,34 @@ export interface SpaceRuleCreateInput {
 }
 
 /**
+ * Mirrors `DayScheduleRead` — one date's resolved schedule, as
+ * `GET /spaces/{public_id}/schedule` serves it (task 6.9).
+ *
+ * `opens_at` / `closes_at` are the Space's own **local** wall-clock times
+ * (`HH:MM:SS`, same shape `Space.opens_at`/`closes_at` used before this
+ * task) — this endpoint never converts to UTC, since it has no instant to
+ * judge, only a calendar date to describe. `null` for `slot_minutes` /
+ * `opens_at` / `closes_at` means the corresponding rule type is not enforced
+ * on this date at all — the frontend must render that as "not configured",
+ * never invent a fallback window the server did not report.
+ *
+ * `coherence_issue` is the server-resolved replacement for what
+ * `coherenceIssue` (`config.ts`) used to compute client-side from a single
+ * global config: the resolved window and slot size for *this one date*
+ * genuinely conflict (an opening or closing time that does not land on the
+ * resolved slot grid). `null` unless that is true — a "closed all day"
+ * zero-width window is never a conflict, since there is no grid to misalign
+ * with nothing bookable in it.
+ */
+export interface DayScheduleRead {
+  date: string
+  slot_minutes: number | null
+  opens_at: string | null
+  closes_at: string | null
+  coherence_issue: string | null
+}
+
+/**
  * The body of `PATCH /spaces/{public_id}/rules/{id}`. Mirrors `SpaceRuleUpdate`.
  *
  * All fields optional and omit-leaves-alone, matching the server: there is no
