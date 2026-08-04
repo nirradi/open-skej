@@ -300,16 +300,31 @@ falls back to the current week in silence — it is a URL a person can type, so 
 can act on. Paging pushes rather than replaces, so Back walks week by week; the single-Resource
 redirect above replaces, and the two differing is what stops Back walking into that redirect.
 
-**The grid's layout comes from the Space; the grid always renders the whole day.** `slot_minutes`,
-`opens_at` and `closes_at` are read from the Space and turned into the calendar's configuration at
-runtime — there are no compile-time slot or opening-hour constants, because an admin edits these and
-a build-time value could only ever be a stale copy. Hours outside the Space's window are **greyed,
-never absent**: clipping the day to `[opens_at, closes_at)` would leave a booking made before the
-hours were narrowed with no row to sit on, so it would vanish from a calendar it is still on. Null
-hours mean the availability rule is not enforced, so that Space renders the whole day bookable rather
-than falling back to an invented window. The greying is the same advisory line everything else on
-this screen draws: it must never offer what the server would refuse, and it is never what refuses a
-booking.
+**The grid's layout is resolved by the server, per date, and the frontend only renders it.**
+`GET /spaces/{public_id}/schedule?from=&days=` (`app.rules_stub.resolve_day_schedule`) reports, for
+every date in the requested range, the slot size and operating window a booking on that date would
+actually be judged against — the flat-AND of that date's own matching `space_rules` rows (every
+matching row of a type combines rather than one being picked, exactly as the engine itself combines
+rules), in the Space's own local wall clock. This exists because a rule's `applies_to`
+(`rule-engine.md`) can narrow it to particular weekdays or dates, so a Space no longer has one slot
+size or one operating window good for the whole week — a single `CalendarConfig` built once from
+Space columns cannot express "Tuesdays are different". The frontend never re-derives this resolution
+itself: a second implementation of "which rules govern this date" in TypeScript is exactly the
+duplication `DEFERRED.md` item 13 warns against, since the engine must stay the sole validator and
+the grid stays advisory. A week's own days can resolve to different slot sizes; the grid's shared time
+axis renders at the finest slot size configured anywhere in the visible week, and each day lays out
+its own rows at its own resolved size and is greyed against its own resolved window, never a
+Space-wide value.
+
+The grid always renders the whole day regardless of what any date resolves to — there are no
+compile-time slot or opening-hour constants, because an admin edits the rules behind this endpoint
+and a build-time value could only ever be a stale copy. Hours outside a date's own resolved window
+are **greyed, never absent**: clipping the day to `[opens_at, closes_at)` would leave a booking made
+before the hours were narrowed with no row to sit on, so it would vanish from a calendar it is still
+on. A date with no matching row of a type resolves that field to `null`, meaning the corresponding
+rule is not enforced on that date at all, so it renders the whole day bookable rather than falling
+back to an invented window. The greying is the same advisory line everything else on this screen
+draws: it must never offer what the server would refuse, and it is never what refuses a booking.
 
 **Every clock the grid draws is the Space's own, never the viewer's.** The day columns, the slot
 axis, the greyed hours, and the instant a click submits all resolve through the Space's own
@@ -322,11 +337,22 @@ what a slot means without translating. A per-viewer clock was considered and rej
 two members read different times for the same slot, and it makes the operating window wrap midnight
 for anyone far enough from the venue.
 
-**A Space whose schedule cannot describe a grid degrades to a notice on that Space's calendar.** The
-coherence check — a slot length that does not tile the day or land the hours on a boundary, a close
-at or before an open — runs where the configuration is built, not at boot. It once threw at import
-time, which was right for a constant nobody could mistype and is wrong for data an admin typed: one
-bad Space would white-screen the app for everyone, including the members of every other Space.
+**A day whose resolved hours don't land on its own slot grid gets an advisory note, never a
+blocked calendar.** Two matching `availability_hours` rows can intersect to a window whose bounds
+don't land on the intersected `slot_alignment` grid; `resolve_day_schedule` reports this as that
+date's own `coherence_issue` rather than refusing to describe the date at all — every resolved slot
+size already divides a day evenly (the LCM of two divisors of 1440 always divides 1440), so there is
+always some grid to draw. The calendar surfaces it as a small note in that date's own header and
+changes nothing else about that day: greying already keeps the grid from ever offering a slot outside
+the window, aligned or not, so a misaligned bound is wasted capacity for an admin to notice and tidy
+up, not a booking put at risk. This coherence check runs server-side, per date, inside
+`resolve_day_schedule` rather than at boot — it once threw at import time, which was right for a
+constant nobody could mistype and is wrong for data an admin typed: one bad Space would white-screen
+the app for everyone, including the members of every other Space. That reasoning still holds one
+level up: a `/schedule` request that fails outright (the server unreachable, not a per-date coherence
+issue) is the one case left that still degrades to a notice replacing the *whole* calendar — with no
+resolved schedule at all there is nothing honest to render as a grid — and even then it is scoped to
+that Space's own calendar, never a page that takes the rest of the app down with it.
 
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of

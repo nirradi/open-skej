@@ -18,6 +18,7 @@ make the door unopenable. They are the only routes in this module without a
 almost nothing, and the ``POST`` writes a row that grants no access by itself.
 """
 
+from datetime import date, timedelta
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -32,6 +33,7 @@ from app.identity.models import AccessRequestStatus, InvitationStatus, Membershi
 from app.identity.schemas import (
     AccessRequestCreate,
     AccessRequestRead,
+    DayScheduleRead,
     InvitationCreate,
     InvitationRead,
     MemberRead,
@@ -48,6 +50,7 @@ from app.identity.schemas import (
     SpaceRuleUpdate,
     SpaceUpdate,
 )
+from app.rules_stub import resolve_day_schedule
 
 router = APIRouter(prefix="/spaces", tags=["spaces"])
 
@@ -90,6 +93,14 @@ AMBIGUOUS_RULE_INSTANCE_DETAIL = (
 )
 RULE_NOT_FOUND_DETAIL = "No such rule instance in this Space."
 INVALID_OPERATING_HOURS_DETAIL = "Opening time must be earlier than closing time."
+
+# `GET /spaces/{public_id}/schedule`'s upper bound on `days` (task 6.9). Two
+# calendar months is comfortably more than the single week the frontend grid
+# ever asks for in one request, while still bounding the work one request can
+# cause — the same "at most one calendar month of history" spirit
+# `CLAUDE.md` states for rule evaluation, applied here to how far ahead a
+# single schedule request may resolve.
+MAX_SCHEDULE_DAYS = 62
 
 
 def _archived() -> HTTPException:
@@ -733,6 +744,38 @@ def delete_space_rule(rule_id: int, context: AdminContext, session: SessionDep) 
         raise _rule_not_found()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{public_id}/schedule", response_model=list[DayScheduleRead])
+def get_space_schedule(
+    context: MemberContext,
+    session: SessionDep,
+    from_date: Annotated[date, Query(alias="from")],
+    days: Annotated[int, Query(ge=1, le=MAX_SCHEDULE_DAYS)],
+) -> list[DayScheduleRead]:
+    """What a booking on each date in ``[from, from+days)`` would actually be
+    judged against — the slot size and operating window, plus any coherence
+    issue. Member+, the same gate as ``GET /rules``: a member may already see
+    the hours rendered on the calendar, so resolving them for a date range
+    conceals nothing a plain read of the calendar does not already.
+
+    **The server resolves; the frontend renders.** This is what the calendar
+    grid reads instead of building a ``CalendarConfig`` from Space columns
+    that no longer exist as a single answer once a rule's ``applies_to`` can
+    narrow it to particular weekdays or dates — see
+    ``app.rules_stub.resolve_day_schedule`` for the resolution itself
+    (the flat-AND combination of same-typed rows, never a re-derivation of
+    rule semantics the frontend would have to keep in sync by hand).
+
+    Times stay the Space's own **local** wall clock, never converted to
+    UTC — unlike the booking-evaluation path, this endpoint has no instant to
+    judge, only a calendar date to describe.
+    """
+    config = service.space_rule_config(session, context.space)
+    return [
+        DayScheduleRead.build(on_date, resolve_day_schedule(config, on_date))
+        for on_date in (from_date + timedelta(days=offset) for offset in range(days))
+    ]
 
 
 @rule_types_router.get("", response_model=list[RuleTypeRead])

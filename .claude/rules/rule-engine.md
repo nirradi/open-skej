@@ -97,6 +97,18 @@ them. `DEFAULT_CANON` is no longer what the API runs — it remains the *referen
 generation loop is measured against and the source of the default values a Space that overrides
 nothing would use.
 
+`rules_stub.py` also holds one thing that is not a fifth translation onto `evaluate_request` — it
+never calls it. `resolve_day_schedule`, called by `GET /spaces/{public_id}/schedule`
+(`identity-and-access.md`), reports what a booking on a given date *would* be judged against — the
+slot size and operating window, resolved from that Space's own `space_rules` rows — for display, not
+judgment. It reuses `row_applies`, the identical `applies_to` matching `_build_canon` uses, so
+"which rows govern this date" cannot drift between the two call paths, but it never touches
+`REGISTRY`, `RuleType.build`, or `evaluate_request` itself, and it resolves in the Space's own local
+wall clock rather than converting to UTC — there is no instant to judge here, only a calendar date to
+describe. It lives in this module because this is already the one place that reads `space_rules` and
+already resolves `applies_to` against a date, not because reporting a schedule is part of the
+adapter's job of judging a booking.
+
 `ContextMismatchError` is deliberately not caught at this boundary: the adapter builds both the
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
 tracker, not be served as a polite refusal.

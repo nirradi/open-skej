@@ -17,6 +17,7 @@ import type {
   CancelResourceBookingResult,
   CreateResourceBookingResult,
   CurrentUser,
+  DayScheduleRead,
   GetCurrentUserResult,
   Invitation,
   InvitationStatus,
@@ -881,6 +882,49 @@ export async function listResources(
   const query = options.includeArchived ? '?include_archived=true' : ''
   return authenticatedRequest<Resource[]>(
     `/spaces/${encodeURIComponent(publicId)}/resources${query}`,
+  )
+}
+
+/** `YYYY-MM-DD` in local time — the wire shape `GET .../schedule?from=` expects. */
+function formatDateParam(date: Date): string {
+  const yyyy = String(date.getFullYear()).padStart(4, '0')
+  const mm = String(date.getMonth() + 1).padStart(2, '0')
+  const dd = String(date.getDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
+}
+
+/**
+ * `GET /spaces/{public_id}/schedule?from=&days=` — what a booking on each
+ * date in `[from, from+days)` would actually be judged against: the slot
+ * size and operating window, plus any coherence issue, resolved server-side
+ * against the Space's own `space_rules` rows (task 6.9). Member+, the same
+ * gate as `listSpaceRules`.
+ *
+ * **This is what the calendar grid reads instead of re-deriving rule
+ * semantics itself.** `applies_to` means a week no longer has one answer —
+ * `buildCalendarConfig` (`config.ts`) built a single `CalendarConfig` from
+ * `Space.slot_minutes`/`opens_at`/`closes_at` and that shape cannot express
+ * "Tuesdays are different", so this endpoint reports the *resolved* answer
+ * per date and the frontend only renders it (`config.ts`'s
+ * `buildWeekSchedule`).
+ *
+ * `from` is a calendar date, not an instant — deliberately not passed
+ * through `toISOString()` the way `listResourceBookings` passes its window,
+ * since that would apply the *environment's* own zone to a value that must
+ * name the same date regardless of which zone this code happens to run in.
+ * `days` mirrors the backend's own bound (`MAX_SCHEDULE_DAYS`, currently 62)
+ * but is not re-validated here — an out-of-range value is a client bug the
+ * server's own 422 (`invalid_request`) reports, the same backstop every
+ * other malformed-body case in this client relies on.
+ */
+export async function getSpaceSchedule(
+  publicId: string,
+  from: Date,
+  days: number,
+): Promise<AuthenticatedResult<DayScheduleRead[]>> {
+  const query = new URLSearchParams({ from: formatDateParam(from), days: String(days) })
+  return authenticatedRequest<DayScheduleRead[]>(
+    `/spaces/${encodeURIComponent(publicId)}/schedule?${query}`,
   )
 }
 

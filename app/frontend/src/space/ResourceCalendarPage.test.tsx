@@ -15,8 +15,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 
-import { getSpace, listResourceBookings, listResources } from '../api'
-import type { ApiOk, Resource, Space } from '../api'
+import { getSpace, getSpaceSchedule, listResourceBookings, listResources } from '../api'
+import type { ApiOk, DayScheduleRead, Resource, Space } from '../api'
 import {
   addDays,
   dayBounds,
@@ -34,6 +34,7 @@ vi.mock('../api', () => ({
   createResourceBooking: vi.fn(),
   cancelResourceBooking: vi.fn(),
   getSpace: vi.fn(),
+  getSpaceSchedule: vi.fn(),
   listResources: vi.fn(),
 }))
 
@@ -73,6 +74,28 @@ const OTHER_RESOURCE: Resource = {
 
 function ok<T>(data: T): ApiOk<T> {
   return { outcome: 'ok', data }
+}
+
+/**
+ * `DayScheduleRead[]` for every date in `[from, from+days)`, all identical —
+ * the uniform-week shape most of this suite's tests want from
+ * `getSpaceSchedule`, built from whatever window the page actually requests
+ * rather than a hardcoded one, so it stays correct whichever week a test
+ * navigates to.
+ */
+function uniformScheduleEntries(
+  from: Date,
+  days: number,
+  overrides: Partial<Omit<DayScheduleRead, 'date'>> = {},
+): DayScheduleRead[] {
+  return Array.from({ length: days }, (_, i) => ({
+    date: toDateKey(addDays(from, i)),
+    slot_minutes: null,
+    opens_at: null,
+    closes_at: null,
+    coherence_issue: null,
+    ...overrides,
+  }))
 }
 
 function renderAt(path: string) {
@@ -133,6 +156,12 @@ async function waitForSettledWeekStart(): Promise<Date> {
 beforeEach(() => {
   vi.mocked(listResourceBookings).mockResolvedValue(ok([]))
   vi.mocked(getSpace).mockResolvedValue(ok(SPACE))
+  // Unrestricted by default — no hours bound, the shipped default slot size —
+  // matching the pre-6.9 default this suite's `SPACE` fixture already used
+  // (`opens_at`/`closes_at`/`slot_minutes` all `null`).
+  vi.mocked(getSpaceSchedule).mockImplementation(async (_publicId, from, days) =>
+    ok(uniformScheduleEntries(from, days)),
+  )
   // Two active Resources by default, so the generic header tests exercise
   // the "there is a real picker to go back to" case; the back-link tests
   // below override this to one Resource for the opposite case.
@@ -221,8 +250,8 @@ describe('scoping the calendar and the panels', () => {
 
 describe("the Space's schedule", () => {
   it("greys the grid outside the Space's configured hours", async () => {
-    vi.mocked(getSpace).mockResolvedValue(
-      ok({ ...SPACE, slot_minutes: 30, opens_at: '09:00:00', closes_at: '17:00:00' }),
+    vi.mocked(getSpaceSchedule).mockImplementation(async (_publicId, from, days) =>
+      ok(uniformScheduleEntries(from, days, { slot_minutes: 30, opens_at: '09:00:00', closes_at: '17:00:00' })),
     )
     // Next week's Monday, not this one — this test cares about the
     // out-of-hours reason, not the past one, and this week's Monday may
@@ -232,20 +261,21 @@ describe("the Space's schedule", () => {
 
     // 08:30 (index 17) is one slot before the configured 09:00 opening;
     // 09:00 (index 18) is the first open slot. Waiting on the first covers
-    // the header fetch resolving and the grid re-rendering with the built
-    // config — the second is safe to read synchronously once it has.
+    // the schedule fetch resolving and the grid re-rendering with the
+    // resolved schedule — the second is safe to read synchronously once it
+    // has.
     await waitFor(() =>
       expect(screen.getByTestId(slotTestId(monday, 17)).dataset.blocked).toBe('out-of-hours'),
     )
     expect(screen.getByTestId(slotTestId(monday, 18)).dataset.blocked).toBeUndefined()
   })
 
-  it("shows a notice instead of the grid for hours that can't resolve to a window", async () => {
-    // The DEFERRED.md item 17 shape, from this frontend's browser-local
-    // reading of it: closing at-or-before opening cannot describe a window.
-    vi.mocked(getSpace).mockResolvedValue(
-      ok({ ...SPACE, slot_minutes: 30, opens_at: '21:00:00', closes_at: '09:00:00' }),
-    )
+  it("shows a notice instead of the grid when the Space's schedule can't be loaded", async () => {
+    // A genuine `/schedule` fetch failure — never a per-day coherence issue,
+    // which is advisory only and rendered inside `CalendarGrid` itself
+    // without replacing the grid (see `CalendarGrid.test.tsx`'s own
+    // "heterogeneous week" suite for that case).
+    vi.mocked(getSpaceSchedule).mockResolvedValue({ outcome: 'failed', message: 'Nope.' })
     renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
 
     await waitFor(() => expect(screen.getByTestId('calendar-config-notice')).toBeTruthy())

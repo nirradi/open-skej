@@ -108,6 +108,13 @@ function renderApp() {
       },
     ],
   })
+  // `ResourceCalendarPage` fetches `GET /spaces/{public_id}/schedule` for the
+  // visible week (task 6.9); with no entries it falls back to the shipped
+  // default (no hours restriction), matching this fixture Space's own null
+  // `opens_at`/`closes_at`/`slot_minutes`. Unmocked, this is a real `fetch`
+  // with no server behind it — precisely what hung this suite before this
+  // spy was added.
+  vi.spyOn(api, 'getSpaceSchedule').mockResolvedValue({ outcome: 'ok', data: [] })
   return render(
     <AuthModeContext value={{ kind: 'sandbox' }}>
       <SessionContext value={AUTHENTICATED_SESSION}>

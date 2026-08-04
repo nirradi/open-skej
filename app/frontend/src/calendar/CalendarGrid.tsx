@@ -3,13 +3,57 @@
  *
  * ## What drives the layout
  *
- * Everything: slot count, slot labels, row height and the vertical position of
- * a booking block all derive from `config.ts`. There is exactly one hardcoded
- * dimension here — `SLOT_ROW_HEIGHT_PX`, the height of *one slot*, whatever a
- * slot happens to be. Changing `slotMinutes` from 30 to 10 triples the rows and
- * re-lays out the bookings with no edit to this file, which is what the test
- * suite asserts rather than leaving to inspection.
+ * Slot count, slot labels, row height and the vertical position of a booking
+ * block all derive from a `WeekSchedule` (`config.ts`) — the server-resolved
+ * per-date slot size and operating window `GET /spaces/{public_id}/schedule`
+ * reports (task 6.9), never re-derived here. There is exactly one hardcoded
+ * dimension in this file — `SLOT_ROW_HEIGHT_PX`, the height of *one row on
+ * the shared axis*, whatever that row's own duration happens to be.
  *
+ * ## A heterogeneous week (task 6.9)
+ *
+ * `applies_to` means two days in the same week can resolve to different slot
+ * sizes and different operating windows — "Saturdays are 15-minute slots,
+ * every other day is 30" is an ordinary configuration, not an edge case. The
+ * grid copes with this in three parts:
+ *
+ * 1. **One shared time axis, at the finest configured slot size in the
+ *    visible week** (`finestSlotMinutes`). Every day's own slot buttons are
+ *    laid out in normal document flow at *that day's own* `slotMinutes`, and
+ *    since every resolved `slotMinutes` divides 1440 (guaranteed by
+ *    `resolve_day_schedule` — the LCM of divisors of 1440 always divides
+ *    1440), a day's own buttons always sum to exactly the shared
+ *    `dayHeight` with no absolute positioning needed to make them fit. They
+ *    land flush with the axis rows only when the day's own `slotMinutes` is
+ *    a *multiple* of the axis granularity — a 30-minute day beside a
+ *    20-minute one shares a `dayHeight` but does not share row lines. That
+ *    is a real readability limit of a mixed week, recorded rather than
+ *    hidden: see the PR description for what it looks like on screen.
+ * 2. **Each day greys its own slots against its own resolved hours**
+ *    (`isSlotOutOfHours`, called once per day with that day's own
+ *    `CalendarConfig` — `calendarConfigForDay`), not a Space-wide value.
+ * 3. **Selection snaps to the day it starts on, at that day's own slot
+ *    size.** This was already true before 6.9 — a drag has always been
+ *    confined to the day it began on (`extendTo` below) — task 6.9 only
+ *    changes what "that day's own slot size" can be.
+ *
+ * A day's `coherence_issue` (opening/closing time not landing on that day's
+ * own resolved slot grid) is advisory only, and deliberately does not block
+ * anything: `resolve_day_schedule` guarantees every resolved `slotMinutes`
+ * divides 1440, so a day can no longer fail to describe *some* grid the way
+ * a pre-6.9 `CalendarConfig` could (`config.ts`'s old `coherenceIssue`
+ * check). And `isSlotOutOfHours` already greys any slot that only partially
+ * overlaps the open window, whether or not that window lines up with the
+ * grid — so a misaligned bound never lets the grid *offer* a slot the
+ * backend would refuse; it is just wasted capacity an admin might want to
+ * tidy up. It is surfaced as a small per-day note in that day's header
+ * (`data-testid="calendar-day-notice-{dateKey}"`) rather than a notice that
+ * replaces the grid — see the PR description for why a whole-grid notice
+ * (still used one level up, in `ResourceCalendarPage`, for a `/schedule`
+ * fetch that fails outright) is the wrong shape for something this
+ * inconsequential to a booking's own correctness.
+ *
+
  * ## What this component does not do
  *
  * It selects; it does not book and it does not cancel. It reports two kinds of
@@ -45,10 +89,14 @@ import { listResourceBookings } from '../api'
 import type { Booking } from '../api'
 import {
   calendarConfig,
+  calendarConfigForDay,
+  finestSlotMinutes,
   formatSlotLabel,
   isSlotOutOfHours,
   slotsPerDayFor,
+  uniformWeekSchedule,
   type CalendarConfig,
+  type WeekSchedule,
 } from '../config'
 import {
   addDays,
@@ -110,8 +158,14 @@ export interface CalendarGridProps {
    * the horizon; production passes nothing and gets a clock read once on mount.
    */
   now?: Date
-  /** Calendar configuration. Defaults to the module singleton in `config.ts`. */
-  config?: CalendarConfig
+  /**
+   * The week's resolved layout — one `DaySchedule` per date plus a shared
+   * `timeZone` (`config.ts`). Defaults to `uniformWeekSchedule(calendarConfig)`
+   * when omitted: every date resolves to the shipped default (no hours
+   * restriction, the default slot size), matching the pre-6.9 fallback a
+   * caller with no `config` prop got.
+   */
+  schedule?: WeekSchedule
   /**
    * Notified when Previous, Next or "This week" is clicked, with the week
    * start it wants shown. This component does not act on its own click —
@@ -193,13 +247,25 @@ export function CalendarGrid({
   resourceId,
   weekStart,
   now: nowProp,
-  config,
+  schedule,
   onWeekChange,
   onSelectionChange,
   onBookingSelect,
   refreshToken = 0,
 }: CalendarGridProps) {
-  const resolvedConfig = config ?? calendarConfig
+  const resolvedSchedule = schedule ?? uniformWeekSchedule(calendarConfig)
+  // A config carrying only `resolvedSchedule.timeZone`, used everywhere only
+  // the zone matters and not any one day's own hours or slot size: the
+  // booking-window fetch below, week navigation bounds, "is this the current
+  // week". `slotStart`'s index 0 is always midnight regardless of
+  // `slotMinutes` (`slotStartMinutes(0, config) === 0`), so `dayBounds`
+  // through this config is correct for every day, not just the axis's own.
+  const zoneConfig: CalendarConfig = {
+    slotMinutes: 1,
+    openMinutes: null,
+    closeMinutes: null,
+    timeZone: resolvedSchedule.timeZone,
+  }
   const [fallbackNow] = useState(() => new Date())
   const now = nowProp ?? fallbackNow
 
@@ -241,18 +307,39 @@ export function CalendarGrid({
   /**
    * Identifies the fetch the grid currently wants an answer to.
    *
-   * Includes `resolvedConfig.timeZone` alongside `weekStart`: the fetch
-   * window below is resolved through it, so a config swap (the placeholder
+   * Includes `resolvedSchedule.timeZone` alongside `weekStart`: the fetch
+   * window below is resolved through it, so a schedule swap (the placeholder
    * zone giving way to the Space's real one, before `weekStart` or either
    * token has changed) is a genuinely different request, not the same one
    * settling twice.
    */
-  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}:${resolvedConfig.timeZone}`
+  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}:${resolvedSchedule.timeZone}`
   const load: LoadState | { status: 'loading' } =
     settled !== null && settled.key === requestKey ? settled : { status: 'loading' }
 
-  const slotsPerDay = slotsPerDayFor(resolvedConfig)
   const days = useMemo(() => daysOfWeek(weekStart), [weekStart])
+  const dateKeys = useMemo(() => days.map(toDateKey), [days])
+
+  /**
+   * The shared row axis's granularity — the finest (smallest) `slotMinutes`
+   * resolved for any day in the visible week (`config.ts`'s
+   * `finestSlotMinutes`; see this file's module docblock for why the finest
+   * value is what a heterogeneous week shares). A uniform week (every day
+   * resolving to the same `slotMinutes`, the common case and everything this
+   * suite tested before 6.9) makes this identical to that one value, so
+   * `slotsPerDay` below is unchanged for every pre-6.9 assertion.
+   */
+  const axisSlotMinutes = useMemo(
+    () => finestSlotMinutes(resolvedSchedule, dateKeys),
+    [resolvedSchedule, dateKeys],
+  )
+  const axisConfig: CalendarConfig = {
+    slotMinutes: axisSlotMinutes,
+    openMinutes: null,
+    closeMinutes: null,
+    timeZone: resolvedSchedule.timeZone,
+  }
+  const slotsPerDay = slotsPerDayFor(axisConfig)
 
   // ---- Loading the week's bookings -------------------------------------
 
@@ -266,8 +353,11 @@ export function CalendarGrid({
     // Space's week could sit before an environment-midnight `from`, or one in
     // the last few hours could sit at or after an environment-midnight `to`,
     // and either way never reach this component to be drawn at all.
-    const from = dayBounds(weekStart, resolvedConfig).start
-    const to = dayBounds(addDays(weekStart, DAYS_PER_WEEK - 1), resolvedConfig).end
+    // `zoneConfig` carries the right zone; which day's own `slotMinutes` it
+    // otherwise names is irrelevant here — `dayBounds` reads index 0, always
+    // midnight regardless of `slotMinutes`.
+    const from = dayBounds(weekStart, zoneConfig).start
+    const to = dayBounds(addDays(weekStart, DAYS_PER_WEEK - 1), zoneConfig).end
 
     void listResourceBookings(publicId, resourceId, from, to).then((result) => {
       // A response for a week the user has already navigated away from would
@@ -302,9 +392,9 @@ export function CalendarGrid({
     return () => {
       cancelled = true
     }
-    // `weekStart` and `resolvedConfig` are read inside this effect only to
+    // `weekStart` and `zoneConfig` are read inside this effect only to
     // compute `from` / `to`, and `requestKey` already encodes both by value
-    // (`weekStart.getTime()`, `resolvedConfig.timeZone`) — see its own
+    // (`weekStart.getTime()`, `resolvedSchedule.timeZone`) — see its own
     // docblock. Listing the objects themselves here instead would re-fire
     // this fetch on a fresh-but-equal `Date` or config object, which is
     // exactly the hazard `ResourceCalendarPage`'s own `weekStart` stabiliser
@@ -330,14 +420,19 @@ export function CalendarGrid({
       end: new Date(booking.end_at),
     }))
 
-    return days.map((day) => {
+    return days.map((day, dayIndex) => {
       // Midnight to midnight on the Space's own clock — a booking that
       // straddles the environment's midnight but not the Space's must still
-      // group with the one day column it actually belongs to.
-      const { start: dayStart, end: dayEnd } = dayBounds(day, resolvedConfig)
+      // group with the one day column it actually belongs to. Any day's own
+      // config resolves midnight identically (only the zone matters — see
+      // `zoneConfig`), so which one is used here is arbitrary.
+      const { start: dayStart, end: dayEnd } = dayBounds(
+        day,
+        calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex]),
+      )
       return parsed.filter((entry) => intervalsOverlap(entry.start, entry.end, dayStart, dayEnd))
     })
-  }, [bookings, days, resolvedConfig])
+  }, [bookings, dateKeys, days, resolvedSchedule])
 
   // ---- What a user may click -------------------------------------------
 
@@ -348,14 +443,19 @@ export function CalendarGrid({
       // data we do not have.
       if (load.status !== 'ok') return 'unavailable'
 
+      // That day's own resolved hours and slot size — never a Space-wide
+      // value, since `applies_to` can make two days in this same week
+      // disagree about both.
+      const dayConfig = calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex])
+
       // Checked before the time-based reasons below: whether a slot sits
       // inside the Space's operating hours does not depend on `now`, only on
       // the config, and greying it is what replaces the old clipped grid —
       // the row still exists so a booking sitting on it stays visible.
-      if (isSlotOutOfHours(index, resolvedConfig)) return 'out-of-hours'
+      if (isSlotOutOfHours(index, dayConfig)) return 'out-of-hours'
 
       const day = days[dayIndex]
-      const { start, end } = slotInterval(day, index, resolvedConfig)
+      const { start, end } = slotInterval(day, index, dayConfig)
       if (isSlotInPast(start, now)) return 'past'
       if (isSlotBeyondHorizon(start, now)) return 'beyond-horizon'
 
@@ -364,7 +464,7 @@ export function CalendarGrid({
       )
       return covering ? 'booked' : null
     },
-    [bookingsByDay, days, load.status, now, resolvedConfig],
+    [bookingsByDay, dateKeys, days, load.status, now, resolvedSchedule],
   )
 
   // ---- Selection --------------------------------------------------------
@@ -373,11 +473,12 @@ export function CalendarGrid({
     if (selection === null) return null
     const dayIndex = days.findIndex((day) => toDateKey(day) === selection.dateKey)
     if (dayIndex === -1) return null
+    const dayConfig = calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex])
     return {
-      start: slotInterval(days[dayIndex], selection.start, resolvedConfig).start,
-      end: slotInterval(days[dayIndex], selection.end, resolvedConfig).end,
+      start: slotInterval(days[dayIndex], selection.start, dayConfig).start,
+      end: slotInterval(days[dayIndex], selection.end, dayConfig).end,
     }
-  }, [days, resolvedConfig, selection])
+  }, [dateKeys, days, resolvedSchedule, selection])
 
   useEffect(() => {
     onSelectionChange?.(selectedInterval)
@@ -453,16 +554,16 @@ export function CalendarGrid({
 
   // ---- Navigation -------------------------------------------------------
 
-  const canPrev = canGoToPreviousWeek(weekStart, now, resolvedConfig.timeZone)
-  const canNext = canGoToNextWeek(weekStart, now, resolvedConfig.timeZone)
-  const thisWeek = startOfWeek(zonedCalendarDate(now, resolvedConfig.timeZone))
+  const canPrev = canGoToPreviousWeek(weekStart, now, resolvedSchedule.timeZone)
+  const canNext = canGoToNextWeek(weekStart, now, resolvedSchedule.timeZone)
+  const thisWeek = startOfWeek(zonedCalendarDate(now, resolvedSchedule.timeZone))
   const isCurrentWeek = weekStart.getTime() === thisWeek.getTime()
 
   // Shown only when it differs from the Space's own zone (the module
   // docblock's "secondary hint, never a second version of the grid") — the
   // one place the viewer's own zone appears in this component at all.
   const viewerTimeZone = SYSTEM_TIME_ZONE
-  const showViewerTimeZoneHint = viewerTimeZone !== resolvedConfig.timeZone
+  const showViewerTimeZoneHint = viewerTimeZone !== resolvedSchedule.timeZone
 
   /** Reports the week `deltaWeeks` away from the one currently shown. */
   const goToWeek = (deltaWeeks: number) => {
@@ -474,8 +575,12 @@ export function CalendarGrid({
     if (!isCurrentWeek) onWeekChange?.(thisWeek)
   }
 
+  // Shared across every day column — the row axis's own granularity, per
+  // this file's module docblock. A day whose own `slotMinutes` differs still
+  // sums to exactly `dayHeight` in normal document flow (see the docblock
+  // for why), so no day column needs its own height.
   const dayHeight = slotsPerDay * SLOT_ROW_HEIGHT_PX
-  const pxPerMinute = SLOT_ROW_HEIGHT_PX / resolvedConfig.slotMinutes
+  const pxPerMinute = SLOT_ROW_HEIGHT_PX / axisSlotMinutes
 
   return (
     <section className="flex flex-col gap-3" data-testid="calendar">
@@ -515,7 +620,7 @@ export function CalendarGrid({
       </header>
 
       <p className="text-xs text-slate-500" data-testid="calendar-timezone-note">
-        Times shown in {resolvedConfig.timeZone}
+        Times shown in {resolvedSchedule.timeZone}
         {showViewerTimeZoneHint && ` — your own zone is ${viewerTimeZone}`}
       </p>
 
@@ -551,40 +656,71 @@ export function CalendarGrid({
         data-slots-per-day={slotsPerDay}
         className="flex select-none overflow-x-auto rounded border border-slate-200 bg-white"
       >
-        {/* Time axis. One label per slot, so it stays aligned at any granularity. */}
+        {/* Time axis. One label per slot, at the shared axis granularity — see
+            the module docblock for why the axis is always the week's finest
+            configured slot size. The spacer height (h-12) matches the day
+            header + notice row below so axis rows stay aligned with every
+            day column. */}
         <div className="sticky left-0 z-10 shrink-0 border-r border-slate-200 bg-white">
-          <div className="h-8 border-b border-slate-200" />
+          <div className="h-12 border-b border-slate-200" />
           {Array.from({ length: slotsPerDay }, (_, index) => (
             <div
               key={index}
               style={{ height: SLOT_ROW_HEIGHT_PX }}
               className="flex items-start justify-end px-2 text-[10px] leading-none text-slate-400 tabular-nums"
             >
-              {formatSlotLabel(index, resolvedConfig)}
+              {formatSlotLabel(index, axisConfig)}
             </div>
           ))}
         </div>
 
         {days.map((day, dayIndex) => {
           const dateKey = toDateKey(day)
+          // That day's own resolved schedule — hours, slot size and any
+          // coherence issue — never a Space-wide value (see the module
+          // docblock: `applies_to` can make two days in this same week
+          // disagree about both).
+          const daySchedule = resolvedSchedule.forDate(dateKey)
+          const dayConfig = calendarConfigForDay(resolvedSchedule, dateKey)
+          const daySlotCount = slotsPerDayFor(dayConfig)
+          // A day's own button height relative to the shared axis row: a day
+          // whose slotMinutes is coarser than the axis renders fewer, taller
+          // buttons that still sum to exactly `dayHeight` in normal document
+          // flow (see the module docblock's "no absolute positioning needed
+          // to make them fit").
+          const daySlotHeight = SLOT_ROW_HEIGHT_PX * (dayConfig.slotMinutes / axisSlotMinutes)
           // Midnight on the Space's own clock — see `bookingsByDay` above for
           // why this must not be the environment's midnight.
-          const { start: dayStart } = dayBounds(day, resolvedConfig)
+          const { start: dayStart } = dayBounds(day, dayConfig)
 
           return (
             <div
               key={dateKey}
               className="min-w-24 flex-1 border-r border-slate-200 last:border-r-0"
             >
-              <div
-                className="flex h-8 items-center justify-center border-b border-slate-200 text-xs font-medium text-slate-600"
-                data-testid={`calendar-day-${dateKey}`}
-              >
-                {dayHeaderFormat.format(day)}
+              <div className="border-b border-slate-200">
+                <div
+                  className="flex h-8 items-center justify-center text-xs font-medium text-slate-600"
+                  data-testid={`calendar-day-${dateKey}`}
+                >
+                  {dayHeaderFormat.format(day)}
+                </div>
+                {/* Advisory only, per this file's module docblock: a
+                    misaligned availability bound never blocks the grid or
+                    replaces it. Always rendered at a fixed height so a day
+                    with no issue does not shift any other column's row
+                    alignment. */}
+                <div
+                  className="flex h-4 items-center justify-center truncate px-1 text-[9px] leading-none text-amber-700"
+                  data-testid={`calendar-day-notice-${dateKey}`}
+                  title={daySchedule.coherenceIssue ?? undefined}
+                >
+                  {daySchedule.coherenceIssue}
+                </div>
               </div>
 
               <div className="relative" style={{ height: dayHeight }}>
-                {Array.from({ length: slotsPerDay }, (_, index) => {
+                {Array.from({ length: daySlotCount }, (_, index) => {
                   const blocked = blockedReason(dayIndex, index)
                   const selected = isInSelection(selection, dateKey, index)
 
@@ -596,9 +732,9 @@ export function CalendarGrid({
                       data-blocked={blocked ?? undefined}
                       data-selected={selected || undefined}
                       aria-pressed={selected}
-                      aria-label={`${dateKey} ${formatSlotLabel(index, resolvedConfig)}`}
+                      aria-label={`${dateKey} ${formatSlotLabel(index, dayConfig)}`}
                       disabled={blocked !== null}
-                      style={{ height: SLOT_ROW_HEIGHT_PX }}
+                      style={{ height: daySlotHeight }}
                       className={[
                         'block w-full border-b border-slate-100 text-left',
                         selected
@@ -640,8 +776,8 @@ export function CalendarGrid({
                       aria-pressed={isSelected}
                       aria-label={
                         booking.mine
-                          ? `Booked ${formatClockTime(start, resolvedConfig.timeZone)} to ${formatClockTime(end, resolvedConfig.timeZone)}`
-                          : `Booked by someone else, ${formatClockTime(start, resolvedConfig.timeZone)} to ${formatClockTime(end, resolvedConfig.timeZone)}`
+                          ? `Booked ${formatClockTime(start, dayConfig.timeZone)} to ${formatClockTime(end, dayConfig.timeZone)}`
+                          : `Booked by someone else, ${formatClockTime(start, dayConfig.timeZone)} to ${formatClockTime(end, dayConfig.timeZone)}`
                       }
                       // Interactive as of 1.8, and safe to be: see the note at
                       // the top of this file on why intercepting these pointer
@@ -663,7 +799,7 @@ export function CalendarGrid({
                       style={{ top, height: Math.max(0, bottom - top) }}
                       onClick={() => toggleBooking(booking.id)}
                     >
-                      {formatClockTime(start, resolvedConfig.timeZone)}
+                      {formatClockTime(start, dayConfig.timeZone)}
                     </button>
                   )
                 })}
@@ -676,8 +812,8 @@ export function CalendarGrid({
       {selection !== null && selectedInterval !== null && (
         <p className="text-sm text-slate-700" data-testid="calendar-selection">
           Selected {rangeLength(selection)} slot{rangeLength(selection) === 1 ? '' : 's'}:{' '}
-          {formatZonedDateTime(selectedInterval.start, resolvedConfig.timeZone)} –{' '}
-          {formatClockTime(selectedInterval.end, resolvedConfig.timeZone)}
+          {formatZonedDateTime(selectedInterval.start, resolvedSchedule.timeZone)} –{' '}
+          {formatClockTime(selectedInterval.end, resolvedSchedule.timeZone)}
         </p>
       )}
     </section>

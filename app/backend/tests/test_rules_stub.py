@@ -11,7 +11,7 @@ assembly from a `SpaceRuleConfig`'s rows, history forwarding, and (since
 task 6.6) the fail-closed path a row that cannot be built takes.
 """
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -24,9 +24,11 @@ from app.rules_stub import (
     BOOKING_HORIZON_DAYS,
     MAX_BOOKING_DURATION,
     BookingRequest,
+    DaySchedule,
     RuleResult,
     SpaceRuleConfig,
     SpaceRuleRow,
+    resolve_day_schedule,
 )
 from app.rules_stub import evaluate as _evaluate
 
@@ -732,3 +734,177 @@ def test_reads_history_is_true_only_when_an_enabled_row_reads_it():
 
     assert not NULL_CONFIG.reads_history
     assert not FULL_CONFIG.reads_history
+
+
+# --- resolve_day_schedule (task 6.9) -----------------------------------------
+#
+# `GET /spaces/{public_id}/schedule` reads this function's return value
+# straight onto the wire, in the Space's own local wall clock, never UTC — so
+# these cases build a `SpaceRuleConfig` and read the `DaySchedule` back
+# directly, with no `evaluate`/`request()` involved at all.
+
+MONDAY = date(2026, 7, 20)  # Matches DAY above: a Monday.
+TUESDAY = date(2026, 7, 21)
+
+
+def _hours_row(
+    row_id: int, opens: str, closes: str, applies_to: dict | None = None
+) -> SpaceRuleRow:
+    return SpaceRuleRow(
+        id=row_id,
+        rule_type="availability_hours",
+        params={"opens_at": opens, "closes_at": closes},
+        applies_to=applies_to,
+    )
+
+
+def _slot_row(row_id: int, minutes: int, applies_to: dict | None = None) -> SpaceRuleRow:
+    return SpaceRuleRow(
+        id=row_id,
+        rule_type="slot_alignment",
+        params={"slot_minutes": minutes},
+        applies_to=applies_to,
+    )
+
+
+def test_resolve_day_schedule_with_no_rows_is_fully_unconfigured():
+    config = SpaceRuleConfig(timezone="UTC", rules=())
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule == DaySchedule(
+        slot_minutes=None, opens_at=None, closes_at=None, coherence_issue=None
+    )
+
+
+def test_resolve_day_schedule_with_one_matching_row_of_each_type():
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, "09:00:00", "17:00:00"), _slot_row(2, 30)),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.opens_at == time(9, 0)
+    assert schedule.closes_at == time(17, 0)
+    assert schedule.slot_minutes == 30
+    assert schedule.coherence_issue is None
+
+
+def test_two_overlapping_availability_rows_intersect_to_a_real_window():
+    """9-17 and 12-20 together permit only the overlap, 12-17 — the flat AND."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, "09:00:00", "17:00:00"), _hours_row(2, "12:00:00", "20:00:00")),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.opens_at == time(12, 0)
+    assert schedule.closes_at == time(17, 0)
+    assert schedule.coherence_issue is None
+
+
+def test_two_disjoint_availability_rows_intersect_to_nothing():
+    """9-12 and 14-18 permit no overlap at all: closed all day, not a coherence error."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, "09:00:00", "12:00:00"), _hours_row(2, "14:00:00", "18:00:00")),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    # Normalised to a zero-width window, not reported as inverted or broken.
+    assert schedule.opens_at == schedule.closes_at == time(14, 0)
+    assert schedule.coherence_issue is None
+
+
+def test_two_slot_alignment_rows_resolve_to_their_lcm_not_their_minimum():
+    """A 20-minute row and a 30-minute row together require a 60-minute grid.
+
+    The minimum (20) would let a booking land on :20 or :40, which the
+    30-minute row would still refuse — only multiples of lcm(20, 30) = 60
+    satisfy both simultaneously.
+    """
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_slot_row(1, 20), _slot_row(2, 30)),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.slot_minutes == 60
+
+
+def test_a_row_scoped_to_a_non_matching_weekday_is_excluded():
+    """MONDAY is weekday 0; a row scoped to Tuesday/Thursday (1, 3) must not apply."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, "09:00:00", "17:00:00", applies_to={"weekdays": [1, 3]}),),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.opens_at is None
+    assert schedule.closes_at is None
+
+
+def test_a_row_scoped_to_a_matching_weekday_does_apply():
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, "09:00:00", "17:00:00", applies_to={"weekdays": [1]}),),
+    )
+
+    schedule = resolve_day_schedule(config, TUESDAY)
+
+    assert schedule.opens_at == time(9, 0)
+    assert schedule.closes_at == time(17, 0)
+
+
+def test_a_disabled_row_is_never_resolved():
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="availability_hours",
+                params={"opens_at": "09:00:00", "closes_at": "17:00:00"},
+                enabled=False,
+            ),
+        ),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.opens_at is None
+    assert schedule.closes_at is None
+
+
+def test_coherence_issue_when_hours_do_not_land_on_the_slot_grid():
+    """09:15 opening on a 30-minute grid never lands on a boundary."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, "09:15:00", "17:00:00"), _slot_row(2, 30)),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.coherence_issue is not None
+    assert "30-minute slot boundary" in schedule.coherence_issue
+
+
+def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_slot_rule():
+    """ "Closed all day" plus a slot-alignment row must not also report incoherence."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            _hours_row(1, "09:00:00", "12:00:00"),
+            _hours_row(2, "14:00:00", "18:00:00"),
+            _slot_row(3, 45),
+        ),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.opens_at == schedule.closes_at
+    assert schedule.coherence_issue is None
