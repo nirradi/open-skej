@@ -564,8 +564,8 @@ def update_space_rule(
     ``params``, when present, wholesale-replaces what is stored — except for
     ``availability_hours``, where a submission naming only one of
     ``opens_at``/``closes_at`` is first merged over the row's own currently
-    stored pair before validation, the same way ``update_space`` computes
-    its effective pair from ``current_hours.params``. Every other type gets
+    stored pair before validation, so the check is made on the *effective*
+    pair the update leaves behind. Every other type gets
     no such merge: its schema requires whatever it requires of the
     submitted dict alone, which is what "wholesale replacement" means for
     it. The merge is what lets the inverted-hours check below see a real
