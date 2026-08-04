@@ -54,6 +54,7 @@
  * `/schedule` fetch that fails outright — with no resolved schedule at all
  * there is nothing honest to draw — but it is the wrong shape here, where
  * every other day is describable and this one is merely untidy.
+ *
  * ## What this component does not do
  *
  * It selects; it does not book and it does not cancel. It reports two kinds of
