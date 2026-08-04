@@ -126,7 +126,13 @@ the same court twice does — and that overlap constraint is the *only* thing th
 two Resources in a Space. Everything else — operating hours, slot interval, every rule limit — lives
 on the Space, and every court in it shares that one configuration. Creating a Space **auto-creates
 its first Resource**, so a fresh venue is never a dead end and no primary flow meets an empty state;
-the schema can represent a Space with no Resource, but nothing in the product produces one.
+the schema can represent a Space with no Resource, but nothing in the product produces one. It also
+seeds **two `space_rules` rows** — an unscoped `availability_hours` (09:00–17:00) and an unscoped
+`slot_alignment` (60 minutes) — for the same reason: a venue is bookable on arrival rather than one an
+admin must visit the rules page to make usable. Those two and nothing else, so every limit a venue has
+not asked for stays absent. A Space genuinely meant to enforce no hours holds no such row and has to
+have the seeded one deleted — which is what `sandbox_seed` does to Space A, since "not enforced" is
+the absence of a row and never a row with an empty bound.
 
 **Membership and roles stay at the Space, never the Resource.** You are admitted to the venue, not to
 one court, and a member may book any Resource in the Space. This is deliberate and load-bearing: the
