@@ -62,6 +62,8 @@ app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/
   interfaces.py  The rule contract — authoritative, read before writing any rule
   controller.py  evaluate_request(): fail-fast canon execution and error containment
+  registry.py    Each rule type's runtime identity: the stable string id a `space_rules` row
+                   stores, its parameter schema, its priority, and the function that builds it
 ```
 
 ## Cross-cutting invariants

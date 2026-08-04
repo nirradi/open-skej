@@ -30,7 +30,7 @@ Design notes that apply throughout:
 
 import enum
 import secrets
-from datetime import datetime, time
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import (
@@ -39,10 +39,8 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
-    Integer,
     String,
     Text,
-    Time,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -168,22 +166,13 @@ class Space(Base):
     zone; this is the one place a zone is a property of the data, because
     operating hours are a rule that lands on a different UTC moment as the
     calendar and DST move. An offset column would be the version of this that
-    looks right in July and is wrong in January.
-
-    ``opens_at`` / ``closes_at`` / ``slot_minutes`` are the venue's operating
-    hours and booking-slot interval — **per Space, not per Resource**. A
-    Resource is one of N indistinguishable courts and carries no configuration
-    of its own; every court in a Space shares the one schedule set here. They
-    are local wall-clock values, resolved against ``timezone`` to a UTC window
-    per date at the boundary, and nullable because a Space with none set simply
-    has no hours restriction yet.
-
-    ``max_duration_minutes``, ``booking_horizon_days``, ``max_bookings_per_week``
-    and ``max_bookings_per_month`` are the venue's rule-engine parameters — the
-    other half of "the Space is the unit of configuration and policy". A
-    frequency cap counts every booking the user holds anywhere in the Space,
-    across all its Resources, never per Resource. All four are nullable: unset
-    means the corresponding rule is not enforced for this Space.
+    looks right in July and is wrong in January. It is the one genuinely
+    per-Space column left on this table: operating hours, slot interval, and
+    every rule-engine limit are configured instead as rows on
+    :class:`SpaceRule` below, one row per *instance* of a registered rule
+    type, which is what lets a Space hold any number of instances of a type
+    and scope each one with ``applies_to`` rather than one fixed value for
+    the whole venue.
 
     ``archived_at`` is the sole end-state. An archived Space rejects new bookings
     on any of its Resources; existing future bookings stay and remain cancellable.
@@ -201,18 +190,6 @@ class Space(Base):
     # be added NOT NULL to a table that already holds rows, and so a Space created
     # by a path that does not set it still lands on a valid zone.
     timezone: Mapped[str] = mapped_column(String(64), default="UTC", server_default=text("'UTC'"))
-    # Operating-hours configuration. Stored as *local* wall-clock times against
-    # this Space's own ``timezone``; the conversion to a UTC window happens per
-    # date at the boundary, never here.
-    opens_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
-    closes_at: Mapped[Optional[time]] = mapped_column(Time, default=None)
-    slot_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
-    # Rule-engine parameters, consumed by task 4.13b's canon assembly. Unset
-    # (null) means the corresponding rule is not part of this Space's canon.
-    max_duration_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=None)
-    booking_horizon_days: Mapped[Optional[int]] = mapped_column(Integer, default=None)
-    max_bookings_per_week: Mapped[Optional[int]] = mapped_column(Integer, default=None)
-    max_bookings_per_month: Mapped[Optional[int]] = mapped_column(Integer, default=None)
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     archived_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
@@ -231,16 +208,12 @@ class Space(Base):
 class SpaceRule(Base):
     """One configured instance of a rule type, governing one Space.
 
-    This is task 6.6's expand half of an expand-then-contract migration
-    (``ops/plans/stream-6-plan.md``): rule configuration moves from seven
-    fixed columns on ``Space`` into rows here, one row per *instance* of a
-    rule type declared in ``rules.registry.REGISTRY`` — so a Space can hold
-    any number of instances of a type ("Mon/Wed/Fri 10-15" and "Tue/Thu 8-12"
-    as two ``availability_hours`` rows) instead of one fixed value for the
-    whole venue. The seven ``spaces`` columns are backfilled into rows here
-    by the migration and are, from this point on, read by nothing and
-    written by nothing — they are dropped outright in a later task (6.10),
-    once this store has proven itself equivalent.
+    Rule configuration lives here rather than as fixed columns on ``Space``,
+    one row per *instance* of a rule type declared in
+    ``rules.registry.REGISTRY`` — so a Space can hold any number of
+    instances of a type ("Mon/Wed/Fri 10-15" and "Tue/Thu 8-12" as two
+    ``availability_hours`` rows) instead of one fixed value for the whole
+    venue.
 
     ``rule_type`` is the registry's **stable string id** (``availability_hours``,
     ``max_duration``, …) — never a Python class name, so renaming the class a
