@@ -7,33 +7,37 @@
  * half-hour, or an opening hour, that is a bug in the component, not
  * something to fix by adding a second config value here.
  *
- * ## Built per Space, not a compile-time constant
+ * ## Resolved per date by the server, not a compile-time constant
  *
  * `slotMinutes` / `openMinutes` / `closeMinutes` used to mirror
  * `AVAILABILITY_OPEN` / `AVAILABILITY_CLOSE`, hardcoded constants in
- * `app/backend/app/rules_stub.py`. Those constants are gone: task 4.13a moved
- * operating hours and slot interval onto the Space, where an admin edits them
- * in `SpaceSchedulePanel`. `buildCalendarConfig` is what turns a Space's own
- * `slot_minutes` / `opens_at` / `closes_at` / `timezone` into a
- * `CalendarConfig` at runtime — `ResourceCalendarPage` calls it once the
- * Space is fetched and passes the result to `CalendarGrid`. **The backend is
- * still authoritative**: it re-evaluates every booking against that same
- * Space's rule canon and returns a `rule_denied` response for anything
- * outside it, regardless of what this file computes. A config built from
- * stale or wrong Space data produces a grid that renders bookable slots the
- * server will refuse — the denial copy will still be correct and friendly,
- * but the user was invited to click something that could never work.
+ * `app/backend/app/rules_stub.py`. Those constants are gone, and so is the
+ * later shape that replaced them — one `CalendarConfig` built from a Space's
+ * own schedule fields — because a Space no longer has one slot size or one
+ * operating window good for a whole week: a rule instance's `applies_to` can
+ * narrow it to particular weekdays or dates. `buildWeekSchedule` turns `GET
+ * /spaces/{public_id}/schedule`'s **already resolved** per-date answer into a
+ * `WeekSchedule`, and `calendarConfigForDay` narrows that to the single-date
+ * `CalendarConfig` the functions here take. This module never decides which
+ * rules govern a date — the server does, and a second implementation of that
+ * in TypeScript is the invariant in `.claude/rules/rule-engine.md` broken
+ * quietly. **The backend is still authoritative** for the booking itself too:
+ * it re-evaluates every booking against that Space's rule canon and returns a
+ * `rule_denied` response for anything outside it, regardless of what this file
+ * computes. A grid drawn from a stale schedule renders bookable slots the
+ * server will refuse — the denial copy will still be correct and friendly, but
+ * the user was invited to click something that could never work.
  *
  * `calendarConfig`, the module-level default, survives only as the fallback
- * `CalendarGrid` uses when no `config` prop is given (tests, mostly — a real
- * page always builds one from its Space). It models a Space whose hours are
- * unset: `opens_at` / `closes_at` null means the availability-hours rule is
- * not enforced (`.claude/rules/identity-and-access.md`), so the honest
- * default is the *whole day* bookable, not the old hardcoded 06:00–23:00
- * window — inventing a window here would be a rule this file has no
- * authority to make up. Its `timeZone` is `SYSTEM_TIME_ZONE` — the closest
- * thing to a Space when there is no Space at all, and never presented as a
- * Space's real zone once one is loaded (see `timezone.ts`).
+ * `CalendarGrid` uses when no `schedule` prop is given (tests, mostly — a real
+ * page always fetches one). It models a Space whose hours are unset:
+ * `opens_at` / `closes_at` null means the availability-hours rule is not
+ * enforced (`.claude/rules/identity-and-access.md`), so the honest default is
+ * the *whole day* bookable, not the old hardcoded 06:00–23:00 window —
+ * inventing a window here would be a rule this file has no authority to make
+ * up. Its `timeZone` is `SYSTEM_TIME_ZONE` — the closest thing to a Space when
+ * there is no Space at all, and never presented as a Space's real zone once
+ * one is loaded (see `timezone.ts`).
  *
  * ## The grid always renders the full day
  *
@@ -79,7 +83,8 @@ export interface CalendarConfig {
    * the backend's max-duration rule is what bounds them.
    *
    * Must divide a day evenly, and must divide `openMinutes` / `closeMinutes`
-   * when they are set (see `coherenceIssue`).
+   * when they are set — a date whose resolved rules do not satisfy that is
+   * reported by the server as that date's own `DaySchedule.coherenceIssue`.
    */
   slotMinutes: number
   /**
@@ -183,109 +188,20 @@ export function isSlotOutOfHours(index: number, config: CalendarConfig = calenda
   return start < open || end > close
 }
 
-/**
- * What's wrong with `config`, or `null` if it can render a correct grid.
- *
- * Two distinct shapes of bad configuration are folded into one check, because
- * both leave the grid unable to draw a coherent set of rows:
- *
- * 1. **A `slotMinutes` that cannot tile the day, or that does not land
- *    `openMinutes` / `closeMinutes` on a slot boundary.** The direct
- *    descendant of the old boot-time check: a slot size that does not divide
- *    the day, or hours that fall mid-slot, would either truncate the last
- *    slot or grey half of one — silently wrong rather than incoherent, which
- *    is worse.
- * 2. **`closeMinutes` at or before `openMinutes`.** Both are minutes since
- *    midnight on the Space's own wall clock (see the module docblock), and a
- *    window that does not advance in that clock is exactly `DEFERRED.md`
- *    item 18's shape — a venue open past its own local midnight, which
- *    `operating_hours.py` also requires `opens_at < closes_at` local to
- *    exclude. This function does not attempt to represent that case; it only
- *    refuses to draw a window that is inverted or empty in the Space's own
- *    clock.
- *
- * Not a boot-time assertion (the old `assertConfigIsCoherent` threw and ran
- * once at import time, which was correct for a compile-time constant nobody
- * could mistype). A `CalendarConfig` is now built from data an admin typed
- * into `SpaceSchedulePanel`, and one bad Space must not white-screen every
- * calendar in the app — `buildCalendarConfig` calls this and the caller
- * degrades to a notice instead.
- */
-export function coherenceIssue(config: CalendarConfig): string | null {
-  if (config.slotMinutes <= 0) {
-    return `Slot length must be positive, got ${config.slotMinutes} minutes.`
-  }
-  if (MINUTES_PER_DAY % config.slotMinutes !== 0) {
-    return `Slot length (${config.slotMinutes} minutes) must divide a day evenly.`
-  }
-  if (config.openMinutes !== null && config.openMinutes % config.slotMinutes !== 0) {
-    return `Opening time must land on a ${config.slotMinutes}-minute slot boundary.`
-  }
-  if (config.closeMinutes !== null && config.closeMinutes % config.slotMinutes !== 0) {
-    return `Closing time must land on a ${config.slotMinutes}-minute slot boundary.`
-  }
-  if (
-    config.openMinutes !== null &&
-    config.closeMinutes !== null &&
-    config.closeMinutes <= config.openMinutes
-  ) {
-    return 'Closing time must be after opening time.'
-  }
-  return null
-}
-
-/** `HH:MM:SS` (Python's `time`, the wire shape `Space.opens_at`/`closes_at` use) → minutes since midnight. */
+/** `HH:MM:SS` (Python's `time`, the wire shape the schedule endpoint's bounds use) → minutes since midnight. */
 function parseClockMinutes(value: string): number {
   const [hh, mm] = value.split(':').map(Number)
   return hh * MINUTES_PER_HOUR + mm
 }
 
-export type CalendarConfigResult =
-  | { status: 'ok'; config: CalendarConfig }
-  | { status: 'incoherent'; message: string }
-
-/**
- * Builds a `CalendarConfig` from a Space's own schedule fields.
- *
- * `slot_minutes` null falls back to the shipped default granularity.
- * `opens_at` / `closes_at` null means "not enforced" and renders as no
- * restriction — never the old hardcoded 06:00–23:00 window; see the module
- * docblock for why that fallback would be inventing a rule this file has no
- * authority to make up. `timezone` is carried straight through as `timeZone`:
- * it is already a validated IANA name by the time a Space reaches the
- * frontend (`.claude/rules/identity-and-access.md`), so this function's only
- * job is to not lose it on the way into `CalendarConfig`.
- *
- * Never throws: see `coherenceIssue` for what "incoherent" covers and why a
- * misconfigured Space degrades to a result the caller renders as a notice.
- */
-export function buildCalendarConfig(space: {
-  slot_minutes: number | null
-  opens_at: string | null
-  closes_at: string | null
-  timezone: string
-}): CalendarConfigResult {
-  const config: CalendarConfig = {
-    slotMinutes: space.slot_minutes ?? calendarConfig.slotMinutes,
-    openMinutes: space.opens_at === null ? null : parseClockMinutes(space.opens_at),
-    closeMinutes: space.closes_at === null ? null : parseClockMinutes(space.closes_at),
-    timeZone: space.timezone,
-  }
-  const issue = coherenceIssue(config)
-  if (issue !== null) return { status: 'incoherent', message: issue }
-  return { status: 'ok', config }
-}
-
-// --- The resolved per-day schedule (task 6.9) -------------------------------
+// --- The resolved per-day schedule ------------------------------------------
 //
-// `buildCalendarConfig` above builds one `CalendarConfig` for the whole
-// Space, which cannot express "Tuesdays are different" now that a rule's
-// `applies_to` can narrow it to particular weekdays or dates. It stays —
-// 6.10 is what removes it, once the Space columns it reads are dropped —
-// but `CalendarGrid` no longer uses it for layout. This is what replaces it:
-// a per-date resolution read from `GET /spaces/{public_id}/schedule`
+// A single `CalendarConfig` for a whole Space cannot express "Tuesdays are
+// different" now that a rule's `applies_to` can narrow it to particular
+// weekdays or dates. What the grid lays itself out from is instead a per-date
+// resolution read from `GET /spaces/{public_id}/schedule`
 // (`app.rules_stub.resolve_day_schedule`, the backend's own flat-AND
-// resolution), never re-derived here.
+// resolution over the Space's `space_rules` rows), never re-derived here.
 
 /**
  * One date's resolved slot size and operating window, in minutes since
@@ -296,16 +212,13 @@ export function buildCalendarConfig(space: {
  * `openMinutes` / `closeMinutes` `null` means the Space enforces no bound on
  * this date, exactly like `CalendarConfig`'s fields. `slotMinutes` falls
  * back to the shipped default (`calendarConfig.slotMinutes`) when the Space
- * configures no slot rule for the date at all, mirroring
- * `buildCalendarConfig`'s identical fallback for the single-config shape.
+ * configures no slot rule for the date at all.
  *
  * `coherenceIssue` is carried straight through from the server's own
- * `DayScheduleRead.coherence_issue` rather than recomputed by this file's
- * `coherenceIssue()` function: the two happen to check the same thing today
- * (an hours bound that does not land on the slot grid), but only one of them
- * may be the source of truth for a per-date resolution driven by `applies_to`,
- * and it is the server's — this module must never re-derive rule semantics
- * (`.claude/rules/rule-engine.md`).
+ * `DayScheduleRead.coherence_issue` and is never computed here: whether a
+ * date's resolved hours land on its resolved slot grid is a question about
+ * which rules govern that date, and this module must never re-derive rule
+ * semantics (`.claude/rules/rule-engine.md`).
  */
 export interface DaySchedule {
   slotMinutes: number

@@ -142,8 +142,9 @@ on every date it is asked about; a value baked into a module-level constant at i
 correct for the day it was written and silently wrong every day after, the same cached-offset mistake
 `CLAUDE.md` warns against elsewhere. The canon the API actually runs is built per Space (see Backend
 integration), where a type with no matching row is absent from the canon entirely and
-`SlotAlignmentRule` is constructed fresh, with a freshly resolved `anchor`, for every booking. `NotInThePastRule` is the only one always
-present — you can never book the past, whatever a Space configures.
+`SlotAlignmentRule` is constructed fresh, with a freshly resolved `anchor`, for every booking.
+`NotInThePastRule` is the only one always present — you can never book the past, whatever a
+Space configures.
 
 **`SlotAlignmentRule` denies a booking whose `start_at` or `end_at` is not on the grid** defined by
 `slot_minutes` and an `anchor` UTC instant — both bounds are checked, so an aligned start with an
@@ -154,8 +155,9 @@ days via `applies_to` — local midnight is a property of the date and the zone 
 the adapter already resolves for `AvailabilityHoursRule` and the counting rules for the same reason.
 This closes a real gap rather than tightening a theoretical one: `slot_minutes` was, until this rule
 existed, the one piece of a Space's configuration nothing on the server read — the calendar UI
-declined to *offer* an off-grid slot, but the API accepted one anyway, which is exactly the split this document warns about
-elsewhere (the grid is advisory, the engine is the only boundary that counts).
+declined to *offer* an off-grid slot, but the API accepted one anyway, which is exactly the split
+this document warns about elsewhere (the grid is advisory, the engine is the only boundary that
+counts).
 
 **A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the
 seven classes above a runtime identity separate from being importable Python. A registered type
@@ -241,9 +243,9 @@ They are **exported but deliberately absent from `DEFAULT_CANON`**, the referenc
 of `canon.py`'s five hand-written rules (every one except `SlotAlignmentRule`, excluded for its own,
 different reason — see "The canon" above). The API does not run `DEFAULT_CANON`; it assembles a
 per-Space canon that *includes* these two when a Space holds a `max_bookings_per_week` /
-`max_bookings_per_month` rule instance. Keeping them out of the reference canon is what lets the end-to-end suite
-assert against a seeded Space configured to those four rules' values without a counting rule silently
-changing the outcome.
+`max_bookings_per_month` rule instance. Keeping them out of the reference canon is what lets the
+end-to-end suite assert against a seeded Space configured to those four rules' values without a
+counting rule silently changing the outcome.
 
 **Neither rule derives its own window — both are handed one.** The window is a half-open
 `[window_start, window_end)` pair of UTC instants passed at construction, and the rule does nothing

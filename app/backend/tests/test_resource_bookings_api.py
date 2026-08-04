@@ -33,7 +33,7 @@ from app.db.session import get_session
 from app.dependencies import get_driver
 from app.identity import service
 from app.identity.models import MembershipRole, Resource, Space, SpaceMembership, User
-from app.identity.schemas import SpaceUpdate
+from app.identity.schemas import SpaceRuleUpdate
 from app.main import app
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -141,24 +141,46 @@ def member(session: Session) -> User:
     return _make_user(session, "auth0|member", "member@example.com")
 
 
+def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> None:
+    """Set this Space's one unscoped instance of ``rule_type`` to ``params``.
+
+    ``create_space`` seeds an ``availability_hours`` and a ``slot_alignment``
+    row, so a test tightening either has to edit the row it finds rather than
+    add a second instance: two instances of a type both run and AND to the
+    stricter, and the seeded 60-minute grid would go on refusing a booking
+    aligned only to a 30-minute one.
+    """
+    existing = next(
+        (
+            rule
+            for rule in service.list_space_rules(session, space)
+            if rule.rule_type == rule_type and rule.applies_to is None
+        ),
+        None,
+    )
+    if existing is None:
+        service.create_space_rule(
+            session, space, rule_type=rule_type, params=params, applies_to=None, enabled=True
+        )
+    else:
+        service.update_space_rule(
+            session, space, rule_id=existing.id, payload=SpaceRuleUpdate(params=params)
+        )
+
+
 @pytest.fixture
 def space(session: Session, owner: User) -> Space:
     """A Space with its auto-created first Resource, owned by ``owner``.
 
-    ``max_duration_minutes`` is set explicitly (``create_space`` otherwise
-    leaves every rule parameter unset) so the canon this module's tests
-    exercise actually includes a duration cap — the per-Space canon assembled
-    for a Space with no configuration would enforce nothing but
-    ``NotInThePastRule``, and ``test_rule_denial_returns_422_and_persists_
-    nothing`` needs a real rule to trip.
-
-    Set through ``service.update_space`` rather than the ``Space`` column
-    directly: since task 6.6 the column is read by nothing, and the adapter
-    builds the canon from the Space's ``space_rules`` rows, which only the
-    write-through shim populates.
+    A ``max_duration`` rule is added explicitly (``create_space`` seeds only
+    operating hours and a slot grid) so the canon this module's tests exercise
+    actually includes a duration cap — the per-Space canon assembled for a
+    Space with no configuration would enforce nothing but ``NotInThePastRule``,
+    and ``test_rule_denial_returns_422_and_persists_nothing`` needs a real rule
+    to trip.
     """
     space = service.create_space(session, owner, name="Court Club", description="A club")
-    service.update_space(session, space, SpaceUpdate(max_duration_minutes=120))
+    _set_rule(session, space, "max_duration", {"max_duration_minutes": 120})
     return space
 
 
@@ -299,7 +321,7 @@ def test_off_grid_booking_is_refused_by_slot_alignment(
     accepted anything — the split ``rule-engine.md`` warns is only safe as long as the grid is
     advisory and something else is the real boundary. Nothing enforced it server-side until now.
     """
-    service.update_space(session, space, SpaceUpdate(slot_minutes=30))
+    _set_rule(session, space, "slot_alignment", {"slot_minutes": 30})
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 7)), "end_at": iso(at(10, 22))}
@@ -321,7 +343,7 @@ def test_an_on_grid_booking_is_unaffected_by_slot_alignment(
     api: Api, session: Session, owner: User, space: Space, resource: Resource
 ) -> None:
     """The new rule only refuses what is actually off-grid."""
-    service.update_space(session, space, SpaceUpdate(slot_minutes=30))
+    _set_rule(session, space, "slot_alignment", {"slot_minutes": 30})
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(11))}

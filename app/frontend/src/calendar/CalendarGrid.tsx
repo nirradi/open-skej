@@ -40,9 +40,8 @@
  * A day's `coherence_issue` (opening/closing time not landing on that day's
  * own resolved slot grid) is advisory only, and deliberately does not block
  * anything: `resolve_day_schedule` guarantees every resolved `slotMinutes`
- * divides 1440, so a day can no longer fail to describe *some* grid the way
- * a pre-6.9 `CalendarConfig` could (`config.ts`'s old `coherenceIssue`
- * check). And `isSlotOutOfHours` already greys any slot that only partially
+ * divides 1440, so a day can never fail to describe *some* grid to draw.
+ * And `isSlotOutOfHours` already greys any slot that only partially
  * overlaps the open window, whether or not that window lines up with the
  * grid — so a misaligned bound never lets the grid *offer* a slot the
  * backend would refuse; it is just wasted capacity an admin might want to

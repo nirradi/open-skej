@@ -889,165 +889,45 @@ def test_a_member_gets_403_setting_the_space_timezone(
     assert response.status_code == 403
 
 
-# --- Space schedule and rule parameters. -------------------------------------
+# --- Space configuration lives in space_rules, not on SpaceRead/SpaceUpdate. -
 #
-# Operating hours, slot interval, and every rule limit live on the Space now
-# (task 4.13a) — a Resource carries no configuration of its own. A fresh Space
-# gets sensible default hours so it is immediately bookable; the four rule
-# parameters default to unset.
+# Operating hours, slot interval, and every rule limit are `space_rules` rows,
+# read and written only through the rules API (`test_rules_api.py`). Neither
+# `SpaceRead` nor `SpaceUpdate` carries a field for any of them any more, so
+# there is no second path a client could read or write a Space's
+# configuration through.
 
 
-def test_a_new_space_has_default_operating_hours(api: Api, alice: User, space_a: Space) -> None:
+def test_space_read_carries_no_schedule_or_rule_parameter_fields(
+    api: Api, alice: User, space_a: Space
+) -> None:
     body = api.as_user(alice).get(f"/spaces/{space_a.public_id}").json()
 
-    assert body["opens_at"] == "09:00:00"
-    assert body["closes_at"] == "17:00:00"
-    assert body["slot_minutes"] == 60
-    assert body["max_duration_minutes"] is None
-    assert body["booking_horizon_days"] is None
-    assert body["max_bookings_per_week"] is None
-    assert body["max_bookings_per_month"] is None
-
-
-def test_an_admin_sets_the_space_schedule_and_rule_parameters(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    response = api.as_user(alice).patch(
-        f"/spaces/{space_a.public_id}",
-        json={
-            "opens_at": "07:00",
-            "closes_at": "22:00",
-            "slot_minutes": 30,
-            "max_duration_minutes": 120,
-            "booking_horizon_days": 60,
-            "max_bookings_per_week": 3,
-            "max_bookings_per_month": 10,
-        },
-    )
-
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert body["opens_at"] == "07:00:00"
-    assert body["closes_at"] == "22:00:00"
-    assert body["slot_minutes"] == 30
-    assert body["max_duration_minutes"] == 120
-    assert body["booking_horizon_days"] == 60
-    assert body["max_bookings_per_week"] == 3
-    assert body["max_bookings_per_month"] == 10
-
-
-def test_operating_hours_that_invert_on_the_local_clock_are_refused(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    """An admin who types the closing time into the opening box is told so.
-
-    This became load-bearing with task 5.13. The engine reads an *inverted* UTC
-    window as "this window crosses a UTC calendar day" — which is what makes an
-    ordinary Sydney or Honolulu venue bookable — so it can no longer distinguish
-    that from hours inverted on the venue's own clock. Unchecked, the swap gives
-    a Space open all night and shut all day, silently, where it used to refuse
-    every booking loudly. The write boundary is the last layer that still knows
-    these values were typed rather than derived.
-    """
-    response = api.as_user(alice).patch(
-        f"/spaces/{space_a.public_id}",
-        json={"opens_at": "21:00", "closes_at": "09:00"},
-    )
-
-    assert response.status_code == 422, response.text
-    assert "earlier than closing" in response.json()["detail"]
-
-
-def test_operating_hours_are_judged_on_the_pair_the_patch_leaves_behind(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    """A PATCH naming one bound is still judged against the stored other one.
-
-    The check cannot live on the payload: sending only ``opens_at`` is a legal
-    partial update, and whether it inverts depends on the ``closes_at`` already
-    in the row. `space_a` opens 09:00 and closes 17:00.
-    """
-    client = api.as_user(alice)
-    url = f"/spaces/{space_a.public_id}"
-
-    refused = client.patch(url, json={"opens_at": "18:00"})
-    assert refused.status_code == 422, refused.text
-
-    # The rejected write left nothing behind.
-    assert client.get(url).json()["opens_at"] == "09:00:00"
-
-    # Equal bounds are an empty window, not a valid one.
-    assert client.patch(url, json={"opens_at": "17:00"}).status_code == 422
-
-    # And the ordinary narrowing still works.
-    accepted = client.patch(url, json={"opens_at": "10:00"})
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["opens_at"] == "10:00:00"
-
-
-def test_an_explicit_null_clears_space_schedule_and_rule_parameters(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    """An explicit null clears a schedule/rule-parameter field back to "no
-    restriction"; an omitted field is left alone — the same convention
-    ``description`` and ``timezone`` already follow.
-
-    ``opens_at``/``closes_at`` are the one pair where "left alone" does not
-    mean "untouched at the storage layer": since task 6.6 both bounds live
-    together in one ``availability_hours`` row, required together
-    (``rules.registry``), so a row missing one bound is not a state this
-    store can represent — mirroring ``_build_canon``'s pre-existing "both or
-    neither" gating. Nulling ``opens_at`` alone therefore clears the whole
-    row, taking the untouched ``closes_at`` down with it, rather than leaving
-    a half-filled row behind for a later PATCH to inherit from.
-    """
-    client = api.as_user(alice)
-    url = f"/spaces/{space_a.public_id}"
-
-    client.patch(url, json={"opens_at": "07:00", "max_duration_minutes": 120})
-
-    cleared = client.patch(url, json={"opens_at": None, "max_duration_minutes": None})
-    assert cleared.status_code == 200, cleared.text
-    body = cleared.json()
-    assert body["opens_at"] is None
-    assert body["max_duration_minutes"] is None
-    assert body["closes_at"] is None
-
-
-@pytest.mark.parametrize(
-    "field",
-    [
+    for field in (
+        "opens_at",
+        "closes_at",
         "slot_minutes",
         "max_duration_minutes",
         "booking_horizon_days",
         "max_bookings_per_week",
         "max_bookings_per_month",
-    ],
-)
-def test_space_schedule_and_rule_parameters_must_be_positive(
-    api: Api, alice: User, space_a: Space, field: str
+    ):
+        assert field not in body
+
+
+def test_patching_a_schedule_field_is_silently_ignored(
+    api: Api, alice: User, space_a: Space
 ) -> None:
-    client = api.as_user(alice)
-    url = f"/spaces/{space_a.public_id}"
+    """These fields are unknown to `SpaceUpdate`, so a client still sending
+    one — an old admin panel, a stale bookmark of this API — patches nothing
+    rather than erroring or reaching a column that no longer exists.
+    """
+    response = api.as_user(alice).patch(
+        f"/spaces/{space_a.public_id}", json={"opens_at": "07:00", "slot_minutes": 30}
+    )
 
-    assert client.patch(url, json={field: 0}).status_code == 422
-    assert client.patch(url, json={field: -5}).status_code == 422
-
-
-def test_slot_minutes_cannot_exceed_a_day(api: Api, alice: User, space_a: Space) -> None:
-    response = api.as_user(alice).patch(f"/spaces/{space_a.public_id}", json={"slot_minutes": 1441})
-
-    assert response.status_code == 422
-
-
-def test_a_member_gets_403_setting_the_space_schedule(
-    api: Api, session: Session, alice: User, carol: User, space_a: Space
-) -> None:
-    _add_member(session, space_a, carol, MembershipRole.MEMBER)
-
-    response = api.as_user(carol).patch(f"/spaces/{space_a.public_id}", json={"opens_at": "07:00"})
-
-    assert response.status_code == 403
+    assert response.status_code == 200, response.text
+    assert "opens_at" not in response.json()
 
 
 def test_archiving_stamps_archived_at(api: Api, alice: User, space_a: Space) -> None:

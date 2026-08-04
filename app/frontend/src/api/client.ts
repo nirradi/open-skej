@@ -830,17 +830,17 @@ export async function getSpace(publicId: string): Promise<AuthenticatedResult<Sp
 }
 
 /**
- * `PATCH /spaces/{public_id}` — admin+. Rename, redescribe, reset the venue's
- * IANA timezone, or edit its operating hours, slot interval, and rule
- * parameters.
+ * `PATCH /spaces/{public_id}` — admin+. Rename, redescribe, or reset the
+ * venue's IANA timezone. Nothing else: operating hours, slot interval and
+ * every rule limit are rule instances, written through `createSpaceRule` /
+ * `updateSpaceRule` / `deleteSpaceRule` and reachable no other way.
  *
  * Partial: only the keys present in `patch` are sent, so omitting a field
- * leaves it unchanged server-side. `description`, `opens_at`, `closes_at`,
- * `slot_minutes`, and the four rule-parameter fields may all be cleared by
- * sending them `null` — the same omitted-vs-null distinction `SpaceUpdate`
- * documents on the backend. `name` and `timezone` are not nullable there, so
- * sending either `null` is a client bug the server reports as
- * `invalid_request`, not a way to reset it.
+ * leaves it unchanged server-side. `description` may be cleared by sending it
+ * `null` — the same omitted-vs-null distinction `SpaceUpdate` documents on the
+ * backend. `name` and `timezone` are not nullable there, so sending either
+ * `null` is a client bug the server reports as `invalid_request`, not a way to
+ * reset it.
  *
  * `conflict` means the Space is archived and takes no more mutations.
  */
@@ -850,13 +850,6 @@ export async function updateSpace(
     name?: string
     description?: string | null
     timezone?: string
-    opens_at?: string | null
-    closes_at?: string | null
-    slot_minutes?: number | null
-    max_duration_minutes?: number | null
-    booking_horizon_days?: number | null
-    max_bookings_per_week?: number | null
-    max_bookings_per_month?: number | null
   },
 ): Promise<MutatingResult<Space>> {
   return mutatingRequest<Space>(`/spaces/${encodeURIComponent(publicId)}`, {
@@ -901,12 +894,10 @@ function formatDateParam(date: Date): string {
  * gate as `listSpaceRules`.
  *
  * **This is what the calendar grid reads instead of re-deriving rule
- * semantics itself.** `applies_to` means a week no longer has one answer —
- * `buildCalendarConfig` (`config.ts`) built a single `CalendarConfig` from
- * `Space.slot_minutes`/`opens_at`/`closes_at` and that shape cannot express
- * "Tuesdays are different", so this endpoint reports the *resolved* answer
- * per date and the frontend only renders it (`config.ts`'s
- * `buildWeekSchedule`).
+ * semantics itself.** `applies_to` means a week no longer has one answer, and
+ * a single `CalendarConfig` covering the whole week cannot express "Tuesdays
+ * are different" — so this endpoint reports the *resolved* answer per date and
+ * the frontend only renders it (`config.ts`'s `buildWeekSchedule`).
  *
  * `from` is a calendar date, not an instant — deliberately not passed
  * through `toISOString()` the way `listResourceBookings` passes its window,
@@ -931,8 +922,8 @@ export async function getSpaceSchedule(
 /**
  * `PATCH /spaces/{public_id}/resources/{resource_id}` — admin+. Rename a
  * Resource. Name-only: a Resource carries no configuration of its own —
- * operating hours, slot interval, and rule parameters all live on the Space,
- * set through `updateSpace`.
+ * operating hours, slot interval, and every rule limit live on the Space, as
+ * rule instances written through `createSpaceRule` and friends.
  *
  * `conflict` covers an archived Space or an archived Resource, either of
  * which rejects every mutation with a 409; `not_found` covers a Resource id

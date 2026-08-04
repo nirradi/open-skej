@@ -87,10 +87,6 @@ INVITATION_RESOLVED_DETAIL = (
     " To remove someone who has already joined, remove their membership instead."
 )
 INVITATION_ROLE_TOO_HIGH_DETAIL = "You cannot invite someone at a role above your own."
-AMBIGUOUS_RULE_INSTANCE_DETAIL = (
-    "This Space already has more than one instance of that rule configured."
-    " Use the rules page to edit a specific one."
-)
 RULE_NOT_FOUND_DETAIL = "No such rule instance in this Space."
 INVALID_OPERATING_HOURS_DETAIL = "Opening time must be earlier than closing time."
 
@@ -165,22 +161,14 @@ def _invitation_role_too_high() -> HTTPException:
     )
 
 
-def _ambiguous_rule_instance() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_409_CONFLICT, detail=AMBIGUOUS_RULE_INSTANCE_DETAIL
-    )
-
-
 def _rule_not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=RULE_NOT_FOUND_DETAIL)
 
 
 def _invalid_operating_hours() -> HTTPException:
-    # Same 422, same copy, as `update_space`'s own inverted-hours check
-    # below: one rule, enforced at two write paths onto the same
-    # `availability_hours` row shape, so it gets one exception type
-    # (`service.InvalidOperatingHoursError`) and one piece of copy rather
-    # than a second implementation of either.
+    # Shared by both `create_space_rule` and `update_space_rule` below: one
+    # rule, one exception type (`service.InvalidOperatingHoursError`), one
+    # piece of copy, rather than a second implementation of either.
     return HTTPException(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=INVALID_OPERATING_HOURS_DETAIL,
@@ -207,8 +195,7 @@ def create_space(payload: SpaceCreate, user: CurrentUser, session: SessionDep) -
     to recover it from if the caller discards it.
     """
     space = service.create_space(session, user, name=payload.name, description=payload.description)
-    schedule = service.space_schedule_fields(session, space)
-    return SpaceRead.build(space, MembershipRole.OWNER, schedule)
+    return SpaceRead.build(space, MembershipRole.OWNER)
 
 
 @router.get("", response_model=list[SpaceRead])
@@ -221,7 +208,7 @@ def list_spaces(
     are not discoverable, so this returns memberships and nothing else.
     """
     return [
-        SpaceRead.build(space, role, service.space_schedule_fields(session, space))
+        SpaceRead.build(space, role)
         for space, role in service.list_spaces_for_user(
             session, user, include_archived=include_archived
         )
@@ -229,10 +216,9 @@ def list_spaces(
 
 
 @router.get("/{public_id}", response_model=SpaceRead)
-def read_space(context: MemberContext, session: SessionDep) -> SpaceRead:
+def read_space(context: MemberContext) -> SpaceRead:
     """Full detail, for members only. Non-members get 404, not 403."""
-    schedule = service.space_schedule_fields(session, context.space)
-    return SpaceRead.build(context.space, context.role, schedule)
+    return SpaceRead.build(context.space, context.role)
 
 
 @router.get("/{public_id}/preview", response_model=SpacePreview)
@@ -261,23 +247,18 @@ def preview_space(public_id: str, user: CurrentUser, session: SessionDep) -> Spa
 
 @router.patch("/{public_id}", response_model=SpaceRead)
 def update_space(payload: SpaceUpdate, context: AdminContext, session: SessionDep) -> SpaceRead:
-    """Rename a Space, edit its description, timezone, operating hours, slot
-    interval, or rule parameters. Admin or owner."""
+    """Rename a Space, or edit its description or timezone. Admin or owner.
+
+    Operating hours, slot interval and every rule-engine limit are edited
+    through the rules API instead — ``GET``/``POST``/``PATCH``/``DELETE`` on
+    ``/spaces/{public_id}/rules`` — never here.
+    """
     try:
         space = service.update_space(session, context.space, payload)
     except service.SpaceArchivedError:
         raise _archived()
-    except service.InvalidOperatingHoursError:
-        # 422, not 400: this is the same class of answer FastAPI gives for a
-        # payload that fails validation, and to the admin filling in the panel
-        # it is one — the pair is only invalid once combined with what is
-        # already stored, which is why the schema cannot catch it.
-        raise _invalid_operating_hours()
-    except service.AmbiguousRuleInstanceError:
-        raise _ambiguous_rule_instance()
 
-    schedule = service.space_schedule_fields(session, space)
-    return SpaceRead.build(space, context.role, schedule)
+    return SpaceRead.build(space, context.role)
 
 
 @router.post("/{public_id}/archive", response_model=SpaceRead)
@@ -294,8 +275,7 @@ def archive_space(context: OwnerContext, session: SessionDep) -> SpaceRead:
     except service.SpaceArchivedError:
         raise _archived()
 
-    schedule = service.space_schedule_fields(session, space)
-    return SpaceRead.build(space, context.role, schedule)
+    return SpaceRead.build(space, context.role)
 
 
 @router.post(
@@ -675,10 +655,9 @@ def create_space_rule(
 ) -> SpaceRuleRead:
     """Configure a new rule instance for this Space. Admin+.
 
-    This is the real multi-instance editing path task 6.6's ``PATCH
-    /spaces`` shim explicitly deferred here: creating a second instance of
-    an ``is_single`` type is not refused, since ``is_single`` is advisory
-    only and 6.8's form is where that warning belongs, not this API.
+    Creating a second instance of an ``is_single`` type is not refused:
+    ``is_single`` is advisory only, and the admin form is where that warning
+    belongs, not this API.
     """
     try:
         rule = service.create_space_rule(

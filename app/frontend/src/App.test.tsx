@@ -85,13 +85,6 @@ function renderApp() {
       name: 'Tennis Court',
       description: null,
       timezone: 'UTC',
-      opens_at: null,
-      closes_at: null,
-      slot_minutes: null,
-      max_duration_minutes: null,
-      booking_horizon_days: null,
-      max_bookings_per_week: null,
-      max_bookings_per_month: null,
       created_at: '2026-07-01T00:00:00Z',
       archived_at: null,
       my_role: 'member',
@@ -109,11 +102,11 @@ function renderApp() {
     ],
   })
   // `ResourceCalendarPage` fetches `GET /spaces/{public_id}/schedule` for the
-  // visible week (task 6.9); with no entries it falls back to the shipped
-  // default (no hours restriction), matching this fixture Space's own null
-  // `opens_at`/`closes_at`/`slot_minutes`. Unmocked, this is a real `fetch`
-  // with no server behind it — precisely what hung this suite before this
-  // spy was added.
+  // visible week; with no entries it falls back to the shipped default — no
+  // hours restriction, the default slot size — which is what this suite's
+  // assertions about the grid assume. Unmocked, this is a real `fetch` with no
+  // server behind it, precisely what hung this suite before this spy was
+  // added.
   vi.spyOn(api, 'getSpaceSchedule').mockResolvedValue({ outcome: 'ok', data: [] })
   return render(
     <AuthModeContext value={{ kind: 'sandbox' }}>
