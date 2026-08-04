@@ -323,32 +323,23 @@ export type PreviewStatus = 'none' | 'pending' | 'denied' | 'member'
  * mutation on it with a 409, so the UI should stop offering them.
  *
  * `timezone` is the venue's IANA zone name (`Europe/Berlin`, never a fixed
- * offset) — the recurring wall-clock config `opens_at` / `closes_at` are
- * resolved against, not a property of any stored instant. See
+ * offset) — the zone a rule's recurring wall-clock configuration is resolved
+ * against, not a property of any stored instant. See
  * `.claude/rules/identity-and-access.md`.
  *
- * `opens_at` / `closes_at` are `HH:MM:SS` strings (Python's `time` serialised
- * by FastAPI), or `null` when the Space carries no hours restriction. They are
- * this Space's own operating hours and slot interval — every Resource in it
- * shares them, since a Resource carries no configuration of its own.
- *
- * `max_duration_minutes`, `booking_horizon_days`, `max_bookings_per_week` and
- * `max_bookings_per_month` are the Space's rule-engine parameters; `null`
- * means that rule is not enforced here. Not yet read by the booking engine —
- * that is task 4.13b.
+ * **No operating hours, no slot interval, no rule parameters.** What a Space
+ * enforces is a set of rule instances of arbitrary number, each possibly
+ * scoped to particular weekdays or dates, so there is no single value a field
+ * here could carry. Read them through `listSpaceRules` (and `listRuleTypes`
+ * for what each type's parameters mean), or — for what a given *date* resolves
+ * to, which is what the calendar draws — `getSpaceSchedule`. The timezone is
+ * the one property of a Space that is genuinely a scalar rather than a rule.
  */
 export interface Space {
   public_id: string
   name: string
   description: string | null
   timezone: string
-  opens_at: string | null
-  closes_at: string | null
-  slot_minutes: number | null
-  max_duration_minutes: number | null
-  booking_horizon_days: number | null
-  max_bookings_per_week: number | null
-  max_bookings_per_month: number | null
   created_at: string
   archived_at: string | null
   my_role: MembershipRole
@@ -454,16 +445,15 @@ export interface SpaceRuleCreateInput {
  * `GET /spaces/{public_id}/schedule` serves it (task 6.9).
  *
  * `opens_at` / `closes_at` are the Space's own **local** wall-clock times
- * (`HH:MM:SS`, same shape `Space.opens_at`/`closes_at` used before this
- * task) — this endpoint never converts to UTC, since it has no instant to
- * judge, only a calendar date to describe. `null` for `slot_minutes` /
+ * (`HH:MM:SS`, Python's `time` serialised by FastAPI) — this endpoint never
+ * converts to UTC, since it has no instant to judge, only a calendar date to
+ * describe. `null` for `slot_minutes` /
  * `opens_at` / `closes_at` means the corresponding rule type is not enforced
  * on this date at all — the frontend must render that as "not configured",
  * never invent a fallback window the server did not report.
  *
- * `coherence_issue` is the server-resolved replacement for what
- * `coherenceIssue` (`config.ts`) used to compute client-side from a single
- * global config: the resolved window and slot size for *this one date*
+ * `coherence_issue` is resolved server-side and never recomputed by the
+ * client: the resolved window and slot size for *this one date*
  * genuinely conflict (an opening or closing time that does not land on the
  * resolved slot grid). `null` unless that is true — a "closed all day"
  * zero-width window is never a conflict, since there is no grid to misalign

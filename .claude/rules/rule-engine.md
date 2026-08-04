@@ -85,9 +85,10 @@ nowhere else. **It converts every datetime to UTC** (`.astimezone(timezone.utc)`
 engine types — the engine rejects a non-zero offset outright, so a booking a client sends as
 `+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
 message**: `RuleResult(passed=True)` carries no copy, but the API shows friendly text on success. **It
-assembles the canon per Space** from that Space's own configuration rather than running
-`DEFAULT_CANON` — a null column omits its rule, and a Space's local operating hours are resolved to a
-UTC window per booking date before `AvailabilityHoursRule` is built. **It passes Space-wide history**
+assembles the canon per Space** from that Space's own `space_rules` rows rather than running
+`DEFAULT_CANON` — a rule type the Space holds no matching row for is simply not in the canon, and a
+Space's local operating hours are resolved to a UTC window per booking date before
+`AvailabilityHoursRule` is built. **It passes Space-wide history**
 only when the Space's canon includes a counting rule: the router loads the user's bookings across
 every Resource in the Space, capped to `history_window`, and passes them in; with no counting rule
 configured, history stays empty and no query runs. **It resolves the counting windows** in the
@@ -140,9 +141,10 @@ assembly of four of these five at their default values — every one except `Slo
 on every date it is asked about; a value baked into a module-level constant at import time would be
 correct for the day it was written and silently wrong every day after, the same cached-offset mistake
 `CLAUDE.md` warns against elsewhere. The canon the API actually runs is built per Space (see Backend
-integration), where a null column omits its rule entirely and `SlotAlignmentRule` is constructed
-fresh, with a freshly resolved `anchor`, for every booking. `NotInThePastRule` is the only one always
-present — you can never book the past, whatever a Space configures.
+integration), where a type with no matching row is absent from the canon entirely and
+`SlotAlignmentRule` is constructed fresh, with a freshly resolved `anchor`, for every booking.
+`NotInThePastRule` is the only one always present — you can never book the past, whatever a
+Space configures.
 
 **`SlotAlignmentRule` denies a booking whose `start_at` or `end_at` is not on the grid** defined by
 `slot_minutes` and an `anchor` UTC instant — both bounds are checked, so an aligned start with an
@@ -152,9 +154,10 @@ would couple two independent rule instances, and it breaks the moment the two ar
 days via `applies_to` — local midnight is a property of the date and the zone alone, both of which
 the adapter already resolves for `AvailabilityHoursRule` and the counting rules for the same reason.
 This closes a real gap rather than tightening a theoretical one: `slot_minutes` was, until this rule
-existed, the one Space column nothing on the server read — the calendar UI declined to *offer* an
-off-grid slot, but the API accepted one anyway, which is exactly the split this document warns about
-elsewhere (the grid is advisory, the engine is the only boundary that counts).
+existed, the one piece of a Space's configuration nothing on the server read — the calendar UI
+declined to *offer* an off-grid slot, but the API accepted one anyway, which is exactly the split
+this document warns about elsewhere (the grid is advisory, the engine is the only boundary that
+counts).
 
 **A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the
 seven classes above a runtime identity separate from being importable Python. A registered type
@@ -180,9 +183,9 @@ different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Th
 intended way to use them, not a mistake to warn about. And a **build function** from validated params
 (plus, for a type with `needs_local_resolution`, a second mapping of already-resolved values) to a
 constructed instance of the class it names. `slot_minutes` must divide 1440 so a day holds a whole
-number of slots; the schema has no field to express that bound yet, so it is enforced only inside
-`SlotAlignmentRule`'s own constructor, a defensive invariant until a later task validates it at the
-API boundary.
+number of slots; the schema has no field to express that bound, so it is stated twice — at the write
+boundary, where an admin gets a 422 naming the constraint (`identity-and-access.md`), and inside
+`SlotAlignmentRule`'s own constructor, which keeps it true for a row written by any other means.
 
 **Rule order comes from a type's declared priority, never from row order, insertion order, or an
 admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of
@@ -239,10 +242,10 @@ anything beyond the request.
 They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of four
 of `canon.py`'s five hand-written rules (every one except `SlotAlignmentRule`, excluded for its own,
 different reason — see "The canon" above). The API does not run `DEFAULT_CANON`; it assembles a
-per-Space canon that *includes* these two when a Space sets `max_bookings_per_week` /
-`max_bookings_per_month`. Keeping them out of the reference canon is what lets the end-to-end suite
-assert against a seeded Space configured to those four rules' values without a counting rule silently
-changing the outcome.
+per-Space canon that *includes* these two when a Space holds a `max_bookings_per_week` /
+`max_bookings_per_month` rule instance. Keeping them out of the reference canon is what lets the
+end-to-end suite assert against a seeded Space configured to those four rules' values without a
+counting rule silently changing the outcome.
 
 **Neither rule derives its own window — both are handed one.** The window is a half-open
 `[window_start, window_end)` pair of UTC instants passed at construction, and the rule does nothing

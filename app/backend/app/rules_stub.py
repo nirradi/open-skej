@@ -542,8 +542,9 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
     Mirrors ``_build_canon``'s own filtering (``row.enabled`` and
     ``row_applies``) but stays local rather than resolving to UTC — this
     endpoint's whole point is to report the Space's own wall-clock hours and
-    slot size, the shape ``buildCalendarConfig`` (frontend, pre-6.9) used to
-    read straight off Space columns. Unlike ``_build_canon`` this never
+    slot size, which is what the calendar grid draws itself from — there is no
+    instant to judge here, only a calendar date to describe. Unlike
+    ``_build_canon`` this never
     touches ``REGISTRY`` or ``RuleType.build``: an ``availability_hours``
     row's local ``opens_at``/``closes_at`` and a ``slot_alignment`` row's
     local ``slot_minutes`` are read directly off ``params``, with no anchor

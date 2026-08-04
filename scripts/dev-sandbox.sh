@@ -301,7 +301,7 @@ bold "Seeded Spaces"
 (cd "$BACKEND_DIR" && "$VENV_PY" - <<'PY'
 from app.db.bootstrap import DEFAULT_SPACE_PUBLIC_ID
 from app.db.session import get_session_factory
-from app.identity.models import Resource, Space
+from app.identity.models import Resource, Space, SpaceRule
 
 with get_session_factory()() as session:
     spaces = (
@@ -316,12 +316,30 @@ with get_session_factory()() as session:
     )
     for space in spaces:
         state = " [archived]" if space.archived_at else ""
+        # A Space's schedule is `space_rules` rows, so it is read back from
+        # them. Only the unscoped rows are summarised here: an `applies_to`
+        # row is per-weekday or per-date and has no one line to print, and
+        # this listing exists to hand out working links, not to render the
+        # rules page.
+        rules = {
+            rule.rule_type: rule.params
+            for rule in session.query(SpaceRule)
+            .filter(
+                SpaceRule.space_id == space.id,
+                SpaceRule.applies_to.is_(None),
+                SpaceRule.enabled.is_(True),
+            )
+            .order_by(SpaceRule.id)
+            .all()
+        }
+        availability = rules.get("availability_hours")
         hours = (
-            f"{space.opens_at:%H:%M}-{space.closes_at:%H:%M} local"
-            if space.opens_at and space.closes_at
+            f"{availability['opens_at'][:5]}-{availability['closes_at'][:5]} local"
+            if availability
             else "no availability window"
         )
-        slots = f"{space.slot_minutes}m slots" if space.slot_minutes else "default slot size"
+        alignment = rules.get("slot_alignment")
+        slots = f"{alignment['slot_minutes']}m slots" if alignment else "default slot size"
         print(f"\n  {space.name}{state}")
         print(f"    {space.timezone} · {hours} · {slots}")
         print(f"    http://localhost:5173/s/{space.public_id}")

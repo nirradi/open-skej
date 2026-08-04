@@ -41,14 +41,14 @@ NOW = DAY - timedelta(days=1)
 
 
 def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
-    """Build a `SpaceRuleConfig` from the *old* seven scalar-kwarg names.
+    """Build a `SpaceRuleConfig` from scalar kwargs, one per rule type.
 
     Every case in this module cares about the observable verdict, not about
-    `space_rules` row shape, so this is a compatibility shim for the tests
-    rather than something `app.rules_stub` itself has any more: each non-None
-    kwarg becomes one unscoped, enabled `SpaceRuleRow` — mirroring exactly
-    what `app.identity.service.update_space`'s write-through shim does for a
-    real `PATCH /spaces` (task 6.6). `opens_at`/`closes_at` are combined into
+    `space_rules` row shape, so this is a convenience for the tests and
+    nothing the API itself has: each non-None kwarg becomes one unscoped,
+    enabled `SpaceRuleRow`, with the row's registered param names supplied
+    here so a case reads as the configuration it is testing rather than as a
+    row literal. `opens_at`/`closes_at` are combined into
     one `availability_hours` row and, matching `_build_canon`'s own gating,
     only when *both* are given — passing just one is exactly how
     `test_availability_needs_both_bounds_set` proves that half a

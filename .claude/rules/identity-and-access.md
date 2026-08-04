@@ -126,7 +126,13 @@ the same court twice does — and that overlap constraint is the *only* thing th
 two Resources in a Space. Everything else — operating hours, slot interval, every rule limit — lives
 on the Space, and every court in it shares that one configuration. Creating a Space **auto-creates
 its first Resource**, so a fresh venue is never a dead end and no primary flow meets an empty state;
-the schema can represent a Space with no Resource, but nothing in the product produces one.
+the schema can represent a Space with no Resource, but nothing in the product produces one. It also
+seeds **two `space_rules` rows** — an unscoped `availability_hours` (09:00–17:00) and an unscoped
+`slot_alignment` (60 minutes) — for the same reason: a venue is bookable on arrival rather than one an
+admin must visit the rules page to make usable. Those two and nothing else, so every limit a venue has
+not asked for stays absent. A Space genuinely meant to enforce no hours holds no such row and has to
+have the seeded one deleted — which is what `sandbox_seed` does to Space A, since "not enforced" is
+the absence of a row and never a row with an empty bound.
 
 **Membership and roles stay at the Space, never the Resource.** You are admitted to the venue, not to
 one court, and a member may book any Resource in the Space. This is deliberate and load-bearing: the
@@ -150,27 +156,24 @@ canon. A Space can hold any number of instances of a type; nothing here caps it 
 frequency cap belongs to the Space rather than any one row's `applies_to`, it counts every booking the
 user holds anywhere in the venue, across all its courts, never per court.
 
-`PATCH /spaces/{public_id}` (admin+) still accepts the seven scalar fields this schedule used to be —
-`opens_at`, `closes_at`, `slot_minutes`, `max_duration_minutes`, `booking_horizon_days`,
-`max_bookings_per_week`, `max_bookings_per_month` — and `SpaceRead` still serves them, kept only as a
-compatibility shim until the columns themselves are dropped. Neither touches a column: each field
-writes through to the Space's one *unscoped* (`applies_to IS NULL`) instance of the matching rule
-type, creating or deleting the row as the value is set or cleared to `null`, and `SpaceRead` derives
-its answer by reading that row back. A scalar field has no way to name which of several scoped or
-duplicate instances of a type it means, so a second unscoped instance of a type — unreachable through
-this path, but not prevented by the schema — is a conflict this write refuses rather than guesses at.
-**The admin UI no longer reads or writes through this shim.** `SpaceSchedulePanel` edits only the
-Space's `timezone` now — the one property its owner calls truly configurable and not a rule — and
-every rule instance, including the six that used to live on this scalar path, is edited on its own
-page at `/s/{public_id}/rules` (`SpaceRulesPage`), directly against the rules API below. The scalar
-shim survives only for whatever external caller still targets it, not for this product's own UI. A
-Resource has no configuration to edit; `PATCH /spaces/{public_id}/resources/{resource_id}` renames it
-and nothing more.
+`PATCH /spaces/{public_id}` (admin+) edits `name`, `description` and `timezone`, and nothing else;
+`SpaceRead` serves the same three. No schedule value is reachable from either — a Space's rules are
+read and written only through the rules API below, and **there is deliberately no second way in**. A
+scalar field can only ever name a type's one *unscoped* (`applies_to IS NULL`) instance: it has
+nowhere to say which of two `availability_hours` rows it means, or to name one scoped to Saturdays,
+so keeping one alongside the rules API would leave two paths answering "what does this Space
+enforce" — the bug class this schema keeps writing down. `SpaceSchedulePanel` edits only the Space's
+`timezone`, the one property its owner calls truly configurable and not a rule; every rule instance,
+including the six that were once columns on `spaces`, is created and edited at `/s/{public_id}/rules`
+(`SpaceRulesPage`). A Resource has no configuration to edit;
+`PATCH /spaces/{public_id}/resources/{resource_id}` renames it and nothing more.
 
 **`opens_at` and `closes_at` are stored together, in one `availability_hours` row, required together.**
-A row with one bound missing is not a state the rule type can build from, so a `PATCH` that would leave
-only one of the pair set instead clears both — there is no column left to remember the other on its
-own. `opens_at` must be earlier than `closes_at` on the Space's own wall clock, and that is enforced
+Both are `required` parameters of that rule type, so a row holding one bound without the other is not
+a state the type can build from, and it is refused rather than stored. A Space enforcing no hours at
+all holds no `availability_hours` row at all: "not enforced" is the *absence* of a row here, exactly
+as it is for every other rule type, never a row with a bound left empty.
+`opens_at` must be earlier than `closes_at` on the Space's own wall clock, and that is enforced
 here or nowhere: a pair that inverts locally is refused with **422**. This is not tidiness: the rule
 engine reads an *inverted* UTC window as "this window crosses a UTC calendar day", which is what makes
 a venue in Sydney or Honolulu bookable at all (`rule-engine.md`), and locally-inverted hours resolve
@@ -181,31 +184,29 @@ derived.
 
 The check is made on the **effective pair after the patch is applied**, not on the payload: a PATCH
 naming only `opens_at` is a legal partial update, and whether it inverts depends on the `closes_at`
-already stored. Both null is a valid configuration — the availability rule is simply not enforced —
-and is not this check's business. Relaxing it is how a venue open past its own local midnight would
-be admitted, deliberately, if that is ever wanted.
+the row already holds. Relaxing it is how a venue open past its own local midnight would be admitted,
+deliberately, if that is ever wanted.
 
 A `timezone` is validated as a real IANA name at the boundary — an unknown name or a fixed offset
 (`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
 operating-hours resolution far from where it was set.
 
-**The rules API is the real multi-instance editing `PATCH /spaces` only ever shimmed toward.**
+**The rules API is the only way a Space's rules are read or written.**
 `GET /rule-types` describes the product's registered rule types (`rules.REGISTRY`) — authenticated,
 but not Space-scoped, since it names nothing about any one tenant's configuration. Every other route
-is Space-scoped and reads or writes one Space's own `space_rules` rows directly, not through the
-seven-scalar-field shim: `GET`/`POST /spaces/{public_id}/rules` are member+/admin+, and
+is Space-scoped and reads or writes one Space's own `space_rules` rows directly:
+`GET`/`POST /spaces/{public_id}/rules` are member+/admin+, and
 `PATCH`/`DELETE /spaces/{public_id}/rules/{id}` are admin+. `POST` and `PATCH` validate `params`
 against the row's own registered type's schema at the boundary — an unknown `rule_type`, a missing
 required parameter, an unknown parameter, or one of the wrong kind or below its declared `minimum`
 is refused with **422** naming the specific parameter, so a later admin form can attach the message
 to the right field rather than a generic complaint. `slot_alignment`'s `slot_minutes` must divide
-1440, enforced here rather than left to surface only at booking time. `availability_hours` reuses the
-identical inverted-hours check `PATCH /spaces` already enforces — an `opens_at` at or after
-`closes_at` on the Space's own wall clock is the same **422**, whichever of the two paths wrote it,
-because the engine cannot tell an inverted pair from a legitimate UTC-day-crossing window and is not
-asked to. A `PATCH` naming only one of `opens_at`/`closes_at` resolves the effective pair against
-what the row already has stored, the same way `PATCH /spaces` does, rather than failing "missing
-required" on a bound the caller never meant to touch. A rule id that names nothing, or names a row
+1440, enforced here rather than left to surface only at booking time. `availability_hours` carries
+the inverted-hours check above — an `opens_at` at or after `closes_at` on the Space's own wall clock
+is a **422**, because the engine cannot tell an inverted pair from a legitimate UTC-day-crossing
+window and is not asked to. A `PATCH` naming only one of `opens_at`/`closes_at` resolves the
+effective pair against what the row already has stored, rather than failing "missing required" on a
+bound the caller never meant to touch. A rule id that names nothing, or names a row
 in another Space, gets the identical **404** on `PATCH`/`DELETE` — the same 404-not-403 treatment a
 foreign Resource id gets, since the lookup is scoped to `space_id` in one query and a foreign id
 discloses nothing about being live elsewhere. `DELETE` is a real delete, unlike everywhere else in
@@ -307,8 +308,8 @@ actually be judged against — the flat-AND of that date's own matching `space_r
 matching row of a type combines rather than one being picked, exactly as the engine itself combines
 rules), in the Space's own local wall clock. This exists because a rule's `applies_to`
 (`rule-engine.md`) can narrow it to particular weekdays or dates, so a Space no longer has one slot
-size or one operating window good for the whole week — a single `CalendarConfig` built once from
-Space columns cannot express "Tuesdays are different". The frontend never re-derives this resolution
+size or one operating window good for the whole week — a single `CalendarConfig` covering the whole
+week cannot express "Tuesdays are different". The frontend never re-derives this resolution
 itself: a second implementation of "which rules govern this date" in TypeScript is exactly the
 duplication `DEFERRED.md` item 13 warns against, since the engine must stay the sole validator and
 the grid stays advisory. A week's own days can resolve to different slot sizes; the grid's shared time

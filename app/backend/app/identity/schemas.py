@@ -51,18 +51,6 @@ PreviewStatus = Literal["none", "pending", "denied", "member"]
 _NAME_MAX = 200
 _DESCRIPTION_MAX = 4000
 _MESSAGE_MAX = 1000
-# A slot cannot be longer than the day it sits in. This is a sanity bound on the
-# stored column, not the operating-hours model: resolving these local wall-clock
-# values against the Space's zone to a bookable UTC window is a boundary concern,
-# owned where booking evaluation happens and not here.
-_SLOT_MINUTES_MAX = 1440
-# Sanity bounds on the rule-engine parameters, not values the engine itself
-# enforces — that is task 4.13b's job. These only keep an obviously-wrong value
-# (a negative cap, a duration measured in years) out of the database.
-_MAX_DURATION_MINUTES_MAX = 7 * 1440  # a week, in minutes
-_BOOKING_HORIZON_DAYS_MAX = 3650  # ten years
-_MAX_BOOKINGS_PER_WEEK_MAX = 1000
-_MAX_BOOKINGS_PER_MONTH_MAX = 1000
 # Matches ``users.email`` and ``space_invitations.email``, both String(320) — the
 # maximum length RFC 5321 permits for a full address.
 _EMAIL_MAX = 320
@@ -96,24 +84,17 @@ class SpaceUpdate(BaseModel):
     instruction, and is rejected here as 422 instead of reaching the database as
     an ``IntegrityError`` 500.
 
-    ``opens_at`` / ``closes_at`` / ``slot_minutes`` and the four rule parameters
-    are all nullable, following the same omit-vs-null convention: an explicit
-    null clears the column back to "no restriction" / "rule not enforced", and
-    an omitted field is left as it was.
+    Carries no operating-hours or rule-parameter fields: those are rows in
+    ``space_rules``, read and written only through the rules API
+    (``GET``/``POST`` ``/spaces/{public_id}/rules``,
+    ``PATCH``/``DELETE`` ``/spaces/{public_id}/rules/{id}``), never through this
+    model. ``timezone`` is the one property of a Space that is genuinely a
+    scalar column rather than a rule instance.
     """
 
     name: Optional[str] = Field(default=None, min_length=1, max_length=_NAME_MAX)
     description: Optional[str] = Field(default=None, max_length=_DESCRIPTION_MAX)
     timezone: Optional[str] = Field(default=None, min_length=1, max_length=64)
-    opens_at: Optional[time] = None
-    closes_at: Optional[time] = None
-    slot_minutes: Optional[int] = Field(default=None, gt=0, le=_SLOT_MINUTES_MAX)
-    max_duration_minutes: Optional[int] = Field(default=None, gt=0, le=_MAX_DURATION_MINUTES_MAX)
-    booking_horizon_days: Optional[int] = Field(default=None, gt=0, le=_BOOKING_HORIZON_DAYS_MAX)
-    max_bookings_per_week: Optional[int] = Field(default=None, gt=0, le=_MAX_BOOKINGS_PER_WEEK_MAX)
-    max_bookings_per_month: Optional[int] = Field(
-        default=None, gt=0, le=_MAX_BOOKINGS_PER_MONTH_MAX
-    )
 
     @field_validator("timezone")
     @classmethod
@@ -142,18 +123,14 @@ class SpaceRead(BaseModel):
     to render without a second round trip. It is a convenience, never a security
     boundary: every privileged route re-checks the role server-side.
 
-    ``opens_at`` / ``closes_at`` / ``slot_minutes`` are this Space's operating
-    hours and slot interval — every Resource in it shares them, since a Resource
-    carries no configuration of its own. The four rule-parameter fields are the
-    canon's per-Space limits; ``null`` means that rule is not enforced here.
-
-    All seven of those fields are, since task 6.6, **derived from this
-    Space's ``space_rules`` rows** rather than read off columns on ``Space``
-    itself — see ``app.identity.service.space_schedule_fields``, which
-    ``build`` below takes as its ``schedule`` argument rather than deriving
-    it again here. This model's own shape is unchanged: the storage moved,
-    the wire contract did not, which is the whole point of task 6.6's
-    write-through shim.
+    Carries no operating-hours or rule-parameter fields. What a Space enforces
+    is rows in ``space_rules``, of arbitrary number and each possibly scoped to
+    particular weekdays or dates via ``applies_to`` — there is no longer one
+    scalar value a field on this model could name, so that configuration is
+    read only through the rules API (``GET /spaces/{public_id}/rules``, and
+    ``GET /rule-types`` for what each type means). ``timezone`` is the one
+    property of a Space that is genuinely a scalar column rather than a rule
+    instance.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -162,36 +139,17 @@ class SpaceRead(BaseModel):
     name: str
     description: Optional[str]
     timezone: str
-    opens_at: Optional[time]
-    closes_at: Optional[time]
-    slot_minutes: Optional[int]
-    max_duration_minutes: Optional[int]
-    booking_horizon_days: Optional[int]
-    max_bookings_per_week: Optional[int]
-    max_bookings_per_month: Optional[int]
     created_at: datetime
     archived_at: Optional[datetime]
     my_role: MembershipRole
 
     @classmethod
-    def build(cls, space: Space, role: MembershipRole, schedule: dict) -> "SpaceRead":
-        """``schedule`` is ``app.identity.service.space_schedule_fields(session,
-        space)`` — the one place the seven fields below are derived from
-        ``space_rules`` rows, called once per ``Space`` and reused here so
-        every route serving a ``SpaceRead`` agrees on how they are read.
-        """
+    def build(cls, space: Space, role: MembershipRole) -> "SpaceRead":
         return cls(
             public_id=space.public_id,
             name=space.name,
             description=space.description,
             timezone=space.timezone,
-            opens_at=schedule["opens_at"],
-            closes_at=schedule["closes_at"],
-            slot_minutes=schedule["slot_minutes"],
-            max_duration_minutes=schedule["max_duration_minutes"],
-            booking_horizon_days=schedule["booking_horizon_days"],
-            max_bookings_per_week=schedule["max_bookings_per_week"],
-            max_bookings_per_month=schedule["max_bookings_per_month"],
             created_at=space.created_at,
             archived_at=space.archived_at,
             my_role=role,

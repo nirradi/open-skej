@@ -16,9 +16,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  buildCalendarConfig,
   calendarConfig,
-  coherenceIssue,
   formatSlotLabel,
   isSlotOutOfHours,
   slotStart,
@@ -58,10 +56,6 @@ const TEN_MINUTE: CalendarConfig = { ...DEFAULT, slotMinutes: 10 }
 describe('the shipped defaults', () => {
   it('are 30-minute slots with no hours restriction', () => {
     expect(calendarConfig).toEqual(DEFAULT)
-  })
-
-  it('are coherent', () => {
-    expect(coherenceIssue(calendarConfig)).toBeNull()
   })
 
   it('render 48 slots per day', () => {
@@ -232,116 +226,3 @@ describe('isSlotOutOfHours', () => {
   })
 })
 
-describe('coherenceIssue', () => {
-  it('accepts the shipped default and a bounded window that aligns to slots', () => {
-    expect(coherenceIssue(DEFAULT)).toBeNull()
-    expect(coherenceIssue(NINE_TO_FIVE)).toBeNull()
-  })
-
-  it('rejects a non-positive slot size', () => {
-    expect(coherenceIssue({ ...DEFAULT, slotMinutes: 0 })).toMatch(/must be positive/)
-    expect(coherenceIssue({ ...DEFAULT, slotMinutes: -30 })).toMatch(/must be positive/)
-  })
-
-  it('rejects a slot size that does not divide a day evenly', () => {
-    // 1440 minutes in a day; 1440 % 13 is 10, so the day cannot tile in
-    // 13-minute slots without a truncated remainder.
-    expect(coherenceIssue({ ...DEFAULT, slotMinutes: 13 })).toMatch(/must divide a day evenly/)
-  })
-
-  it.each([30, 10, 15, 20, 60, 45])('accepts %i-minute slots, which divide a day evenly', (slotMinutes) => {
-    expect(coherenceIssue({ ...DEFAULT, slotMinutes })).toBeNull()
-  })
-
-  it('rejects an opening time that does not land on a slot boundary', () => {
-    expect(
-      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }),
-    ).toMatch(/Opening time must land/)
-  })
-
-  it('rejects a closing time that does not land on a slot boundary', () => {
-    expect(
-      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60, closeMinutes: 17 * 60 + 15 }),
-    ).toMatch(/Closing time must land/)
-  })
-
-  it('rejects a closing time at or before the opening time', () => {
-    // DEFERRED.md item 18's shape, on the Space's own wall clock: a window
-    // that does not advance at all cannot describe a span.
-    expect(
-      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60, closeMinutes: 9 * 60 }),
-    ).toMatch(/Closing time must be after/)
-    expect(
-      coherenceIssue({ ...DEFAULT, openMinutes: 9 * 60, closeMinutes: 8 * 60 }),
-    ).toMatch(/Closing time must be after/)
-  })
-})
-
-describe('buildCalendarConfig', () => {
-  it('builds a config from a Space with hours set', () => {
-    const result = buildCalendarConfig({
-      slot_minutes: 30,
-      opens_at: '09:00:00',
-      closes_at: '17:00:00',
-      timezone: 'Europe/Berlin',
-    })
-    expect(result).toEqual({
-      status: 'ok',
-      config: {
-        slotMinutes: 30,
-        openMinutes: 9 * 60,
-        closeMinutes: 17 * 60,
-        timeZone: 'Europe/Berlin',
-      },
-    })
-  })
-
-  it('renders the whole day bookable for a Space with hours unset — never the old default window', () => {
-    const result = buildCalendarConfig({
-      slot_minutes: 30,
-      opens_at: null,
-      closes_at: null,
-      timezone: 'UTC',
-    })
-    expect(result).toEqual({
-      status: 'ok',
-      config: { slotMinutes: 30, openMinutes: null, closeMinutes: null, timeZone: 'UTC' },
-    })
-  })
-
-  it('falls back to the shipped slot size when slot_minutes is unset', () => {
-    const result = buildCalendarConfig({
-      slot_minutes: null,
-      opens_at: '09:00:00',
-      closes_at: '17:00:00',
-      timezone: 'UTC',
-    })
-    expect(result.status).toBe('ok')
-    expect(result.status === 'ok' && result.config.slotMinutes).toBe(calendarConfig.slotMinutes)
-  })
-
-  it('degrades to a notice, never a throw, for a slot size that cannot tile the day', () => {
-    const result = buildCalendarConfig({
-      slot_minutes: 13,
-      opens_at: null,
-      closes_at: null,
-      timezone: 'UTC',
-    })
-    expect(result.status).toBe('incoherent')
-    expect(result.status === 'incoherent' && result.message).toMatch(/must divide a day evenly/)
-  })
-
-  it('degrades to a notice for hours that cannot resolve to a real window', () => {
-    // The DEFERRED.md item 18 shape: an admin-configured Space whose hours
-    // cross its own local midnight. This task does not repair that (it is
-    // out of scope, per the item) — it must not white-screen on it either.
-    const result = buildCalendarConfig({
-      slot_minutes: 30,
-      opens_at: '21:00:00',
-      closes_at: '09:00:00',
-      timezone: 'UTC',
-    })
-    expect(result.status).toBe('incoherent')
-    expect(result.status === 'incoherent' && result.message).toMatch(/Closing time must be after/)
-  })
-})

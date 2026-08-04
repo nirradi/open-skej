@@ -35,15 +35,16 @@ from app.sandbox_seed import (
     OWNER_EMAIL,
     PENDING_INVITEE_EMAIL,
     SPACE_A_BOOKING_HORIZON_DAYS,
-    SPACE_A_CLOSES_AT,
     SPACE_A_MAX_DURATION_MINUTES,
     SPACE_A_NAME,
-    SPACE_A_OPENS_AT,
     SPACE_A_SLOT_MINUTES,
     SPACE_A_TIMEZONE,
+    SPACE_B_CLOSES_AT,
     SPACE_B_MAX_BOOKINGS_PER_WEEK,
     SPACE_B_MAX_DURATION_MINUTES,
     SPACE_B_NAME,
+    SPACE_B_OPENS_AT,
+    SPACE_B_SLOT_MINUTES,
     SPACE_B_TIMEZONE,
     STRANGER_AUTH0_SUB,
     STRANGER_EMAIL,
@@ -77,6 +78,21 @@ def _count(session, model) -> int:
     return session.execute(select(func.count()).select_from(model)).scalar_one()
 
 
+def _rules(session, space) -> dict[str, dict]:
+    """This Space's unscoped rule instances, keyed by type.
+
+    A Space's configuration is ``space_rules`` rows, so this is what the seed
+    plants and what ``app.rules_stub`` assembles a canon from. A type with no
+    row is not enforced at all — which is an assertion this module makes about
+    Space A, not an absence it tolerates.
+    """
+    return {
+        rule.rule_type: rule.params
+        for rule in service.list_space_rules(session, space)
+        if rule.applies_to is None
+    }
+
+
 def test_seed_produces_every_interesting_state(session):
     run(session)
 
@@ -97,17 +113,15 @@ def test_seed_produces_every_interesting_state(session):
     # exercises (see the module docstring).
     space_a = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
     assert space_a.timezone == SPACE_A_TIMEZONE
-    # Since task 6.6 these seven fields live on `space_rules` rows, not on the
-    # `Space` row itself — `space_schedule_fields` is the one place that reads
-    # them back, mirroring what `SpaceRead` serves over the API.
-    schedule_a = service.space_schedule_fields(session, space_a)
-    assert schedule_a["opens_at"] == SPACE_A_OPENS_AT
-    assert schedule_a["closes_at"] == SPACE_A_CLOSES_AT
-    assert schedule_a["slot_minutes"] == SPACE_A_SLOT_MINUTES
-    assert schedule_a["max_duration_minutes"] == SPACE_A_MAX_DURATION_MINUTES
-    assert schedule_a["booking_horizon_days"] == SPACE_A_BOOKING_HORIZON_DAYS
-    assert schedule_a["max_bookings_per_week"] is None
-    assert schedule_a["max_bookings_per_month"] is None
+    # Exactly three rules, and the set is asserted rather than each member:
+    # `availability_hours` being absent is the fixture property `03-sad-path.
+    # spec.ts` depends on, and `create_space` seeds one by default, so a seed
+    # that forgot to delete it must fail here.
+    rules_a = _rules(session, space_a)
+    assert set(rules_a) == {"slot_alignment", "max_duration", "booking_horizon"}
+    assert rules_a["slot_alignment"] == {"slot_minutes": SPACE_A_SLOT_MINUTES}
+    assert rules_a["max_duration"] == {"max_duration_minutes": SPACE_A_MAX_DURATION_MINUTES}
+    assert rules_a["booking_horizon"] == {"days": SPACE_A_BOOKING_HORIZON_DAYS}
     assert space_a.archived_at is None
 
     roles_in_a = dict(
@@ -139,20 +153,26 @@ def test_seed_produces_every_interesting_state(session):
     space_b = session.execute(select(Space).where(Space.name == SPACE_B_NAME)).scalar_one()
     assert space_b.timezone == SPACE_B_TIMEZONE
     assert space_b.timezone != space_a.timezone
-    schedule_b = service.space_schedule_fields(session, space_b)
+    rules_b = _rules(session, space_b)
     # Configured differently from Space A — the two Spaces, not their
     # Resources, are what differ now that configuration lives on the Space.
-    assert (schedule_b["opens_at"], schedule_b["closes_at"], schedule_b["slot_minutes"]) != (
-        schedule_a["opens_at"],
-        schedule_a["closes_at"],
-        schedule_a["slot_minutes"],
-    )
-    # Space B is where the new per-Space rule capabilities are observable:
-    # real availability hours to resolve per date, and a weekly cap.
-    assert schedule_b["opens_at"] is not None
-    assert schedule_b["closes_at"] is not None
-    assert schedule_b["max_duration_minutes"] == SPACE_B_MAX_DURATION_MINUTES
-    assert schedule_b["max_bookings_per_week"] == SPACE_B_MAX_BOOKINGS_PER_WEEK
+    # Space B is where the per-Space rule capabilities Space A deliberately
+    # skips are observable: real availability hours to resolve per date, and a
+    # weekly cap counted across both its Resources.
+    assert set(rules_b) == {
+        "availability_hours",
+        "slot_alignment",
+        "max_duration",
+        "max_bookings_per_week",
+    }
+    assert rules_b["availability_hours"] == {
+        "opens_at": SPACE_B_OPENS_AT.isoformat(),
+        "closes_at": SPACE_B_CLOSES_AT.isoformat(),
+    }
+    assert rules_b["slot_alignment"] == {"slot_minutes": SPACE_B_SLOT_MINUTES}
+    assert rules_b["max_duration"] == {"max_duration_minutes": SPACE_B_MAX_DURATION_MINUTES}
+    assert rules_b["max_bookings_per_week"] == {"max_bookings": SPACE_B_MAX_BOOKINGS_PER_WEEK}
+    assert rules_b != rules_a
 
     # Two Resources, like Space A — the weekly cap is Space-wide, so
     # demonstrating it needs a booking to land on a different Resource than

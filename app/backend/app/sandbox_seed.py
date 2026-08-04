@@ -30,15 +30,18 @@ run time:
 
 ## The two Spaces
 
-Configuration — operating hours, slot interval, timezone, and the rule-engine
-parameters (task 4.13b) — lives on the **Space**, not on its Resources: a
-Resource is one of N indistinguishable courts and carries no config of its
-own. So the two Spaces below differ from each other in their schedule and
-canon, and each Space's own Resources are deliberately identical siblings.
+Configuration lives on the **Space**, not on its Resources: a Resource is one
+of N indistinguishable courts and carries no config of its own. The timezone
+is a column; operating hours, slot interval and every rule-engine limit are
+``space_rules`` rows, planted here directly rather than through the rules API,
+since this seed plants fixture state for something else to exercise and is not
+itself an exercise of that API. So the two Spaces below differ from each other
+in their canon, and each Space's own Resources are deliberately identical
+siblings.
 
 * ``SPACE_A_NAME`` — the Playwright target (``app/e2e``). Zone
-  ``SPACE_A_TIMEZONE`` (``Europe/Berlin``) but **no availability hours**
-  (``opens_at``/``closes_at`` both ``None``): the E2E suite books early-morning
+  ``SPACE_A_TIMEZONE`` (``Europe/Berlin``) but **no availability hours** — no
+  ``availability_hours`` row at all: the E2E suite books early-morning
   slots and asserts a copy-contract denial on duration alone
   (``03-sad-path``), so this Space's canon is kept to exactly what that suite
   exercises — ``max_duration_minutes`` matching the suite's hardcoded
@@ -75,7 +78,7 @@ below it for no behavioural gain, so the harmless row stays.
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
 from app.db.bootstrap import ensure_booking_defaults
@@ -91,7 +94,7 @@ from app.identity.models import (
     SpaceRule,
     User,
 )
-from app.identity.schemas import ResourceUpdate, SpaceUpdate
+from app.identity.schemas import ResourceUpdate
 
 # --- Deterministic identities -------------------------------------------------
 # The ``sandbox|`` prefix mirrors ``app.db.bootstrap``'s ``bootstrap|`` one: a
@@ -126,11 +129,11 @@ PENDING_INVITEE_EMAIL = "invitee@sandbox.open-skej.local"
 SPACE_A_NAME = "Sandbox Space A (Berlin)"
 SPACE_A_DESCRIPTION = "Owner + admin + member; two identical courts on one schedule."
 SPACE_A_TIMEZONE = "Europe/Berlin"
-# No availability window: `app/e2e/tests/03-sad-path.spec.ts` books
-# early-morning slots and must see a denial for duration alone, never for an
-# hour outside a UTC-resolved window.
-SPACE_A_OPENS_AT: time | None = None
-SPACE_A_CLOSES_AT: time | None = None
+# No availability window at all — there is no constant to state that, because
+# "not enforced" is the *absence* of an `availability_hours` row and `run`
+# below deletes the one `create_space` seeds. `app/e2e/tests/03-sad-path.spec.
+# ts` books early-morning slots and must see a denial for duration alone,
+# never for an hour outside a UTC-resolved window.
 # A copy-contract constant, like `SPACE_A_MAX_DURATION_MINUTES` below: the E2E
 # suite drags across slots and asserts the resulting duration in words
 # ("30 minutes", "2 hours 30 minutes"), so the grid's slot size is part of what
@@ -301,6 +304,43 @@ def _seed_future_bookings(session: Session, resource: Resource, member: User) ->
     session.commit()
 
 
+def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> None:
+    """Set this Space's one unscoped instance of ``rule_type`` to ``params``,
+    updating the row ``create_space`` seeded (``availability_hours`` and
+    ``slot_alignment`` both start with one) or adding a new one.
+
+    Every Space this seed creates is freshly built, so "the" unscoped
+    instance is unambiguous here in a way a real admin's edit — through the
+    rules API, never through this helper — is not.
+    """
+    existing = session.execute(
+        select(SpaceRule).where(
+            SpaceRule.space_id == space.id,
+            SpaceRule.rule_type == rule_type,
+            SpaceRule.applies_to.is_(None),
+        )
+    ).scalar_one_or_none()
+    if existing is None:
+        session.add(SpaceRule(space_id=space.id, rule_type=rule_type, params=params))
+    else:
+        existing.params = params
+    session.commit()
+
+
+def _clear_rule(session: Session, space: Space, rule_type: str) -> None:
+    """Delete this Space's unscoped instance of ``rule_type``, if any —
+    "not enforced" is the absence of a row, never one with empty params.
+    """
+    session.execute(
+        delete(SpaceRule).where(
+            SpaceRule.space_id == space.id,
+            SpaceRule.rule_type == rule_type,
+            SpaceRule.applies_to.is_(None),
+        )
+    )
+    session.commit()
+
+
 def run(session: Session) -> None:
     """Reset the sandbox and (re)plant every interesting state, once.
 
@@ -325,30 +365,27 @@ def run(session: Session) -> None:
     # Space A: non-UTC, owner + admin + member, one schedule shared by two
     # identical Resources. `create_space` takes no timezone argument (the
     # config UI is task 4.12/4.13a), so it is set directly on the row it
-    # returns; the schedule and rule parameters go through
-    # `service.update_space` — the same write-through shim onto `space_rules`
-    # a real `PATCH /spaces` uses (task 6.6) — rather than being assigned to
-    # `Space` columns nothing reads any more. `opens_at`/`closes_at` both
-    # `None` clears the `availability_hours` row `create_space` seeded by
-    # default: Space A deliberately has **no** availability hours, so
-    # `03-sad-path.spec.ts` can assert a duration denial with nothing else
-    # able to refuse first.
+    # returns; the canon is configured as `space_rules` rows directly rather
+    # than through the rules API, since this seed is not exercising that API,
+    # it is planting fixture state for something else to exercise.
+    # `create_space` seeds a default `availability_hours` row; it is deleted
+    # here rather than kept, since Space A deliberately has **no** availability
+    # hours, so `03-sad-path.spec.ts` can assert a duration denial with
+    # nothing else able to refuse first.
     space_a = service.create_space(
         session, owner, name=SPACE_A_NAME, description=SPACE_A_DESCRIPTION
     )
     space_a.timezone = SPACE_A_TIMEZONE
     session.commit()
-    service.update_space(
+    _clear_rule(session, space_a, "availability_hours")
+    _set_rule(session, space_a, "slot_alignment", {"slot_minutes": SPACE_A_SLOT_MINUTES})
+    _set_rule(
         session,
         space_a,
-        SpaceUpdate(
-            opens_at=SPACE_A_OPENS_AT,
-            closes_at=SPACE_A_CLOSES_AT,
-            slot_minutes=SPACE_A_SLOT_MINUTES,
-            max_duration_minutes=SPACE_A_MAX_DURATION_MINUTES,
-            booking_horizon_days=SPACE_A_BOOKING_HORIZON_DAYS,
-        ),
+        "max_duration",
+        {"max_duration_minutes": SPACE_A_MAX_DURATION_MINUTES},
     )
+    _set_rule(session, space_a, "booking_horizon", {"days": SPACE_A_BOOKING_HORIZON_DAYS})
 
     _add_membership(session, space_a, admin, MembershipRole.ADMIN)
     _add_membership(session, space_a, member, MembershipRole.MEMBER)
@@ -374,16 +411,24 @@ def run(session: Session) -> None:
     )
     space_b.timezone = SPACE_B_TIMEZONE
     session.commit()
-    service.update_space(
+    _set_rule(
         session,
         space_b,
-        SpaceUpdate(
-            opens_at=SPACE_B_OPENS_AT,
-            closes_at=SPACE_B_CLOSES_AT,
-            slot_minutes=SPACE_B_SLOT_MINUTES,
-            max_duration_minutes=SPACE_B_MAX_DURATION_MINUTES,
-            max_bookings_per_week=SPACE_B_MAX_BOOKINGS_PER_WEEK,
-        ),
+        "availability_hours",
+        {"opens_at": SPACE_B_OPENS_AT.isoformat(), "closes_at": SPACE_B_CLOSES_AT.isoformat()},
+    )
+    _set_rule(session, space_b, "slot_alignment", {"slot_minutes": SPACE_B_SLOT_MINUTES})
+    _set_rule(
+        session,
+        space_b,
+        "max_duration",
+        {"max_duration_minutes": SPACE_B_MAX_DURATION_MINUTES},
+    )
+    _set_rule(
+        session,
+        space_b,
+        "max_bookings_per_week",
+        {"max_bookings": SPACE_B_MAX_BOOKINGS_PER_WEEK},
     )
 
     # `create_space` auto-created one Resource ("Main"); add an identical

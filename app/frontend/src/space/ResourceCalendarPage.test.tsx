@@ -46,13 +46,6 @@ const SPACE: Space = {
   name: 'Tennis Court',
   description: null,
   timezone: 'UTC',
-  opens_at: null,
-  closes_at: null,
-  slot_minutes: null,
-  max_duration_minutes: null,
-  booking_horizon_days: null,
-  max_bookings_per_week: null,
-  max_bookings_per_month: null,
   created_at: '2026-07-01T00:00:00Z',
   archived_at: null,
   my_role: 'member',
@@ -156,9 +149,8 @@ async function waitForSettledWeekStart(): Promise<Date> {
 beforeEach(() => {
   vi.mocked(listResourceBookings).mockResolvedValue(ok([]))
   vi.mocked(getSpace).mockResolvedValue(ok(SPACE))
-  // Unrestricted by default — no hours bound, the shipped default slot size —
-  // matching the pre-6.9 default this suite's `SPACE` fixture already used
-  // (`opens_at`/`closes_at`/`slot_minutes` all `null`).
+  // Unrestricted by default — no hours bound, the shipped default slot size.
+  // A test that needs a real window overrides this per case.
   vi.mocked(getSpaceSchedule).mockImplementation(async (_publicId, from, days) =>
     ok(uniformScheduleEntries(from, days)),
   )
