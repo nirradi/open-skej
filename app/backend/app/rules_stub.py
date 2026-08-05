@@ -32,6 +32,15 @@ Translations that happen here and nowhere else:
   ``_local_midnight_utc``; and both counting rules' ``[window_start,
   window_end)`` resolve from the local week/month via ``_local_week_bounds``
   / ``_local_month_bounds``. See ``_resolve_for_row``.
+* **The local frame.** ``_build_local_frame`` answers every local question a
+  rule could ask — the venue's day, week and month as UTC instants, the local
+  weekday, and minutes from local midnight — and hands them over as
+  ``Context.local``. This is the general form of the per-type resolution
+  above: those four types get bespoke parameters because they were written
+  before the frame existed, while a rule nobody hand-wrote can express a local
+  day only through this. It is why the engine still carries no timezone
+  anywhere (``.claude/rules/rule-engine.md``): this module remains the only
+  thing in the system that knows one.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
@@ -57,6 +66,7 @@ from rules import (
     BookingHorizonRule,
     CalendarContext,
     HistoryContext,
+    LocalFrame,
     MaxDurationRule,
     NotInThePastRule,
     UserContext,
@@ -304,6 +314,20 @@ def _local_midnight_utc(day: date, tz_name: str) -> datetime:
     return datetime.combine(day, time(0, 0), tzinfo=ZoneInfo(tz_name)).astimezone(timezone.utc)
 
 
+def _local_day_bounds(on_date: date, tz_name: str) -> tuple[datetime, datetime]:
+    """The half-open ``[start, end)`` UTC bounds of the **local** day ``on_date``.
+
+    The end is the local midnight of the *next date*, never ``start + 24h``. A local day is 23 or
+    25 hours long across a DST transition, and a fixed timedelta would put the boundary an hour
+    inside the neighbouring day — the identical error ``_local_week_bounds`` avoids one line down,
+    arriving here in a third place. The plan that reintroduces it will look like a simplification.
+    """
+    return (
+        _local_midnight_utc(on_date, tz_name),
+        _local_midnight_utc(on_date + timedelta(days=1), tz_name),
+    )
+
+
 def _local_week_bounds(on_date: date, tz_name: str) -> tuple[datetime, datetime]:
     """The half-open ``[start, end)`` UTC bounds of the **local** week containing ``on_date``.
 
@@ -333,6 +357,44 @@ def _local_month_bounds(on_date: date, tz_name: str) -> tuple[datetime, datetime
         else first_day.replace(month=first_day.month + 1)
     )
     return _local_midnight_utc(first_day, tz_name), _local_midnight_utc(next_month, tz_name)
+
+
+def _build_local_frame(request: EngineBookingRequest, tz_name: str, on_date: date) -> LocalFrame:
+    """Resolve every local question this booking could be asked, in the Space's own zone.
+
+    This is the whole of the engine's knowledge of what "local" means, and it is resolved here
+    because this adapter is the only thing in the system that holds a timezone. A rule reads the
+    answers off ``context.local`` and converts nothing — ``CalendarContext`` carries no zone, and
+    ``LocalFrame`` exists so that it never has to (``.claude/rules/rule-engine.md``).
+
+    Every bound comes from ``_local_midnight_utc`` and nothing else, so the day, the week and the
+    month all begin when the *venue's* day begins.
+
+    ``start_minutes`` and ``end_minutes`` are derived from the instants rather than from a local
+    wall clock, which is what keeps them right on a 23- or 25-hour day: on a spring-forward date the
+    booking after the transition is genuinely 60 minutes closer to local midnight than its wall
+    clock reads, and a rule bounding "nothing before 9am" is asking about elapsed local time.
+
+    The start floors to whole minutes and the end **ceilings**. Rounding the end down would report a
+    booking as finishing earlier than it does, which is the permissive direction, and it is what
+    would let a sub-minute booking (nothing this product creates, but nothing this function may
+    raise on either) collapse to ``end_minutes == start_minutes`` — a pair ``LocalFrame`` rejects.
+    Every booking on whole minutes, which is all of them in practice, is unaffected.
+    """
+    day_start, day_end = _local_day_bounds(on_date, tz_name)
+    week_start, week_end = _local_week_bounds(on_date, tz_name)
+    month_start, month_end = _local_month_bounds(on_date, tz_name)
+    return LocalFrame(
+        day_start=day_start,
+        day_end=day_end,
+        week_start=week_start,
+        week_end=week_end,
+        month_start=month_start,
+        month_end=month_end,
+        weekday=on_date.weekday(),
+        start_minutes=math.floor((request.start_at - day_start).total_seconds() / 60),
+        end_minutes=math.ceil((request.end_at - day_start).total_seconds() / 60),
+    )
 
 
 def _engine_request(booking: BookingRequest) -> EngineBookingRequest:
@@ -677,6 +739,7 @@ def evaluate(
     engine_context = EngineContext(
         user=UserContext(user_id=booking.user_id),
         calendar=CalendarContext(week_starts_on=WEEK_STARTS_ON, now=utc_now),
+        local=_build_local_frame(engine_request, config.timezone, on_date),
         history=HistoryContext(bookings=tuple(_engine_record(entry) for entry in history)),
     )
 

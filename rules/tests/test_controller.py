@@ -22,6 +22,7 @@ from rules.interfaces import (
     UserContext,
     Weekday,
 )
+from tests.frames import utc_frame
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 USER = "u1"
@@ -37,10 +38,15 @@ def make_request(user_id: str = USER, resource_id: str = RESOURCE) -> BookingReq
     )
 
 
-def make_context(*bookings: BookingRecord, user_id: str = USER) -> Context:
+def make_context(
+    *bookings: BookingRecord,
+    user_id: str = USER,
+    frame_for: datetime = NOW,
+) -> Context:
     return Context(
         user=UserContext(user_id=user_id),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
+        local=utc_frame(frame_for),
         history=HistoryContext(bookings=bookings),
     )
 
@@ -210,6 +216,56 @@ def test_mismatch_is_checked_before_any_rule_runs():
 def test_matching_history_is_accepted():
     context = make_context(make_booking(), make_booking())
     assert evaluate_request(make_request(), context, []).passed
+
+
+def test_a_frame_resolved_for_the_wrong_date_raises():
+    """Fail closed on the outcome, loud on the cause — the same split the user check draws.
+
+    A frame resolved for another date has a day, a week and a month all describing a different
+    stretch of the calendar than the booking sits in, so a rule counting "bookings in this local
+    day" would quietly count another day's. Denying would present that adapter bug as an ordinary
+    refusal, which is exactly what would keep it from being found.
+    """
+    context = make_context(frame_for=NOW + timedelta(days=1))
+    with pytest.raises(ContextMismatchError, match="local day"):
+        evaluate_request(make_request(), context, [])
+
+
+def test_the_frame_check_runs_before_any_rule():
+    spy = SpyRule(RuleResult.allow())
+    context = make_context(frame_for=NOW - timedelta(days=1))
+    with pytest.raises(ContextMismatchError):
+        evaluate_request(make_request(), context, [spy])
+    assert not spy.called
+
+
+def test_a_booking_starting_exactly_at_the_day_boundary_is_in_frame():
+    """``[day_start, day_end)`` is half-open, so local midnight belongs to the day it opens."""
+    midnight = datetime(2026, 7, 21, 0, 0, tzinfo=timezone.utc)
+    request = BookingRequest(USER, RESOURCE, midnight, midnight + timedelta(hours=1))
+    context = Context(
+        user=UserContext(user_id=USER),
+        calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
+        local=utc_frame(midnight),
+        history=HistoryContext(),
+    )
+    assert evaluate_request(request, context, []).passed
+
+
+def test_a_booking_running_past_the_local_day_is_accepted():
+    """Only ``start_at`` is checked. A booking ending past local midnight is the case
+    ``end_minutes > 1440`` exists to represent, and refusing it here would make the frame
+    unable to describe the thing it was added to describe."""
+    late = datetime(2026, 7, 20, 23, 0, tzinfo=timezone.utc)
+    request = BookingRequest(USER, RESOURCE, late, late + timedelta(hours=2))
+    context = Context(
+        user=UserContext(user_id=USER),
+        calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
+        local=utc_frame(late, late + timedelta(hours=2)),
+        history=HistoryContext(),
+    )
+    assert context.local.end_minutes == 1500
+    assert evaluate_request(request, context, []).passed
 
 
 def test_canon_may_be_any_iterable():

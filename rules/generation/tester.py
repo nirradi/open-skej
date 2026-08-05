@@ -62,7 +62,7 @@ module called `{_ENGINE_MODULE}`. Import what you need:
     from candidate_rule import TheRuleClass
     from {_ENGINE_MODULE} import (
         BaseRule, BookingRecord, BookingRequest, CalendarContext,
-        Context, HistoryContext, RuleResult, UserContext, Weekday,
+        Context, HistoryContext, LocalFrame, RuleResult, UserContext, Weekday,
     )
 
 NOTHING IS A FREE NAME IN YOUR MODULE. Unlike the rule you are testing, your file is loaded as \
@@ -83,15 +83,34 @@ rule — you are testing the code as written, and a test that repairs it in pass
     UserContext(user_id)
     CalendarContext(week_starts_on=Weekday.MONDAY, now=<datetime>)
     HistoryContext(bookings=(...))
-    Context(user=..., calendar=..., history=...)
+    LocalFrame(day_start, day_end, week_start, week_end, month_start, month_end,
+               weekday, start_minutes, end_minutes)
+    Context(user=..., calendar=..., local=..., history=...)
     RuleResult has .passed (bool) and .fail_reason (str or None)
 
-EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on` is the \
-one this costs a whole run on: `CalendarContext(now=...)` without it is a `TypeError` at the \
-first line of every test, so the whole module fails before the rule is called once and the \
-report blames the rule for a constructor call the rule does not make. This is the same lesson as \
-the free-name rule above — a name or an argument you assumed was supplied for you is a run spent \
-finding out it was not.
+EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on` and \
+`local` are the two this costs a whole run on: `CalendarContext(now=...)` or `Context(user=..., \
+calendar=...)` without them is a `TypeError` at the first line of every test, so the whole module \
+fails before the rule is called once and the report blames the rule for a constructor call the \
+rule does not make. This is the same lesson as the free-name rule above — a name or an argument \
+you assumed was supplied for you is a run spent finding out it was not.
+
+`LocalFrame` is the booking's local calendar, already resolved by the caller: the three \
+`[start, end)` pairs are UTC instants bounding the venue's local day, week and calendar month; \
+`weekday` is 0 for Monday; `start_minutes` and `end_minutes` are minutes from local midnight. \
+Every pair must be ordered and every datetime UTC, and `end_minutes` must exceed `start_minutes` \
+— a frame that does not satisfy those raises at construction, in your fixture, not in the rule. \
+For a venue on UTC, a booking on Tuesday 2026-07-21 from 12:00 to 13:00 is:
+
+    LocalFrame(
+        day_start=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        day_end=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        week_start=datetime(2026, 7, 20, tzinfo=timezone.utc),
+        week_end=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        month_start=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        month_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        weekday=1, start_minutes=720, end_minutes=780,
+    )
 
 Every datetime must be timezone-aware UTC with a zero offset — `datetime(2026, 3, 2, 9, 0, \
 tzinfo=timezone.utc)`. A naive datetime or a non-zero offset raises at construction, so a test \

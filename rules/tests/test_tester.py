@@ -61,6 +61,7 @@ CANDIDATE_TESTS = textwrap.dedent("""\
         CalendarContext,
         Context,
         HistoryContext,
+        LocalFrame,
         RuleResult,
         UserContext,
         Weekday,
@@ -70,10 +71,30 @@ CANDIDATE_TESTS = textwrap.dedent("""\
     LIMIT = timedelta(hours=2)
 
 
+    def D(year, month, day):
+        return datetime(year, month, day, tzinfo=timezone.utc)
+
+
+    # The local frame the adapter resolves for a UTC venue on NOW's own day.
+    def frame():
+        return LocalFrame(
+            day_start=D(2026, 7, 21),
+            day_end=D(2026, 7, 22),
+            week_start=D(2026, 7, 20),
+            week_end=D(2026, 7, 27),
+            month_start=D(2026, 7, 1),
+            month_end=D(2026, 8, 1),
+            weekday=1,
+            start_minutes=720,
+            end_minutes=780,
+        )
+
+
     def context(bookings=()):
         return Context(
             user=UserContext("user-1"),
             calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
+            local=frame(),
             history=HistoryContext(bookings=tuple(bookings)),
         )
 

@@ -36,6 +36,7 @@ from rules.interfaces import (
     UserContext,
     Weekday,
 )
+from tests.frames import utc_frame
 
 USER = "u1"
 RESOURCE = "court-1"
@@ -66,6 +67,7 @@ def context(
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=week_starts_on, now=now),
+        local=utc_frame(now, week_starts_on=week_starts_on),
         history=HistoryContext(bookings=bookings),
     )
 
