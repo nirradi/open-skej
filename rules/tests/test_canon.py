@@ -271,8 +271,8 @@ def test_a_booking_starting_a_minute_before_opening_is_denied():
     result = hours_rule().evaluate(hours_from(at(5, 59)), context())
     assert not result.passed
     assert result.fail_reason == (
-        "We open at 06:00, so this booking starts too early."
-        " Please pick a time between 06:00 and 23:00."
+        "That's before we open, so this booking starts too early."
+        " Please check this Space's opening hours on the calendar and pick a later time."
     )
 
 
@@ -285,8 +285,8 @@ def test_a_booking_ending_a_minute_after_closing_is_denied():
     result = hours_rule().evaluate(request(at(22, 0), at(23, 1)), context())
     assert not result.passed
     assert result.fail_reason == (
-        "We close at 23:00, so this booking runs too late."
-        " Please pick a time between 06:00 and 23:00."
+        "That's after we close, so this booking runs too late."
+        " Please check this Space's opening hours on the calendar and pick an earlier time."
     )
 
 
