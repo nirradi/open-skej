@@ -263,6 +263,38 @@ def test_system_prompt_states_utc_and_forbids_dst_handling():
     assert "DST" in SYSTEM_PROMPT
 
 
+def test_system_prompt_no_longer_claims_there_are_no_dst_cases():
+    """The old sentence was false the moment ``context.local`` existed to answer local questions.
+
+    Softening it (rather than deleting it) would leave a model reaching for
+    ``day_start + timedelta(hours=24)``, which is wrong on the two days a year local midnight to
+    local midnight is not 24 hours.
+    """
+    assert "there are no DST cases here" not in SYSTEM_PROMPT
+
+
+def test_system_prompt_directs_local_questions_to_context_local():
+    assert "context.local" in SYSTEM_PROMPT
+    for attr in (
+        "day_start",
+        "day_end",
+        "week_start",
+        "week_end",
+        "month_start",
+        "month_end",
+        "weekday",
+        "start_minutes",
+        "end_minutes",
+    ):
+        assert attr in SYSTEM_PROMPT
+
+
+def test_style_section_has_a_worked_example_reading_context_local():
+    style = SYSTEM_PROMPT.split("## Style", 1)[1]
+    assert "context.local.start_minutes" in style
+    assert "class NotBeforeRule(BaseRule):" in style
+
+
 def test_system_prompt_states_that_all_history_counts():
     assert "EVERYTHING IN `context.history.bookings` COUNTS" in SYSTEM_PROMPT
     assert "no status field" in SYSTEM_PROMPT

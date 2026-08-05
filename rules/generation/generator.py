@@ -60,6 +60,7 @@ Write a class that inherits from `BaseRule` and implements exactly one method:
     context.now                     shorthand for the same value
     context.calendar.week_starts_on Weekday, an IntEnum numbered like date.weekday(): MONDAY = 0
     context.history.bookings        tuple of BookingRecord
+    context.local                   LocalFrame, the booking's local calendar (see constraint 4)
 
 Each BookingRecord has user_id, resource_id, start_at, end_at. It has NO status field.
 
@@ -71,13 +72,13 @@ about it. Never put an exception, a class name, or a variable dump in it.
 ## Hard constraints
 
 1. DO NOT IMPORT ANYTHING FROM THE RULE ENGINE. `BaseRule`, `RuleResult`, `Context`, \
-`BookingRequest`, `BookingRecord` and `Weekday` are FREE NAMES: the namespace that loads your \
-source binds them for you. A safety validator runs over your output before anything executes it, \
-and `rules` is not on its import allowlist — `from rules.interfaces import BaseRule` fails \
-validation on line one and the whole candidate is thrown away. The only modules you may import at \
-all are `datetime`, `zoneinfo` and `math`.
+`BookingRequest`, `BookingRecord`, `LocalFrame` and `Weekday` are FREE NAMES: the namespace that \
+loads your source binds them for you. A safety validator runs over your output before anything \
+executes it, and `rules` is not on its import allowlist — `from rules.interfaces import BaseRule` \
+fails validation on line one and the whole candidate is thrown away. The only modules you may \
+import at all are `datetime`, `zoneinfo` and `math`.
 
-   Those six names are the ONLY free names you get. Everything else you use, you must import: if \
+   Those seven names are the ONLY free names you get. Everything else you use, you must import: if \
 your rule mentions `timedelta`, `datetime`, `date` or `timezone`, begin your source with \
 `from datetime import timedelta` (and whichever others you use). This is the single most common \
 way a candidate fails — the validator is a syntax check and will happily pass a rule that names \
@@ -97,10 +98,24 @@ allows two bookings a week and one that allows five are the same rule with diffe
 Validate the arguments in `__init__` and raise ValueError on a nonsensical one. Do not call \
 `super().__init__()` — see constraint 6.
 
-4. EVERY DATETIME IS UTC, timezone-aware, with a zero offset; this is enforced at construction, so \
-you may rely on it absolutely. `start_at.hour` is a UTC hour and `start_at.weekday()` is a UTC \
-weekday. Do NOT convert timezones, do NOT accept or infer a local timezone, and do NOT write any \
-DST handling — there are no DST cases here, and code that reaches for one is code that is wrong.
+4. EVERY DATETIME IS UTC; LOCAL QUESTIONS ARE ALREADY ANSWERED FOR YOU. Every datetime you see is \
+UTC, timezone-aware, with a zero offset; this is enforced at construction, so you may rely on it \
+absolutely. Never convert a timezone and never write DST handling — you have no zone to convert \
+with, and code that reaches for one is wrong. When your rule needs a LOCAL notion — the venue's \
+day, week, month, weekday, or the time of day a booking starts — read it from `context.local`, \
+which the caller has already resolved in the venue's own timezone:
+
+    context.local.day_start / day_end       UTC instants bounding this booking's local day
+    context.local.week_start / week_end     ... its local week
+    context.local.month_start / month_end   ... its local calendar month
+    context.local.weekday                   int, Monday = 0
+    context.local.start_minutes             minutes from local midnight to the booking's start
+    context.local.end_minutes               ... to its end. May exceed 1440 past local midnight
+
+`start_at.weekday()` is a UTC weekday and is almost never what a rule means; use \
+`context.local.weekday`. The same goes for `start_at.hour` — use `context.local.start_minutes`. \
+To count bookings in the local day, filter `context.history.bookings` to those starting in \
+`[day_start, day_end)`.
 
 5. EVERYTHING IN `context.history.bookings` COUNTS. It arrives already filtered and already capped \
 to at most one calendar month by the caller. There is no status field, no cancellation flag and no \
@@ -137,6 +152,25 @@ class MaxDurationRule(BaseRule):
         if request.duration > self.max_duration:
             return RuleResult.deny(
                 "Bookings can be at most 2 hours long. Please shorten it and try again."
+            )
+        return RuleResult.allow()
+
+A rule that reads a LOCAL notion reads it from `context.local` and never converts anything itself \
+— and its deny copy still names no clock time (constraint 7):
+
+class NotBeforeRule(BaseRule):
+    \"\"\"Bookings may not start before ``earliest_minutes`` past the venue's local midnight.\"\"\"
+
+    def __init__(self, earliest_minutes):
+        if earliest_minutes < 0 or earliest_minutes >= 1440:
+            raise ValueError(f"earliest_minutes must be within a day; got {earliest_minutes!r}")
+        self.earliest_minutes = earliest_minutes
+
+    def evaluate(self, request, context):
+        if context.local.start_minutes < self.earliest_minutes:
+            return RuleResult.deny(
+                "That is earlier than this space opens. Please check the calendar for "
+                "the opening hours and pick a later time."
             )
         return RuleResult.allow()
 
