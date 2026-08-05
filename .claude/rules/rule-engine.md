@@ -397,8 +397,8 @@ and where the cap cannot be imposed, the timeout remains as the bound that alway
 ## AI generation loop
 
 * **Generator** — takes a natural-language prompt ("users can only book twice a rolling week") and
-  emits a Python class inheriting `BaseRule`, relying only on `HistoryContext` and standard
-  `datetime` math, with **parameterized** variables so the rule is reusable.
+  emits a Python class inheriting `BaseRule`, relying only on `HistoryContext`, `LocalFrame` and
+  standard `datetime` math, with **parameterized** variables so the rule is reusable.
 
 `rules/generation/` is a **sibling package of `rules`**, not part of it. `rules` is what the booking
 API imports and runs in-process; this is what a developer runs at a terminal to produce a candidate.
@@ -500,8 +500,8 @@ import it, or it passes the validator (a syntax check) and dies with `NameError`
 from a default argument.
 * **Tester (adversary)** — takes a candidate and the original description and writes a `pytest`
   module against it: positive cases, the bound asserted on both sides, window edges pinned to the
-  instant, and a **fail-closed probe** — a rule fed input it cannot evaluate must deny or raise,
-  never pass.
+  instant, a case whose local frame disagrees with the UTC clock, and a **fail-closed probe** — a
+  rule fed input it cannot evaluate must deny or raise, never pass.
 * **The loop** — generate → test → run in the sandbox → feed the failure back to the Generator,
   **at most 3 retries**. Only `SandboxOutcome.PASSED` advances a candidate; a timeout and a crash are
   not successes. On success the candidate and its tests are written to `rules/generated/` for human
@@ -517,7 +517,32 @@ importing from it.
 
 **The prelude binds exactly the free names the Generator's prompt promises**, and no more. It is that
 promise in executable form; binding one extra would admit a candidate here that fails wherever it is
-really loaded.
+really loaded. There are **seven**: `BaseRule`, `BookingRecord`, `BookingRequest`, `Context`,
+`LocalFrame`, `RuleResult` and `Weekday`. `harness.ENGINE_NAMES` and the prompt's own count are
+asserted equal by a test, because the two are one statement written in two languages and a name added
+to only one of them fails silently — a candidate binds in the sandbox on the strength of a name the
+model was never told it could use, passes there, and dies wherever it is really loaded.
+
+**The Generator is told where local answers come from, and told there is no zone to convert with.**
+This reverses the prompt's earlier claim that *there are no DST cases here*, which held only while no
+rule could express a local anything. It is now false and is deleted rather than softened: a model
+that still believes it reaches for `day_start + timedelta(hours=24)`, which is wrong on exactly the
+two days a year a local day is not 24 hours long and correct every other time anyone looks. The constraint names
+`context.local` and its six fields as the answer to every local question — the venue's day, week,
+month, weekday, and the time of day a booking starts — and says plainly that `start_at.hour` and
+`start_at.weekday()` are UTC and almost never what a rule means. The Style section carries a second
+worked rule reading `context.local.start_minutes`, because that section does most of the teaching and
+a facility shown only in a constraint list gets used less than one that is demonstrated.
+
+**The Tester is told to pin a case where the local frame and the UTC clock disagree.** A rule reading
+`start_at.hour` instead of `context.local.start_minutes` passes every test written for a venue on UTC
+and is wrong for every other venue, so a suite that never separates the two cannot catch the mistake
+generated rules are most likely to make. The prompt gives a worked `Australia/Sydney` frame — 23:00
+UTC Monday is 09:00 Tuesday local — so the model has correct numbers rather than arithmetic to get
+wrong. It also carries one complete `Context` fixture for the suite to copy, and that is not a
+convenience: an example showing a `LocalFrame` with the surrounding construction left implied is one
+a model completes from memory, and it completes it without `week_starts_on` — measured on a live run,
+which is the same defect recorded below arriving through a new door.
 
 **`validate_source` runs on the generated source alone, and the prelude is prepended afterwards.**
 The assembled module imports `engine`, which is not on the import allowlist, so validating it instead

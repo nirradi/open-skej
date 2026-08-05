@@ -11,6 +11,7 @@ import textwrap
 import pytest
 
 from generation.errors import GenerationError, SuiteRejectedError
+from generation.generator import SYSTEM_PROMPT as GENERATOR_SYSTEM_PROMPT
 from generation.harness import (
     ENGINE_NAMES,
     PRELUDE,
@@ -195,11 +196,33 @@ def test_a_wrong_candidate_fails_rather_than_crashing():
     assert result.outcome is SandboxOutcome.FAILED
 
 
+#: Spelled out because the Generator's system prompt states the count in words ("seven free
+#: names"), not digits — so the digit form here can't be compared against it directly.
+_NUMBER_WORDS = {5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine"}
+
+
 def test_prelude_binds_exactly_the_names_the_generator_promises():
-    """The prompt says six free names; the prelude is what makes that true, so they must agree."""
+    """The prompt says N free names; the prelude is what makes that true, so they must agree.
+
+    The list has now had to grow once — ``LocalFrame`` joined it so a rule could ask a local
+    question — and the failure mode of moving only one half is silent: a candidate binds fine in the
+    sandbox on the strength of a name the prompt never told the model it could use, passes there,
+    and then fails wherever it is really loaded. So this test pins both halves of the
+    agreement rather than just the one ``PRELUDE`` already made obviously true: every name in
+    ``ENGINE_NAMES`` must both be bound by ``PRELUDE`` (the executable half) and be listed as a free
+    name in the Generator's own system prompt (the instructional half), and the prompt's stated
+    count of free names must equal ``len(ENGINE_NAMES)`` — so a name added to one without the other
+    fails here rather than being rediscovered from a model's next confused candidate.
+    """
     for name in ENGINE_NAMES:
         assert f"    {name},\n" in PRELUDE
     assert PRELUDE.count(",\n") == len(ENGINE_NAMES)
+
+    for name in ENGINE_NAMES:
+        assert f"`{name}`" in GENERATOR_SYSTEM_PROMPT, f"{name} is not a free name in the prompt"
+
+    count_word = _NUMBER_WORDS[len(ENGINE_NAMES)]
+    assert f"Those {count_word} names are the ONLY free names you get." in GENERATOR_SYSTEM_PROMPT
 
 
 def test_engine_source_is_the_real_interfaces_module():
@@ -343,6 +366,16 @@ def test_system_prompt_names_the_modules_the_sandbox_actually_writes():
 )
 def test_system_prompt_demands_the_adversarial_cases(demand):
     assert demand in SYSTEM_PROMPT
+
+
+def test_system_prompt_demands_a_local_frame_disagreement_case():
+    """The mistake a generated rule is most likely to make: reading the UTC clock instead of
+    ``context.local``. A rule that does passes every test written for a venue on UTC, so the Tester
+    has to be told to pin a case where the two disagree or that mistake sails through unnoticed.
+    """
+    assert "CASE WHOSE LOCAL FRAME DOES NOT AGREE WITH THE UTC CLOCK" in SYSTEM_PROMPT
+    assert "Australia/Sydney" in SYSTEM_PROMPT
+    assert "weekday=1, start_minutes=540" in SYSTEM_PROMPT
 
 
 def test_build_test_prompt_frames_the_constraint_as_intent_not_behaviour():

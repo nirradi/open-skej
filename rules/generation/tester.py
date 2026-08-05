@@ -81,11 +81,11 @@ rule — you are testing the code as written, and a test that repairs it in pass
     BookingRequest(user_id, resource_id, start_at, end_at)   .duration is end_at - start_at
     BookingRecord(user_id, resource_id, start_at, end_at)    no status field of any kind
     UserContext(user_id)
-    CalendarContext(week_starts_on=Weekday.MONDAY, now=<datetime>)
-    HistoryContext(bookings=(...))
+    CalendarContext(week_starts_on, now)                     a Weekday and a datetime
+    HistoryContext(bookings)                                 a tuple of BookingRecord
     LocalFrame(day_start, day_end, week_start, week_end, month_start, month_end,
                weekday, start_minutes, end_minutes)
-    Context(user=..., calendar=..., local=..., history=...)
+    Context(user, calendar, local, history)
     RuleResult has .passed (bool) and .fail_reason (str or None)
 
 EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on` and \
@@ -119,6 +119,21 @@ that uses one fails for a reason that has nothing to do with the rule.
 `Context` also enforces that every booking in the history is within one calendar month or a \
 rolling week of `now`, whichever is wider. Anchor `now` near the bookings you are writing about, \
 or the Context itself raises before the rule is ever called.
+
+Every test needs a whole `Context`, so write ONE helper and call it from each of them, changing \
+only what that case is about. Copy this and do not drop an argument from it:
+
+    def make_context(local, now, bookings=()):
+        return Context(
+            user=UserContext("user-1"),
+            calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
+            local=local,
+            history=HistoryContext(bookings=tuple(bookings)),
+        )
+
+`Weekday.MONDAY` and `UserContext("user-1")` there are values you are supplying, not defaults you \
+are restating: `CalendarContext(now=...)` and `Context(user=None, ...)` are the two ways this \
+module dies on its own first line.
 
 ## What the module must contain
 
@@ -163,7 +178,40 @@ reaches the rule at all — the test dies building its own fixture and is report
 failing. Same for a naive datetime, a non-zero offset, and a history outside the Context's own \
 window. Unusable means unusable *to this rule*, never malformed to the engine.
 
-5. RETURN-TYPE CHECKS. Assert that `evaluate` returns a `RuleResult`, and that a refusal carries a \
+5. A CASE WHOSE LOCAL FRAME DOES NOT AGREE WITH THE UTC CLOCK. This is the mistake a generated \
+rule is most likely to make: reading `request.start_at.hour` or `request.start_at.weekday()` \
+instead of `context.local.start_minutes` or `context.local.weekday`. A rule that does passes every \
+test written for a venue on UTC and is wrong for every other venue. So if the rule reads anything \
+local at all, pin at least one case where the two disagree — a booking at 23:00 UTC on a Monday \
+whose venue is far enough east that it is Tuesday 09:00 locally, so `weekday=1`, \
+`start_minutes=540`, and `day_start` is the UTC instant of that local midnight. Assert the rule \
+follows the frame and not the UTC clock.
+
+   A venue in `Australia/Sydney` (UTC+10 in July, no DST) makes the numbers concrete. A booking at \
+`2026-07-20T23:00:00Z` is `2026-07-21 09:00` local — Tuesday, `weekday=1`, `start_minutes=540` — \
+and that date's local midnight, `2026-07-21T00:00:00+10:00`, is `2026-07-20T14:00:00Z`:
+
+    request = BookingRequest(
+        "user-1", "court-1",
+        datetime(2026, 7, 20, 23, 0, tzinfo=timezone.utc),
+        datetime(2026, 7, 21, 0, 0, tzinfo=timezone.utc),
+    )
+    local = LocalFrame(
+        day_start=datetime(2026, 7, 20, 14, 0, tzinfo=timezone.utc),
+        day_end=datetime(2026, 7, 21, 14, 0, tzinfo=timezone.utc),
+        week_start=datetime(2026, 7, 19, 14, 0, tzinfo=timezone.utc),
+        week_end=datetime(2026, 7, 26, 14, 0, tzinfo=timezone.utc),
+        month_start=datetime(2026, 6, 30, 14, 0, tzinfo=timezone.utc),
+        month_end=datetime(2026, 7, 31, 14, 0, tzinfo=timezone.utc),
+        weekday=1, start_minutes=540, end_minutes=600,
+    )
+    context = make_context(local, now=datetime(2026, 7, 20, 22, 0, tzinfo=timezone.utc))
+
+   A rule reading `request.start_at.weekday()` sees Monday (`0`); a rule reading \
+`context.local.weekday` sees Tuesday (`1`). Build a case that only a rule reading the frame gets \
+right, and assert it.
+
+6. RETURN-TYPE CHECKS. Assert that `evaluate` returns a `RuleResult`, and that a refusal carries a \
 non-empty `fail_reason`. A rule returning `True`, `None` or a bare string is a real failure mode \
 and the engine treats it as a refusal.
 
