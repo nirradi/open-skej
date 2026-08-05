@@ -10,6 +10,7 @@ against synthetic data instead. Run it directly:
     python benchmark.py --client ollama --example weekends --example "max 1 hour"
     python benchmark.py --client ollama --model qwen2.5:1.5b --model llama3.1:8b \\
         --checkpoint bench.json   # safe to kill and re-run verbatim; resumes past what finished
+    python benchmark.py --client google --model gemini-3.5-flash
 
 **Token usage and cost come from a recording wrapper around the ``LLMClient``, not from a change
 to ``run_generation_loop``.** The loop returns strings and discards every ``LLMResponse`` it saw —
@@ -44,15 +45,18 @@ from generation.llm import (
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     ClaudeCliClient,
+    GoogleAIStudioClient,
     LLMClient,
     LLMResponse,
     OllamaClient,
+    read_google_api_key,
 )
 from generation.loop import MAX_RETRIES, LoopResult, run_generation_loop
 
 __all__ = [
     "GOLDEN_EXAMPLES",
     "DEFAULT_OLLAMA_MODEL",
+    "DEFAULT_GOOGLE_MODEL",
     "BenchmarkStatus",
     "ExampleReport",
     "ModelReport",
@@ -84,6 +88,12 @@ GOLDEN_EXAMPLES: tuple[str, ...] = (
 #: A model small enough to be a reasonable first thing to try on a laptop CPU. Not a claim it
 #: holds the contract — that is what running this benchmark against it is for.
 DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b"
+
+#: GA rather than a floating ``-latest`` alias — a benchmark whose model id can drift out from
+#: under it cannot compare one run against the next. A reasonable first thing to try against
+#: Google AI Studio, not a claim it holds the contract — that is what running this benchmark
+#: against it is for.
+DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash"
 
 
 class BenchmarkStatus(str, Enum):
@@ -626,7 +636,11 @@ def resolve_models(client_name: str, models: Sequence[str] | None) -> list[str]:
     """The models to run: what ``--model`` named, or one client-appropriate default."""
     if models:
         return list(models)
-    return [DEFAULT_MODEL] if client_name == "claude-cli" else [DEFAULT_OLLAMA_MODEL]
+    if client_name == "claude-cli":
+        return [DEFAULT_MODEL]
+    if client_name == "google":
+        return [DEFAULT_GOOGLE_MODEL]
+    return [DEFAULT_OLLAMA_MODEL]
 
 
 def build_client(
@@ -638,9 +652,17 @@ def build_client(
     temperature: float,
 ) -> LLMClient:
     """One client for the whole run. ``model`` is a per-call argument, not a constructor one, so
-    the same instance serves every ``--model`` without being rebuilt."""
+    the same instance serves every ``--model`` without being rebuilt.
+
+    ``base_url``/``timeout_seconds`` are Ollama's own flags (``--base-url``/``--timeout``) and are
+    not reused for ``google``: AI Studio is a fixed hosted endpoint, not a local daemon a developer
+    points at a different address, so ``GoogleAIStudioClient`` is given its own defaults rather
+    than inheriting Ollama's.
+    """
     if client_name == "claude-cli":
         return ClaudeCliClient()
+    if client_name == "google":
+        return GoogleAIStudioClient(api_key=read_google_api_key(), temperature=temperature)
     return OllamaClient(
         base_url=base_url,
         timeout_seconds=timeout_seconds,
@@ -658,7 +680,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--client",
-        choices=["ollama", "claude-cli"],
+        choices=["ollama", "claude-cli", "google"],
         default="ollama",
         help="Which LLMClient backend to benchmark. Default: ollama.",
     )
@@ -685,8 +707,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help=(
-            "Passed to the ollama client's options.seed, so two runs are comparable. "
-            "Ollama client only. Default: 0."
+            "Passed to the ollama client's options.seed, so two runs are comparable. Ollama "
+            "client only: AI Studio's generationConfig accepts a seed field but does not honour "
+            "it — confirmed against the live API, where an identical seed and temperature "
+            "returned different completions — so a google run records this as unset rather than "
+            "claim a value it did not apply. Default: 0."
         ),
     )
     parser.add_argument(
@@ -694,7 +719,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help=(
-            "Passed to the ollama client's options.temperature. Ollama client only. Default: 0.0."
+            "Passed to the ollama client's options.temperature and to the google client's "
+            "generationConfig.temperature — both clients apply it, unlike --seed. Default: 0.0."
         ),
     )
     parser.add_argument(
@@ -784,10 +810,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
         temperature=args.temperature,
     )
-    # Only the ollama client is handed these, so only an ollama run may claim them.
-    sampling_applies = args.client == "ollama"
-    seed = args.seed if sampling_applies else None
-    temperature = args.temperature if sampling_applies else None
+    # Each sampling parameter is recorded only for a run that actually applied it — two reports
+    # agreeing on a parameter neither of them set is worse than two reports that say nothing
+    # about it. The two parameters no longer share one gate: only ollama is ever handed a seed,
+    # but both ollama and google apply temperature — google accepts a seed field in
+    # generationConfig without honouring it (GoogleAIStudioClient's docstring), so a google run
+    # must not claim one either, while it may honestly claim the temperature it was given.
+    seed = args.seed if args.client == "ollama" else None
+    temperature = args.temperature if args.client in ("ollama", "google") else None
 
     checkpoint = None
     if args.checkpoint is not None:

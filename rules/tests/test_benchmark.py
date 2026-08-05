@@ -19,6 +19,7 @@ from benchmark import (
     ModelReport,
     RecordingClient,
     build_arg_parser,
+    build_client,
     build_example_report,
     resolve_examples,
     resolve_models,
@@ -26,7 +27,7 @@ from benchmark import (
     run_model,
 )
 from generation.errors import LLMCallError
-from generation.llm import DEFAULT_MODEL, LLMResponse
+from generation.llm import DEFAULT_MODEL, GoogleAIStudioClient, LLMResponse, OllamaClient
 from generation.loop import Attempt, AttemptOutcome, LoopResult
 
 # --------------------------------------------------------------------------------------------
@@ -327,6 +328,38 @@ def test_resolve_models_defaults_differ_by_client():
     assert len(cli_default) == 1
 
 
+def test_resolve_models_google_default_is_the_ga_model():
+    assert resolve_models("google", None) == [benchmark.DEFAULT_GOOGLE_MODEL]
+    assert benchmark.DEFAULT_GOOGLE_MODEL == "gemini-3.5-flash"
+
+
+# --------------------------------------------------------------------------------------------
+# build_client — one client per --client value
+# --------------------------------------------------------------------------------------------
+
+
+def test_build_client_google_returns_a_google_ai_studio_client_with_the_resolved_key(monkeypatch):
+    monkeypatch.setenv("GOOGLE_STUDIO_API_KEY", "test-key")
+
+    client = build_client(
+        "google", base_url="http://localhost:11434", timeout_seconds=5, seed=0, temperature=0.3
+    )
+
+    assert isinstance(client, GoogleAIStudioClient)
+    assert client.api_key == "test-key"
+    assert client.temperature == pytest.approx(0.3)
+
+
+def test_build_client_ollama_ignores_the_google_only_key_lookup(monkeypatch):
+    monkeypatch.delenv("GOOGLE_STUDIO_API_KEY", raising=False)
+
+    client = build_client(
+        "ollama", base_url="http://localhost:11434", timeout_seconds=5, seed=1, temperature=0.2
+    )
+
+    assert isinstance(client, OllamaClient)
+
+
 # --------------------------------------------------------------------------------------------
 # Argument parsing
 # --------------------------------------------------------------------------------------------
@@ -407,6 +440,21 @@ def test_an_ollama_run_records_the_seed_and_temperature_it_used(monkeypatch, cap
 
     assert captured["seed"] == 7
     assert captured["temperature"] == pytest.approx(0.2)
+
+
+def test_a_google_run_records_temperature_but_not_seed(monkeypatch, capsys):
+    """AI Studio's generationConfig accepts a seed field but does not honour it (confirmed
+    against the live API), so a google run must not claim one — but it does apply temperature,
+    unlike claude-cli, so that one is recorded."""
+    captured: dict = {}
+    _stub_run(monkeypatch, captured)
+
+    benchmark.main(
+        ["--client", "google", "--seed", "7", "--temperature", "0.5", "--example", "max 1 hour"]
+    )
+
+    assert captured["seed"] is None
+    assert captured["temperature"] == pytest.approx(0.5)
 
 
 def test_a_run_that_only_gave_up_exits_zero(monkeypatch, capsys):
