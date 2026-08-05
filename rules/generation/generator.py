@@ -114,6 +114,13 @@ with a limit of two and two bookings already in the window, the third is refused
 `getattr`, `globals`, `locals`, `vars` and `dir`. Use a plain `for` over the history, or a \
 comprehension whose every name is one your own source defines.
 
+7. NEVER PUT A CLOCK TIME, A CALENDAR DATE, OR A TIMEZONE NAME IN THE DENY STRING. You cannot know \
+the reader's timezone, and every datetime you hold is UTC — so any time you print is UTC shown as \
+if it were local, and the person reading it has no way to tell. State the limit in relative terms \
+instead: a duration, a count, a number of days. If the person needs the specifics, tell them where \
+to look — the calendar shows this Space's hours in its own clock. "Bookings can be at most 2 hours \
+long" is fine; "closes at 17:00" is not, even though both are true.
+
 ## Style
 
 Write it the way this hand-written rule is written — this is the reference:

@@ -273,6 +273,18 @@ def test_system_prompt_lists_the_remaining_rejected_constructs():
         assert construct in SYSTEM_PROMPT
 
 
+def test_system_prompt_forbids_absolute_times_in_deny_copy():
+    """The engine has no timezone, so a printed clock time is UTC wearing no label.
+
+    Mirrors the guard test over the hand-written canon (`rules/tests/test_denial_copy.py`) — that
+    test cannot see generated rules, so the constraint has to be stated here too or every
+    generated rule reintroduces the defect one venue at a time.
+    """
+    assert "NEVER PUT A CLOCK TIME, A CALENDAR DATE, OR A TIMEZONE NAME" in SYSTEM_PROMPT
+    assert "cannot know the reader's timezone" in SYSTEM_PROMPT
+    assert "closes at 17:00" in SYSTEM_PROMPT
+
+
 # --------------------------------------------------------------------------------------------
 # ClaudeCliClient — argv and payload parsing, never the binary
 # --------------------------------------------------------------------------------------------

@@ -11,6 +11,7 @@ assembly from a `SpaceRuleConfig`'s rows, history forwarding, and (since
 task 6.6) the fail-closed path a row that cannot be built takes.
 """
 
+import re
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -176,7 +177,7 @@ def test_booking_starting_before_opening_is_denied():
     result = evaluate(request(at(5), at(6, 30)))
 
     assert not result.allowed
-    assert "06:00" in result.message
+    assert "starts too early" in result.message
 
 
 def test_booking_starting_exactly_at_opening_is_allowed():
@@ -193,7 +194,7 @@ def test_booking_ending_after_closing_is_denied():
     result = evaluate(request(at(22), at(23, 30)))
 
     assert not result.allowed
-    assert "23:00" in result.message
+    assert "runs too late" in result.message
 
 
 def test_booking_ending_exactly_at_closing_is_allowed():
@@ -223,7 +224,21 @@ def test_booking_running_past_midnight_is_denied():
     result = evaluate(request(at(22, 30), at(24, 30)))
 
     assert not result.allowed
-    assert "23:00" in result.message
+    assert "runs too late" in result.message
+
+
+def test_out_of_hours_denial_names_no_clock_time():
+    """The boundary a member actually meets: through the real adapter, not the bare engine rule.
+
+    `rules/tests/test_denial_copy.py` pins this over the canon itself; this repeats it here
+    because the adapter is what a caller in this repo actually hits, and the resolved local
+    hours it feeds `AvailabilityHoursRule` are exactly the values that used to leak through as a
+    UTC clock time with no zone label attached.
+    """
+    result = evaluate(request(at(5), at(6, 30)))
+
+    assert not result.allowed
+    assert not re.search(r"\d{1,2}:\d{2}", result.message)
 
 
 def test_duration_is_checked_before_availability_hours():
@@ -257,7 +272,7 @@ def test_non_utc_offsets_are_converted_to_utc_before_evaluation():
     result = evaluate(request(start, start + timedelta(hours=1)))
 
     assert not result.allowed
-    assert "06:00" in result.message
+    assert "starts too early" in result.message
 
 
 def test_offset_and_utc_spellings_of_one_instant_agree():
@@ -339,9 +354,10 @@ def test_a_utc_day_crossing_space_accepts_a_booking_in_its_own_local_hours():
 def test_a_utc_day_crossing_space_still_denies_an_out_of_hours_booking():
     """The fix is not "widen the window until everything passes" — out-of-hours still denies.
 
-    The denial copy names the engine's own UTC clock (17:00), not the Space's local 06:00 — the
-    engine has no timezone to convert from, and rendering a bound in a viewer's own zone stays the
-    UI's job (`.claude/rules/rule-engine.md`); unaffected by this task.
+    The denial copy names neither the engine's own UTC clock (17:00) nor the Space's local 06:00 —
+    the engine has no timezone to convert from, so it cannot claim any clock time is the one the
+    viewer would recognise, and it names none at all. Rendering the venue's hours in the venue's
+    own zone stays the UI's job (`.claude/rules/rule-engine.md`).
     """
     crosses = _config("Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0))
     # 2026-01-21 02:00 Auckland local (before the 06:00 local opening) is 2026-01-20T13:00Z.
@@ -354,7 +370,7 @@ def test_a_utc_day_crossing_space_still_denies_an_out_of_hours_booking():
     )
 
     assert not result.allowed
-    assert "17:00" in result.message
+    assert "starts too early" in result.message
 
 
 def test_naive_now_is_rejected():

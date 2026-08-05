@@ -259,6 +259,26 @@ max-duration message as a full-string match and reproduces the singular/plural a
 the engine's duration formatting. Rewording a canon message is a breaking change to a test in another
 package.
 
+**No absolute time, date or zone name ever appears in copy the engine produces.** Not a clock time,
+not a calendar date, not "UTC" — whatever the rule, hand-written or generated. The engine has no
+timezone, so every datetime it holds is UTC, and a time it prints is UTC wearing no label: a Berlin
+member refused at 19:00 local was being told the club "closes at 17:00", which is neither the time
+they typed nor the time on the door, and nothing in the message told them which clock it was in.
+`AvailabilityHoursRule` therefore names *which* bound the booking missed in words — before we open,
+after we close, the distinction `_occurrence_for` already draws — and points at the calendar for the
+hours themselves, which is where the venue's own zone is known and the only place they can be
+rendered honestly. A **duration is not an absolute time**: "at most 2 hours long" says the same thing
+everywhere and stays legal, and the check that enforces this has to tell the two apart or it will be
+loosened until it catches nothing.
+
+**The constraint is enforced twice, because neither enforcement covers the other's code.**
+`rules/tests/test_denial_copy.py` drives every rule in `DEFAULT_CANON` and every type `REGISTRY` can
+build into a denial and greps the copy — and it asserts its own membership against both collections,
+so a type added later cannot slip past unchecked. It says nothing about generated rules, which are in
+neither collection, so the Generator's system prompt states the constraint as a hard constraint of
+its own. Fixing the one rule that named an hour without teaching the Generator would have bought one
+venue and reintroduced the defect on every rule authored after it.
+
 **Availability hours are UTC hours.** `opens_at` and `closes_at` are UTC clock times and
 `start_at.time()` is a UTC wall clock, so a Space opening at 06:00 local does not open at
 `time(6, 0)` unless it sits on UTC. The adapter resolves a Space's local hours to a UTC window for

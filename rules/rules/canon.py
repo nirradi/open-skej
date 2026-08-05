@@ -14,8 +14,10 @@ configuration then becomes a change to how the canon is built rather than a chan
 construction. This bears directly on :class:`AvailabilityHoursRule`: ``opens_at`` and ``closes_at``
 are **UTC clock times**, and ``start_at.time()`` is a UTC wall clock. A Space whose doors open at
 06:00 local does not open at ``time(6, 0)`` here unless it happens to sit on UTC. Rendering those
-bounds in a viewer's own timezone is the UI's job; the engine has no timezone to convert from and
-deliberately gains no DST cases.
+bounds in a viewer's own timezone is the UI's job — and its denial copy names no bound at all,
+rather than naming one in a zone the engine cannot claim is the viewer's: the engine has no
+timezone to convert from and deliberately gains no DST cases, and a clock time in its copy would be
+UTC wearing no label.
 
 **``SlotAlignmentRule`` is the fifth rule and the one exception to "four rules, one canon".** Every
 other rule here takes a literal that means the same thing on every date it is asked about — a
@@ -59,10 +61,6 @@ def _format_duration(duration: timedelta) -> str:
     if minutes:
         parts.append(f"{minutes} minute" if minutes == 1 else f"{minutes} minutes")
     return " and ".join(parts) if parts else "0 minutes"
-
-
-def _format_time(value: time) -> str:
-    return value.strftime("%H:%M")
 
 
 class NotInThePastRule(BaseRule):
@@ -231,20 +229,20 @@ class AvailabilityHoursRule(BaseRule):
         return None
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
-        friendly_hours = f"between {_format_time(self.opens_at)} and {_format_time(self.closes_at)}"
         occurrence = self._occurrence_for(request.start_at)
 
         if occurrence is None or request.start_at < occurrence[0]:
             return RuleResult.deny(
-                f"We open at {_format_time(self.opens_at)}, so this booking starts too early."
-                f" Please pick a time {friendly_hours}."
+                "That's before we open, so this booking starts too early."
+                " Please check this Space's opening hours on the calendar and pick a later time."
             )
 
         _, closing = occurrence
         if request.end_at > closing:
             return RuleResult.deny(
-                f"We close at {_format_time(self.closes_at)}, so this booking runs too late."
-                f" Please pick a time {friendly_hours}."
+                "That's after we close, so this booking runs too late."
+                " Please check this Space's opening hours on the calendar and pick an earlier"
+                " time."
             )
 
         return RuleResult.allow()
