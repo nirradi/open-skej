@@ -41,6 +41,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from generation.errors import LLMCallError
 from generation.llm import (
+    DEFAULT_GOOGLE_TIMEOUT_SECONDS,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
@@ -90,10 +91,12 @@ GOLDEN_EXAMPLES: tuple[str, ...] = (
 DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b"
 
 #: GA rather than a floating ``-latest`` alias — a benchmark whose model id can drift out from
-#: under it cannot compare one run against the next. A reasonable first thing to try against
-#: Google AI Studio, not a claim it holds the contract — that is what running this benchmark
-#: against it is for.
-DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash"
+#: under it cannot compare one run against the next. Unlike the ollama default above, this one
+#: *is* a claim that the model holds the contract: it took all five golden examples on the first
+#: attempt, in ten calls and 26 seconds (``rule-engine.md``). It is also the tier the free key can
+#: actually finish a run on — the flagship ``gemini-3.x-flash`` models cap at 20 requests per day
+#: per model there, below what a five-example run costs when anything retries.
+DEFAULT_GOOGLE_MODEL = "gemini-3.1-flash-lite"
 
 
 class BenchmarkStatus(str, Enum):
@@ -647,26 +650,36 @@ def build_client(
     client_name: str,
     *,
     base_url: str,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
     seed: int,
     temperature: float,
 ) -> LLMClient:
     """One client for the whole run. ``model`` is a per-call argument, not a constructor one, so
     the same instance serves every ``--model`` without being rebuilt.
 
-    ``base_url``/``timeout_seconds`` are Ollama's own flags (``--base-url``/``--timeout``) and are
-    not reused for ``google``: AI Studio is a fixed hosted endpoint, not a local daemon a developer
-    points at a different address, so ``GoogleAIStudioClient`` is given its own defaults rather
-    than inheriting Ollama's.
+    ``base_url`` is Ollama's own flag and is not reused for ``google``: AI Studio is a fixed
+    hosted endpoint, not a local daemon a developer points at a different address.
+
+    ``timeout_seconds`` is *not* in that category, and treating it as one made a model
+    unmeasurable. Every client here bounds a call with a wall clock, and a thinking-heavy hosted
+    model can legitimately need longer than a hosted client's own default — a measured
+    ``gemini-3-flash-preview`` run spent all 120 of its default seconds on a single generation and
+    was recorded as an unreachable backend, which says nothing true about whether that model holds
+    the rule contract. So ``--timeout`` applies to whichever client is selected, and ``None``
+    means "leave that client's own default alone" rather than a number this function invents for
+    all three.
     """
+    timeout = {} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}
     if client_name == "claude-cli":
-        return ClaudeCliClient()
+        return ClaudeCliClient(**timeout)
     if client_name == "google":
-        return GoogleAIStudioClient(api_key=read_google_api_key(), temperature=temperature)
+        return GoogleAIStudioClient(
+            api_key=read_google_api_key(), temperature=temperature, **timeout
+        )
     return OllamaClient(
         base_url=base_url,
-        timeout_seconds=timeout_seconds,
         options={"seed": seed, "temperature": temperature},
+        **timeout,
     )
 
 
@@ -731,10 +744,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+        default=None,
         help=(
-            "Wall clock per ollama call, in seconds. Ollama client only. "
-            f"Default: {DEFAULT_OLLAMA_TIMEOUT_SECONDS:g}."
+            "Wall clock per model call, in seconds, for whichever client is selected. Unset "
+            "leaves that client's own default in place — "
+            f"{DEFAULT_OLLAMA_TIMEOUT_SECONDS:g}s for ollama, "
+            f"{DEFAULT_GOOGLE_TIMEOUT_SECONDS:g}s for google. Raise it for a thinking-heavy "
+            "hosted model, whose single generation can outlast the hosted default and be "
+            "recorded as an unreachable backend rather than as anything about the model."
         ),
     )
     parser.add_argument(

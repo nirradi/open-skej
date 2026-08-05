@@ -27,7 +27,14 @@ from benchmark import (
     run_model,
 )
 from generation.errors import LLMCallError
-from generation.llm import DEFAULT_MODEL, GoogleAIStudioClient, LLMResponse, OllamaClient
+from generation.llm import (
+    DEFAULT_GOOGLE_TIMEOUT_SECONDS,
+    DEFAULT_MODEL,
+    DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+    GoogleAIStudioClient,
+    LLMResponse,
+    OllamaClient,
+)
 from generation.loop import Attempt, AttemptOutcome, LoopResult
 
 # --------------------------------------------------------------------------------------------
@@ -328,9 +335,13 @@ def test_resolve_models_defaults_differ_by_client():
     assert len(cli_default) == 1
 
 
-def test_resolve_models_google_default_is_the_ga_model():
+def test_resolve_models_google_default_is_the_measured_model():
+    # Pinned to the id, not just to "whatever the constant says", because this one is a finding:
+    # the model that took all five golden examples on the first attempt. A default that drifts
+    # silently is a default nobody measured. Not a floating `-latest` alias either — a benchmark
+    # whose model id changes under it cannot compare one run against the next.
     assert resolve_models("google", None) == [benchmark.DEFAULT_GOOGLE_MODEL]
-    assert benchmark.DEFAULT_GOOGLE_MODEL == "gemini-3.5-flash"
+    assert benchmark.DEFAULT_GOOGLE_MODEL == "gemini-3.1-flash-lite"
 
 
 # --------------------------------------------------------------------------------------------
@@ -360,9 +371,44 @@ def test_build_client_ollama_ignores_the_google_only_key_lookup(monkeypatch):
     assert isinstance(client, OllamaClient)
 
 
+def test_build_client_google_takes_the_timeout_flag(monkeypatch):
+    # --timeout is not an ollama-only knob. A thinking-heavy hosted model can spend the whole of
+    # GoogleAIStudioClient's own 120s default on one generation, which the benchmark then records
+    # as an unreachable backend — a statement about the wall clock, not about whether the model
+    # holds the rule contract. Measured against gemini-3-flash-preview.
+    monkeypatch.setenv("GOOGLE_STUDIO_API_KEY", "test-key")
+
+    client = build_client(
+        "google", base_url="http://localhost:11434", timeout_seconds=420, seed=0, temperature=0.0
+    )
+
+    assert isinstance(client, GoogleAIStudioClient)
+    assert client.timeout_seconds == pytest.approx(420)
+
+
+def test_build_client_leaves_each_clients_own_default_timeout_alone_when_unset(monkeypatch):
+    # None means "this run named no timeout", not a number this module picks on every client's
+    # behalf — the two clients' defaults differ deliberately and neither is the other's.
+    monkeypatch.setenv("GOOGLE_STUDIO_API_KEY", "test-key")
+
+    google = build_client(
+        "google", base_url="http://localhost:11434", timeout_seconds=None, seed=0, temperature=0.0
+    )
+    ollama = build_client(
+        "ollama", base_url="http://localhost:11434", timeout_seconds=None, seed=0, temperature=0.0
+    )
+
+    assert google.timeout_seconds == pytest.approx(DEFAULT_GOOGLE_TIMEOUT_SECONDS)
+    assert ollama.timeout_seconds == pytest.approx(DEFAULT_OLLAMA_TIMEOUT_SECONDS)
+
+
 # --------------------------------------------------------------------------------------------
 # Argument parsing
 # --------------------------------------------------------------------------------------------
+
+
+def test_timeout_flag_defaults_to_none_so_no_client_default_is_overwritten():
+    assert build_arg_parser().parse_args([]).timeout is None
 
 
 def test_model_flag_is_repeatable():

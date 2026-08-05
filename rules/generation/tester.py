@@ -86,6 +86,13 @@ rule — you are testing the code as written, and a test that repairs it in pass
     Context(user=..., calendar=..., history=...)
     RuleResult has .passed (bool) and .fail_reason (str or None)
 
+EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on` is the \
+one this costs a whole run on: `CalendarContext(now=...)` without it is a `TypeError` at the \
+first line of every test, so the whole module fails before the rule is called once and the \
+report blames the rule for a constructor call the rule does not make. This is the same lesson as \
+the free-name rule above — a name or an argument you assumed was supplied for you is a run spent \
+finding out it was not.
+
 Every datetime must be timezone-aware UTC with a zero offset — `datetime(2026, 3, 2, 9, 0, \
 tzinfo=timezone.utc)`. A naive datetime or a non-zero offset raises at construction, so a test \
 that uses one fails for a reason that has nothing to do with the rule.
@@ -130,6 +137,12 @@ and is discovered by two people standing on the same court. Write it like this:
    Choose the unusable input from what would actually confuse THIS rule: a history holding a \
 different user's bookings, a context whose `now` sits far from the request, an empty history where \
 the rule counts, a request whose resource the rule has no record of.
+
+   IT MUST BE INPUT THE ENGINE TYPES WILL ACTUALLY BUILD. `BookingRequest` and `BookingRecord` \
+reject `start_at >= end_at` at construction, so a "negative duration" or zero-length probe never \
+reaches the rule at all — the test dies building its own fixture and is reported as the rule \
+failing. Same for a naive datetime, a non-zero offset, and a history outside the Context's own \
+window. Unusable means unusable *to this rule*, never malformed to the engine.
 
 5. RETURN-TYPE CHECKS. Assert that `evaluate` returns a `RuleResult`, and that a refusal carries a \
 non-empty `fail_reason`. A rule returning `True`, `None` or a bare string is a real failure mode \

@@ -381,6 +381,25 @@ def test_send_chat_request_raises_on_a_timeout_wrapped_in_urlerror(monkeypatch):
     assert "did not answer within" in excinfo.value.detail
 
 
+def test_send_chat_request_raises_on_a_connection_reset(monkeypatch):
+    # A reset by the far end after the request was sent comes out of http.client as a bare
+    # ConnectionResetError, which urlopen never wraps in a URLError — so none of the branches
+    # above catch it and it would escape this module. The same hole the Google client had, closed
+    # here too so a caller's "every failure is an LLMCallError" holds for both.
+    def fake_urlopen(request, timeout):
+        raise ConnectionResetError(54, "Connection reset by peer")
+
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(LLMCallError) as excinfo:
+        llm_module._send_chat_request(
+            "http://localhost:11434/api/chat",
+            {},
+            timeout_seconds=5,
+            base_url="http://localhost:11434",
+        )
+    assert "failed mid-request" in excinfo.value.detail
+
+
 class _FakeErrorBody:
     """The ``fp`` an ``HTTPError`` reads its body from — just enough of a file object for it."""
 
