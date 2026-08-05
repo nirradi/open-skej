@@ -30,6 +30,7 @@ from app.rules_stub import (
     SpaceRuleRow,
     resolve_day_schedule,
 )
+from app.rules_stub import _build_local_frame, _engine_request, _local_date
 from app.rules_stub import evaluate as _evaluate
 
 DAY = datetime(2026, 7, 20, tzinfo=timezone.utc)
@@ -616,6 +617,143 @@ def test_a_week_spanning_a_dst_change_is_seven_local_days_long():
     result = evaluate(last_hour, config, history=(held,), now=held.start_at)
 
     assert result.allowed is False
+
+
+# --- task 7.3: the local frame the adapter resolves for every booking ---------------------------
+#
+# `Context.local` is where every local question a rule could ask is already answered, as a UTC
+# instant or a plain integer, so no rule ever holds a timezone. This adapter is the only thing in
+# the system that does hold one, which is why the resolution is asserted here and not in
+# `rules/tests` — a suite over there has no zone to be in.
+#
+# Nothing reads the frame yet (task 7.5 is where a generated rule does), so these go at the
+# resolution directly rather than at a verdict. The wiring is covered anyway and from an angle
+# these cases cannot reach: `evaluate` attaches the frame and `evaluate_request` cross-checks it
+# against the request's own start, so every Sydney and Honolulu case in this module would raise
+# `ContextMismatchError` if the adapter resolved a frame for the wrong local date.
+
+
+def _frame(start: datetime, tz_name: str, minutes: int = 60):
+    """The frame `evaluate` would attach to a booking at `start`, resolved exactly as it does."""
+    engine_request = _engine_request(_booking(start, minutes=minutes))
+    return _build_local_frame(
+        engine_request, tz_name, _local_date(engine_request.start_at, tz_name)
+    )
+
+
+def test_a_utc_venue_s_frame_is_the_utc_calendar():
+    """The case where local and UTC agree — the baseline the others are read against."""
+    frame = _frame(datetime(2026, 7, 20, 9, 0, tzinfo=timezone.utc), "UTC")
+
+    assert frame.day_start == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    assert frame.day_end == datetime(2026, 7, 21, tzinfo=timezone.utc)
+    assert frame.week_start == datetime(2026, 7, 20, tzinfo=timezone.utc)
+    assert frame.week_end == datetime(2026, 7, 27, tzinfo=timezone.utc)
+    assert frame.month_start == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    assert frame.month_end == datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert frame.weekday == 0
+    assert frame.start_minutes == 540
+    assert frame.end_minutes == 600
+
+
+def test_an_east_of_utc_venue_s_frame_is_its_own_day_not_the_utc_one():
+    """Sydney, Monday 00:30 local — which is *Sunday* 13:30 in UTC.
+
+    This is 5.12's case, asked of the frame rather than of a counting window. Every field
+    disagrees with the UTC reading of the same instant, which is what makes it worth pinning:
+    `weekday` is Monday and not Sunday, and the day, week and month all begin at 13:00 UTC
+    because that is when the venue's day begins.
+    """
+    local_start = _tz_instant("Australia/Sydney", 2026, 1, 12, 0, 30)
+    frame = _frame(local_start, "Australia/Sydney")
+
+    assert local_start.weekday() == 6, "the UTC reading of this instant is a Sunday"
+    assert frame.weekday == 0
+    assert frame.day_start == datetime(2026, 1, 11, 13, 0, tzinfo=timezone.utc)
+    assert frame.day_end == datetime(2026, 1, 12, 13, 0, tzinfo=timezone.utc)
+    assert frame.week_start == frame.day_start, "Monday opens the week and the day at once"
+    assert frame.week_end == datetime(2026, 1, 18, 13, 0, tzinfo=timezone.utc)
+    assert frame.month_start == _tz_instant("Australia/Sydney", 2026, 1, 1)
+    assert frame.month_end == _tz_instant("Australia/Sydney", 2026, 2, 1)
+    assert frame.start_minutes == 30
+    assert frame.end_minutes == 90
+
+
+def test_a_west_of_utc_venue_s_frame_is_its_own_day_not_the_utc_one():
+    """Honolulu, Monday 23:00 local — Tuesday in UTC. The boundary moves the other way."""
+    local_start = _tz_instant("Pacific/Honolulu", 2026, 1, 12, 23, 0)
+    frame = _frame(local_start, "Pacific/Honolulu")
+
+    assert local_start.weekday() == 1, "the UTC reading of this instant is a Tuesday"
+    assert frame.weekday == 0
+    assert frame.day_start == datetime(2026, 1, 12, 10, 0, tzinfo=timezone.utc)
+    assert frame.day_end == datetime(2026, 1, 13, 10, 0, tzinfo=timezone.utc)
+    assert frame.start_minutes == 23 * 60
+
+
+def test_a_booking_running_past_local_midnight_reports_end_minutes_over_1440():
+    """The representation `deferred/passed-midnight.md` needs, and the reason nothing caps it.
+
+    23:00–01:00 Honolulu local starts inside the day and ends outside it. `end_minutes` says so
+    rather than wrapping to 60, which would read as a booking that ended 22 hours before it began.
+    """
+    frame = _frame(_tz_instant("Pacific/Honolulu", 2026, 1, 12, 23, 0), "Pacific/Honolulu", 120)
+
+    assert frame.start_minutes == 1380
+    assert frame.end_minutes == 1500
+
+
+@pytest.mark.parametrize(
+    "tz, on, hours",
+    [
+        # Sydney leaves daylight saving on 5 April 2026: the clocks go back and the day is 25 hours.
+        ("Australia/Sydney", (2026, 4, 5, 10), 25),
+        # ...and enters it on 4 October, where the same day is 23.
+        ("Australia/Sydney", (2026, 10, 4, 10), 23),
+        # The northern hemisphere's transitions run the opposite way round, for the same reason.
+        ("Europe/Berlin", (2026, 3, 29, 10), 23),
+        ("Europe/Berlin", (2026, 10, 25, 10), 25),
+        # An ordinary day, so this parametrisation cannot pass by always finding a transition.
+        ("Australia/Sydney", (2026, 7, 15, 10), 24),
+    ],
+)
+def test_a_local_day_across_a_dst_transition_is_not_24_hours(tz, on, hours):
+    """The assertion that fails if anyone writes ``day_start + timedelta(days=1)``.
+
+    `day_end` is the local midnight of the *next date*, resolved independently, so it lands where
+    the venue's next day actually begins. A fixed timedelta would put the boundary an hour inside
+    the neighbouring day twice a year — right every time anyone looks, wrong on the two dates that
+    matter. This is 5.12's lesson and 6.6's, arriving in a third place.
+    """
+    frame = _frame(_tz_instant(tz, *on), tz)
+
+    assert frame.day_end - frame.day_start == timedelta(hours=hours)
+
+
+def test_minutes_from_midnight_are_elapsed_time_not_a_wall_clock():
+    """Derived from the instants, which is the whole reason they survive a transition.
+
+    On Sydney's spring-forward date the hour between 02:00 and 03:00 local never happens, so a
+    booking at 10:00 local is genuinely nine hours after local midnight and `start_minutes` says
+    540. Reading the wall clock instead would say 600 and claim ten hours had elapsed when nine
+    had — a frame whose own two halves disagree about the same booking.
+    """
+    frame = _frame(_tz_instant("Australia/Sydney", 2026, 10, 4, 10, 0), "Australia/Sydney")
+
+    assert frame.start_minutes == 540
+    assert frame.day_end - frame.day_start == timedelta(hours=23)
+
+
+def test_the_frame_carries_no_timezone_however_it_was_resolved():
+    """The absence is the invariant, and this is the layer that would leak it.
+
+    Every field above came out of a `ZoneInfo` lookup, so this is the one place a zone could
+    plausibly be attached "for debugging" and then be read by a rule that converts with it.
+    """
+    frame = _frame(_tz_instant("Australia/Sydney", 2026, 1, 12, 0, 30), "Australia/Sydney")
+
+    for forbidden in ("timezone", "tz", "zone", "utc_offset", "offset"):
+        assert not hasattr(frame, forbidden), forbidden
 
 
 # --- task 6.6: rows read through the registry, applies_to, and fail-closed ----------------------

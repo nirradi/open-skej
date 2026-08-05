@@ -36,6 +36,7 @@ from rules.interfaces import (
     UserContext,
     Weekday,
 )
+from tests.frames import utc_frame
 
 USER = "u1"
 RESOURCE = "court-1"
@@ -53,10 +54,17 @@ def hours_from(moment: datetime, hours: float = 1) -> BookingRequest:
     return request(moment, moment + timedelta(hours=hours))
 
 
-def context(now: datetime = NOW) -> Context:
+def context(now: datetime = NOW, *, frame_for: datetime | None = None) -> Context:
+    """A context for a UTC venue, its local frame resolved for ``frame_for``'s own day.
+
+    Every rule here reads only the request and its own parameters, so the frame is inert for them
+    — but ``evaluate_request`` cross-checks it against the request's start, so a test running the
+    whole canon against a booking on another day says which day that is.
+    """
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
+        local=utc_frame(frame_for if frame_for is not None else now),
     )
 
 
@@ -406,22 +414,27 @@ def test_a_date_denial_beats_a_duration_denial():
     the user would shorten it, resubmit, and be refused again.
     """
     far = NOW + timedelta(days=90)
-    result = evaluate_request(hours_from(far, hours=3), context(), DEFAULT_CANON)
+    result = evaluate_request(hours_from(far, hours=3), context(frame_for=far), DEFAULT_CANON)
     assert "days ahead" in (result.fail_reason or "")
 
 
 def test_a_past_denial_beats_a_duration_denial():
     yesterday = NOW - timedelta(days=1)
-    result = evaluate_request(hours_from(yesterday, hours=3), context(), DEFAULT_CANON)
+    result = evaluate_request(
+        hours_from(yesterday, hours=3), context(frame_for=yesterday), DEFAULT_CANON
+    )
     assert "already passed" in (result.fail_reason or "")
 
 
 def test_duration_is_reported_before_availability_hours():
     """An over-long booking that also runs past closing reports its length first."""
-    result = evaluate_request(request(at(21, 30), at(23, 45)), context(), DEFAULT_CANON)
+    result = evaluate_request(
+        request(at(21, 30), at(23, 45)), context(frame_for=at(21, 30)), DEFAULT_CANON
+    )
     assert "at most 2 hours" in (result.fail_reason or "")
 
 
 def test_an_ordinary_booking_passes_the_whole_canon():
-    result = evaluate_request(hours_from(NOW + timedelta(days=1)), context(), DEFAULT_CANON)
+    tomorrow = NOW + timedelta(days=1)
+    result = evaluate_request(hours_from(tomorrow), context(frame_for=tomorrow), DEFAULT_CANON)
     assert result == RuleResult.allow()

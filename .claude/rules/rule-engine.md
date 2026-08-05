@@ -41,7 +41,27 @@ into a pass defeats containment *silently* — it looks like a working rule that
 * **`UserContext`** — `user_id` **only**. Role and tier are deliberately absent: roles belong to
   Identity & Access and no rule branches on either. A test asserts their absence. Add them when a
   rule genuinely needs them.
-* **`CalendarContext`** — `week_starts_on` (a `Weekday` enum) and `now`. **No timezone field.**
+* **`CalendarContext`** — `week_starts_on` (a `Weekday` enum) and `now`. **No timezone field**, and
+  there is never going to be one — a zone here would be readable by every rule in the canon,
+  generated ones above all, and a rule that converts for itself is a rule whose correctness depends
+  on it having picked the zone the caller meant. `week_starts_on` stays because it is a calendar
+  *convention*, not a zone: it names which day a week begins on and nothing about where the venue is.
+* **`LocalFrame`** — `day_start`/`day_end`, `week_start`/`week_end`, `month_start`/`month_end` (UTC
+  instants bounding the booking's **local** day, week and calendar month), `weekday` (int, 0 =
+  Monday), and `start_minutes`/`end_minutes` (minutes from local midnight to the request's own
+  bounds). **It carries no timezone and no offset either**, and that is what makes the absence above
+  survivable: the frame does not reintroduce a zone, it removes the *need* for one, by pre-answering
+  every local question a rule could ask as a UTC instant or a plain integer. Without it, only the
+  types the adapter holds a bespoke case for can express anything local and a type nobody hand-wrote
+  can express nothing — so a generated "no more than 3 hours a day" would count against the **UTC**
+  day and be wrong for every venue that is not on UTC. Each pair is half-open and is rejected if
+  inverted: unlike `AvailabilityHoursRule`'s deliberately invertible clock times these are two
+  absolute instants with no wrap to describe, so an inversion is the caller bug it looks like — the
+  same reasoning the counting rules' window already gives. `end_minutes` **may exceed 1440 and is
+  never capped**: that is a booking running past local midnight, and representing it is the point.
+  Every bound is resolved from local midnight and nothing else, so a day, a week and a month all
+  begin when the *venue's* day begins; and because a local day is 23 or 25 hours across a DST
+  transition, `day_end` is the local midnight of the next date rather than `day_start + 24h`.
 * **`BookingRequest`** / **`BookingRecord`** — `user_id`, `resource_id`, `start_at`, `end_at`.
 * **`HistoryContext`** — `bookings`, the caller's pre-filtered, pre-capped list. **Everything in it
   counts.** It is filtered to the requesting **user**, never to one resource: a caller may legitimately
@@ -50,8 +70,12 @@ into a pass defeats containment *silently* — it looks like a working rule that
   the resource. `BookingRecord` has no status field and the engine never inspects one: filtering
   belongs to the layer that owns the schema, so a future `deleted` or no-show flag cannot silently
   obsolete every rule that forgot to check it.
-* **`Context`** — aggregates `user` / `calendar` / `history` and enforces the history-window
-  invariant.
+* **`Context`** — aggregates `user` / `calendar` / `local` / `history` and enforces the
+  history-window invariant. **`local` is required and has no default**: the only frame a default
+  could name is the UTC one, and a rule reading that is silently wrong for every venue off UTC —
+  the precise bug the frame exists to remove, reintroduced as a convenience. Every caller resolves
+  a real frame or does not get a context. This is the first time the aggregate's promise below —
+  that a field can be added without touching `evaluate`'s signature — has actually been spent.
 * **`RuleResult`** — `passed` (bool), `fail_reason` (`str | None`, friendly copy shown verbatim in
   the UI). Named `passed` because `pass` is a keyword.
 * **`BaseRule`** — abstract, requiring `evaluate(self, request, context) -> RuleResult`. The
@@ -66,12 +90,25 @@ Callers `.astimezone(timezone.utc)` at the boundary.
 
 **History is bounded** to the current calendar month or a rolling week. A rule may not reach past it.
 
+**The adapter is the only thing in the system that knows a timezone.** No type in this contract
+carries one and none will. Every local question — the venue's day, week, month, weekday and the time
+of day a booking starts — is answered by the caller before a rule runs and handed over on
+`LocalFrame` as an absolute instant or a plain number. A rule reads the answer; it never converts.
+
 ## Controller
 
 `evaluate_request()` is the single entry point the backend calls. In order: cross-check the request
 against the context (`Context` cannot do this itself — the request is not in scope when a context is
 built), run the canon in order **fail-fast** (the first denial wins and nothing after it runs), and
 contain a buggy rule.
+
+**The cross-check covers the local frame as well as the history's user.** `local.day_start <=
+request.start_at < local.day_end`, or `ContextMismatchError` — same reasoning as the user check: a
+frame resolved for the wrong date describes a different stretch of the calendar than the booking
+sits in, so a rule counting "bookings in this local day" would quietly count another day's, and
+answering "denied" would present that adapter bug as an ordinary refusal. Fail closed on the
+outcome, loud on the cause. **`start_at` only** — `end_at` may legitimately fall past the local day,
+which is exactly what an `end_minutes` above 1440 means.
 
 ## Backend integration
 
@@ -80,7 +117,7 @@ contain a buggy rule.
 therefore a fact about the packaging, not a promise a reviewer must keep.
 
 `app/backend/app/rules_stub.py` is the adapter, and the whole of it. It holds no rule logic; it
-translates between the HTTP boundary and `evaluate_request`, and four translations live there and
+translates between the HTTP boundary and `evaluate_request`, and five translations live there and
 nowhere else. **It converts every datetime to UTC** (`.astimezone(timezone.utc)`) before building
 engine types — the engine rejects a non-zero offset outright, so a booking a client sends as
 `+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
@@ -94,7 +131,16 @@ every Resource in the Space, capped to `history_window`, and passes them in; wit
 configured, history stays empty and no query runs. **It resolves the counting windows** in the
 Space's own zone — the local week and local calendar month containing the booking, converted to UTC
 instants and handed to `MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule`, which no longer derive
-them. `DEFAULT_CANON` is no longer what the API runs — it remains the *reference* canon the
+them. **It resolves the `LocalFrame`** every context carries — `_build_local_frame`, the general
+form of the per-type resolution above. Those four types get bespoke resolved parameters only because
+they were written before the frame existed; a type nobody hand-wrote has no such case and can
+express a local day through the frame or not at all. Every bound in it comes from
+`_local_midnight_utc` and nothing else, and `_local_day_bounds` takes the *next date's* local
+midnight rather than adding 24 hours, for the reason `_local_week_bounds` already gives one line
+down. `start_minutes` / `end_minutes` are the elapsed minutes from that local midnight, derived from
+the instants rather than from a wall clock, which is what keeps them right on a 23- or 25-hour day;
+the end rounds up, since rounding it down would report a booking as finishing earlier than it does
+and is the permissive direction. `DEFAULT_CANON` is no longer what the API runs — it remains the *reference* canon the
 generation loop is measured against and the source of the default values a Space that overrides
 nothing would use.
 

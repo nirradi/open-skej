@@ -16,11 +16,13 @@ from rules.interfaces import (
     CalendarContext,
     Context,
     HistoryContext,
+    LocalFrame,
     RuleResult,
     UserContext,
     Weekday,
     history_window,
 )
+from tests.frames import utc_frame
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 NAIVE = datetime(2026, 7, 20, 12, 0)
@@ -43,6 +45,7 @@ def make_context(
     return Context(
         user=UserContext(user_id="u1"),
         calendar=CalendarContext(week_starts_on=week_starts_on, now=now),
+        local=utc_frame(now, week_starts_on=week_starts_on),
         history=HistoryContext(bookings=bookings),
     )
 
@@ -185,6 +188,129 @@ def test_calendar_context_rejects_a_bare_int_weekday() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# LocalFrame — the local calendar, pre-answered
+# --------------------------------------------------------------------------------------
+
+
+def frame(**overrides: object) -> LocalFrame:
+    """A valid frame for Monday 2026-07-20 on a UTC venue, with fields swapped in per test."""
+    fields: dict = {
+        "day_start": utc(2026, 7, 20),
+        "day_end": utc(2026, 7, 21),
+        "week_start": utc(2026, 7, 20),
+        "week_end": utc(2026, 7, 27),
+        "month_start": utc(2026, 7, 1),
+        "month_end": utc(2026, 8, 1),
+        "weekday": 0,
+        "start_minutes": 540,
+        "end_minutes": 600,
+    }
+    fields.update(overrides)
+    return LocalFrame(**fields)
+
+
+def test_a_valid_frame_round_trips() -> None:
+    assert frame().weekday == 0
+    assert frame().start_minutes == 540
+
+
+def test_the_frame_carries_no_timezone_and_no_offset() -> None:
+    """The absence *is* the invariant.
+
+    A zone or an offset here would be readable by every rule, and a rule that can convert is a
+    rule whose correctness depends on it having picked the zone the caller meant. Every local
+    question is answered as a UTC instant or a plain integer instead.
+    """
+    built = frame()
+    for forbidden in ("timezone", "tz", "tzinfo", "zone", "utc_offset", "offset"):
+        assert not hasattr(built, forbidden), forbidden
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["day_start", "day_end", "week_start", "week_end", "month_start", "month_end"],
+)
+def test_every_bound_rejects_a_naive_datetime(field_name: str) -> None:
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        frame(**{field_name: NAIVE})
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["day_start", "day_end", "week_start", "week_end", "month_start", "month_end"],
+)
+def test_every_bound_rejects_a_non_zero_offset(field_name: str) -> None:
+    with pytest.raises(ValueError, match="zero offset"):
+        frame(**{field_name: NOW.astimezone(PLUS_TWO)})
+
+
+@pytest.mark.parametrize("label", ["day", "week", "month"])
+def test_an_inverted_pair_is_rejected(label: str) -> None:
+    """Two absolute instants describe no recurring window, so there is no wrap to represent.
+
+    ``AvailabilityHoursRule``'s bounds invert legitimately — they are clock times and inversion
+    means "this window crosses a UTC day". These are not clock times, so an inversion here is
+    exactly what it looks like: a caller that resolved the pair the wrong way round.
+    """
+    expected = rf"LocalFrame\.{label}_start must be strictly before LocalFrame\.{label}_end"
+    with pytest.raises(ValueError, match=expected):
+        frame(**{f"{label}_start": utc(2026, 8, 1), f"{label}_end": utc(2026, 7, 1)})
+
+
+@pytest.mark.parametrize("label", ["day", "week", "month"])
+def test_a_zero_width_pair_is_rejected(label: str) -> None:
+    with pytest.raises(ValueError, match="strictly before"):
+        frame(**{f"{label}_start": utc(2026, 7, 20), f"{label}_end": utc(2026, 7, 20)})
+
+
+@pytest.mark.parametrize("weekday", [-1, 7, 100])
+def test_weekday_outside_range_seven_is_rejected(weekday: int) -> None:
+    with pytest.raises(ValueError, match="range"):
+        frame(weekday=weekday)
+
+
+@pytest.mark.parametrize("weekday", [0, 6])
+def test_weekday_bounds_are_inclusive(weekday: int) -> None:
+    assert frame(weekday=weekday).weekday == weekday
+
+
+def test_weekday_rejects_a_bool() -> None:
+    """``True`` is an ``int`` and would read as Tuesday."""
+    with pytest.raises(TypeError, match="must be an int"):
+        frame(weekday=True)
+
+
+def test_negative_start_minutes_is_rejected() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        frame(start_minutes=-1)
+
+
+def test_start_minutes_of_zero_is_a_booking_at_local_midnight() -> None:
+    assert frame(start_minutes=0, end_minutes=60).start_minutes == 0
+
+
+def test_end_minutes_must_be_after_start_minutes() -> None:
+    with pytest.raises(ValueError, match="strictly after"):
+        frame(start_minutes=600, end_minutes=600)
+
+
+def test_end_minutes_may_exceed_1440() -> None:
+    """A booking running past local midnight. Representing it is the point; capping it is the bug.
+
+    ``deferred/passed-midnight.md`` is the ticket this makes expressible: 23:00–01:00 local is
+    ``start_minutes=1380, end_minutes=1500``, and there is no other way to say it once the frame
+    refuses to carry a zone.
+    """
+    built = frame(start_minutes=1380, end_minutes=1500)
+    assert built.end_minutes == 1500
+
+
+def test_minutes_reject_a_non_int() -> None:
+    with pytest.raises(TypeError, match="must be an int"):
+        frame(start_minutes=540.0)
+
+
+# --------------------------------------------------------------------------------------
 # HistoryContext
 # --------------------------------------------------------------------------------------
 
@@ -274,16 +400,38 @@ def test_window_rejection_names_the_offending_index() -> None:
 
 def test_context_rejects_wrong_component_types() -> None:
     calendar = CalendarContext(Weekday.MONDAY, NOW)
+    local = utc_frame(NOW)
     with pytest.raises(TypeError, match="must be a UserContext"):
-        Context(user="u1", calendar=calendar)  # type: ignore[arg-type]
+        Context(user="u1", calendar=calendar, local=local)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="must be a CalendarContext"):
-        Context(user=UserContext("u1"), calendar=NOW)  # type: ignore[arg-type]
+        Context(user=UserContext("u1"), calendar=NOW, local=local)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="must be a LocalFrame"):
+        Context(user=UserContext("u1"), calendar=calendar, local=NOW)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="must be a HistoryContext"):
-        Context(user=UserContext("u1"), calendar=calendar, history=())  # type: ignore[arg-type]
+        Context(  # type: ignore[arg-type]
+            user=UserContext("u1"), calendar=calendar, local=local, history=()
+        )
+
+
+def test_context_requires_a_local_frame_with_no_default() -> None:
+    """The one field on ``Context`` that must never acquire a default.
+
+    A default could only be the UTC frame, and a rule reading that would be silently wrong for
+    every venue not on UTC — the exact bug ``LocalFrame`` exists to remove, reintroduced as a
+    convenience. Callers resolve a real frame or they do not get a context.
+    """
+    with pytest.raises(TypeError, match="local"):
+        Context(  # type: ignore[call-arg]
+            user=UserContext("u1"), calendar=CalendarContext(Weekday.MONDAY, NOW)
+        )
 
 
 def test_context_history_defaults_to_empty() -> None:
-    context = Context(user=UserContext("u1"), calendar=CalendarContext(Weekday.MONDAY, NOW))
+    context = Context(
+        user=UserContext("u1"),
+        calendar=CalendarContext(Weekday.MONDAY, NOW),
+        local=utc_frame(NOW),
+    )
     assert context.history.bookings == ()
 
 

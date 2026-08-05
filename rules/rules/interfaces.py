@@ -13,6 +13,10 @@ Two invariants are enforced everywhere and are worth stating once:
 * **History is pre-filtered.** ``HistoryContext`` contains exactly the bookings that count. The
   engine never inspects booking status — ``BookingRecord`` has no status field — so if a booking
   should not count toward a limit, the caller does not put it in the context.
+* **Local questions are pre-answered.** No type here carries a timezone, and none ever will. The
+  caller is the only thing that knows the venue's zone, so it resolves the venue's day, week, month,
+  weekday and time-of-day into ``LocalFrame`` — UTC instants and plain integers — before a rule is
+  called. A rule reads the answer; it never converts.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ __all__ = [
     "BookingRequest",
     "UserContext",
     "CalendarContext",
+    "LocalFrame",
     "HistoryContext",
     "Context",
     "RuleResult",
@@ -66,6 +71,27 @@ def _require_utc(value: object, label: str) -> datetime:
     if offset != timedelta(0):
         raise ValueError(f"{label} must be UTC (zero offset); got offset {offset} in {value!r}")
     return value
+
+
+def _require_int(value: object, label: str) -> int:
+    """Return ``value`` if it is a plain ``int``, else raise ``TypeError``.
+
+    ``bool`` is rejected explicitly: it is a subclass of ``int``, and ``True`` reaching a field that
+    means "minutes past midnight" would be silently read as one minute past.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{label} must be an int, got {type(value).__name__}")
+    return value
+
+
+def _validate_bounds(start: object, end: object, label: str) -> None:
+    """Validate a half-open ``[start, end)`` pair of UTC instants."""
+    lower = _require_utc(start, f"{label}_start")
+    upper = _require_utc(end, f"{label}_end")
+    if lower >= upper:
+        raise ValueError(
+            f"{label}_start must be strictly before {label}_end; got {lower} >= {upper}"
+        )
 
 
 def _validate_span(start_at: object, end_at: object, label: str) -> None:
@@ -122,8 +148,14 @@ class UserContext:
 class CalendarContext:
     """Calendar conventions and the current instant.
 
-    No timezone field: everything is UTC, so week boundaries are UTC boundaries and the engine has
-    no DST cases at all.
+    **No timezone field, and there is never going to be one.** A zone here would be readable by
+    every rule in the canon, generated ones above all, and a rule that converts for itself is a rule
+    whose correctness depends on it having picked the same zone the caller meant. ``LocalFrame``
+    below is what makes that absence survivable: it does not reintroduce a zone, it removes the
+    *need* for one, by pre-answering every local question as a UTC instant or a plain integer.
+
+    ``week_starts_on`` stays here as a calendar *convention* — which day a week is considered to
+    begin on — read by the caller that resolves ``LocalFrame.week_start``. It names no zone.
     """
 
     week_starts_on: Weekday
@@ -136,6 +168,69 @@ class CalendarContext:
                 f"got {type(self.week_starts_on).__name__}"
             )
         _require_utc(self.now, "CalendarContext.now")
+
+
+@dataclass(frozen=True)
+class LocalFrame:
+    """This booking's local calendar, already resolved into UTC instants and plain integers.
+
+    The engine has no timezone and the caller does. So the caller — the adapter, which is the only
+    thing in the system that knows the venue's zone — answers every local question *before* the
+    rule is called, and hands the answers over as absolute instants and numbers. A rule asking "is
+    this a weekend booking", "how many bookings does this user already have in this week", "does
+    this start before 9am" reads them from here and converts nothing.
+
+    Every bound is resolved from **local midnight** and nothing else, so a day, a week and a month
+    all begin when the *venue's* day begins rather than at UTC midnight. Each is a half-open
+    ``[start, end)`` pair of two absolute instants: unlike ``AvailabilityHoursRule``'s deliberately
+    invertible clock times, these describe no recurring window and have no wrap to represent, so an
+    inverted pair is a caller bug and is rejected here.
+
+    ``start_minutes`` and ``end_minutes`` are minutes from local midnight, derived from the instants
+    rather than from any wall clock — which is what keeps them right on the two days a year a local
+    day is 23 or 25 hours long. **``end_minutes`` may exceed 1440 and must never be capped**: that
+    is a booking running past local midnight, and being able to say so is the point.
+
+    There is no timezone field and no offset field. Not as a convenience, not "for debugging" — the
+    absence is the invariant, and a rule holding a zone is a rule that can convert with it.
+    """
+
+    day_start: datetime
+    day_end: datetime
+    week_start: datetime
+    week_end: datetime
+    month_start: datetime
+    month_end: datetime
+    weekday: int
+    start_minutes: int
+    end_minutes: int
+
+    def __post_init__(self) -> None:
+        for label in ("day", "week", "month"):
+            _validate_bounds(
+                getattr(self, f"{label}_start"),
+                getattr(self, f"{label}_end"),
+                f"LocalFrame.{label}",
+            )
+
+        if isinstance(self.weekday, bool) or not isinstance(self.weekday, int):
+            raise TypeError(f"LocalFrame.weekday must be an int, got {type(self.weekday).__name__}")
+        if self.weekday not in range(7):
+            raise ValueError(
+                f"LocalFrame.weekday must be in range(7), 0 = Monday; got {self.weekday}"
+            )
+
+        start = _require_int(self.start_minutes, "LocalFrame.start_minutes")
+        end = _require_int(self.end_minutes, "LocalFrame.end_minutes")
+        if start < 0:
+            raise ValueError(
+                f"LocalFrame.start_minutes must be non-negative; got {start}. A booking before "
+                "local midnight belongs to the previous local day, which is a different frame."
+            )
+        if end <= start:
+            raise ValueError(
+                f"LocalFrame.end_minutes must be strictly after start_minutes; got {end} <= {start}"
+            )
 
 
 @dataclass(frozen=True)
@@ -196,6 +291,10 @@ class Context:
 
     Aggregating rather than passing four positional parameters is what lets a later task add a new
     kind of context without breaking the ``evaluate`` signature of every rule ever written.
+    ``local`` is the first time that promise is spent, and it is spent as a **required field with
+    no default**: the only frame a default could name is the UTC one, and a rule reading that is
+    silently wrong for every venue not on UTC — precisely the bug ``LocalFrame`` exists to remove,
+    reintroduced as a convenience. Every caller resolves a real frame or does not build a context.
 
     The history window invariant is enforced here rather than on ``HistoryContext`` because it is
     the only place both the history and ``now`` are visible. A rule must not be able to silently
@@ -204,6 +303,7 @@ class Context:
 
     user: UserContext
     calendar: CalendarContext
+    local: LocalFrame
     history: HistoryContext = field(default_factory=HistoryContext)
 
     def __post_init__(self) -> None:
@@ -213,6 +313,8 @@ class Context:
             raise TypeError(
                 f"Context.calendar must be a CalendarContext, got {type(self.calendar).__name__}"
             )
+        if not isinstance(self.local, LocalFrame):
+            raise TypeError(f"Context.local must be a LocalFrame, got {type(self.local).__name__}")
         if not isinstance(self.history, HistoryContext):
             raise TypeError(
                 f"Context.history must be a HistoryContext, got {type(self.history).__name__}"

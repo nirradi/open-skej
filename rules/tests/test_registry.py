@@ -43,6 +43,7 @@ from rules.interfaces import (
     Weekday,
 )
 from rules.registry import REGISTRY, ParamKind, rule_types
+from tests.frames import utc_frame
 
 USER = "u1"
 RESOURCE = "court-1"
@@ -60,6 +61,7 @@ def context(*bookings: BookingRecord, now: datetime = NOW) -> Context:
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
+        local=utc_frame(now),
         history=HistoryContext(bookings=bookings),
     )
 

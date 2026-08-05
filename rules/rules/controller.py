@@ -3,7 +3,9 @@
 ``evaluate_request`` is the single entry point the backend calls. It has three jobs, in order:
 
 1. **Cross-check the request against the context.** ``Context`` cannot do this itself — the request
-   is not visible when a context is built — so this is the first place both are in scope.
+   is not visible when a context is built — so this is the first place both are in scope. Two
+   things are checked: that the history belongs to the requesting user, and that
+   ``context.local`` was resolved for the day the request actually starts in.
 2. **Run the canon in order, fail-fast.** The first rule that denies wins and nothing after it runs.
 3. **Contain a buggy rule.** A rule that raises becomes a denial with generic copy, logged with the
    real exception. A bug in one rule must never 500 the booking endpoint, and must never leak a
@@ -51,6 +53,13 @@ def _check_context_matches_request(request: BookingRequest, context: Context) ->
     this user's limits, which is exactly what ``ContextMismatchError`` exists to catch instead of
     hiding it.
 
+    ``context.local`` is checked the same way and for the same reason. A frame resolved for the
+    wrong date is a frame whose day, week and month bounds all describe a different stretch of the
+    calendar than the booking sits in, so a rule counting "bookings in this local day" would quietly
+    count another day's. Only ``start_at`` is required to land inside ``[day_start, day_end)``:
+    ``end_at`` may legitimately fall past the local day, which is exactly what an ``end_minutes``
+    above 1440 means.
+
     A future ``Context`` may carry the Space itself, so a rule can decide its own scope rather than
     relying on how the caller pre-filtered history; that is not this check's job today.
     """
@@ -58,6 +67,14 @@ def _check_context_matches_request(request: BookingRequest, context: Context) ->
         raise ContextMismatchError(
             f"Context is for user {context.user.user_id!r} but the request is from "
             f"{request.user_id!r}. The caller built the context for the wrong user."
+        )
+
+    local = context.local
+    if not local.day_start <= request.start_at < local.day_end:
+        raise ContextMismatchError(
+            f"Context.local describes the local day [{local.day_start}, {local.day_end}), but the "
+            f"request starts at {request.start_at}. The caller resolved the frame for the wrong "
+            "date, so every local bound in it belongs to another day."
         )
 
     for index, booking in enumerate(context.history.bookings):
