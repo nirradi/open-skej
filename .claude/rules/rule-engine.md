@@ -340,11 +340,13 @@ The separation is what makes "nothing generated is imported by the app" a proper
 rather than a promise.
 
 **The model is called through an `LLMClient` seam** — one method, `complete(system, prompt, model)` —
-not an SDK directly. Two implementations ship. `ClaudeCliClient` shells out to
+not an SDK directly. Three implementations ship. `ClaudeCliClient` shells out to
 `claude -p --output-format json` and so needs no API key, only an authenticated CLI: an acceptable
 dependency for a developer tool whose output is a file a human reviews, and one the booking API never
 carries. `OllamaClient` calls a model served by a local Ollama daemon over its HTTP API, so it needs
-neither a key nor a cloud account.
+neither a key nor a cloud account. `GoogleAIStudioClient` calls a hosted Gemini model over AI
+Studio's REST API, and is the only one of the three that is both measurable and backed by a frontier
+model.
 
 **The CLI cannot serve the benchmark, which is why the seam exists.** A call whose real prompt is 10
 input / 40 output tokens is billed for ~11.5k tokens of harness preamble at $0.015–0.023, and
@@ -367,6 +369,51 @@ a number this backend has no way to know, and the metadata fields are optional e
 can say so. A model that is not pulled comes back as Ollama's own 404 and is surfaced as an
 `LLMCallError` naming the `ollama pull` that fixes it, never as a generic HTTP failure — the same
 lesson as `is_error` below, that a transport failure passed on as a completion is blamed on the model.
+
+**`GoogleAIStudioClient` posts to `{base_url}/v1beta/models/{model}:generateContent` and carries
+its key in the `x-goog-api-key` header, never a query string.** A URL is what every proxy and
+exception handler in the path logs, and this one is a credential — keeping it out of the URL is what
+lets the client's own failure messages name the URL freely. The key is read from
+`GOOGLE_STUDIO_API_KEY` in the environment, falling back to a `KEY=value` line in `rules/.env`, which
+is gitignored and stays that way: a hosted model needs a credential, and the one place it must never
+reach is the repository. Environment wins over the file, so a shell export beats a stale value left
+sitting in it. Reading it costs no dependency — a ten-line parser rather than `python-dotenv`, for
+the same reason the transport is `urllib.request`: `rules` declares zero runtime dependencies and the
+backend installs it editable, so anything added here is a cost the booking API pays forever. The
+system prompt goes in `systemInstruction` and is never folded into the user turn, the identical
+reasoning `OllamaClient` gives for `/api/chat` over `/api/generate`.
+
+**AI Studio accepts a `seed` in `generationConfig` and does not honour it, so the client does not
+send one.** Unknown keys there are rejected with a 400, so acceptance would ordinarily mean
+something — but two live calls with an identical seed and temperature returned different
+completions. `temperature` *is* applied and is sent. A benchmark run against this client therefore
+records its temperature and records `seed` as unset, which is `BenchmarkReport`'s existing rule that
+two reports agreeing on a sampling parameter neither applied are worse than two that say nothing
+about it. Establishing this took live calls rather than a reading of the docs, and that is the point:
+a client that sent a seed on the strength of the field existing would make every run it reported look
+reproducible.
+
+**What it can report and what it cannot.** `input_tokens` is `promptTokenCount`. `output_tokens` is
+`candidatesTokenCount` **plus** `thoughtsTokenCount` where a thinking model reports one — a measured
+call answered with 6 candidate tokens against 651 thinking tokens, so counting only the visible
+answer would understate what the prompt cost by two orders of magnitude, and comparing that number
+across models is the whole reason it is collected. The split stays recoverable in `LLMResponse.raw`.
+`cost_usd` stays `None`, as it does for Ollama: a hardcoded price table goes stale silently and is
+then reported as fact. `duration_ms` stays `None` because the API does not report one, and a number
+invented here would be indistinguishable from a measured one.
+
+**Every failure raises `LLMCallError` naming its cause, and three of them are not the obvious
+status.** An invalid key comes back as **400 with `API_KEY_INVALID`**, not 401 — a 400 of that shape
+names the key and `GOOGLE_STUDIO_API_KEY`, and any other 400 stays generic, because blaming the key
+for a malformed body sends a developer to the wrong place entirely. A **429** names rate limiting
+explicitly, so a five-example run that dies halfway through the free tier's per-minute limit is read
+as one rate limit rather than five model failures; the client deliberately does **not** retry, since
+the generation loop never retries an `LLMCallError` and a silent retry here would hide the limit
+instead of reporting it. A **404** names the model id and the `GET /v1beta/models` that lists what the
+key can reach. A blocked prompt, an empty candidate list, and a candidate that finished on `SAFETY`
+or `MAX_TOKENS` with no text all raise rather than returning an empty completion — `MAX_TOKENS`
+especially, since a rule is a few dozen lines and hitting the cap is a configuration fact, not a
+model that answered badly.
 
 **A failed CLI call is identified by `is_error` and the exit code, never by `subtype`.** A run that
 404s on an unknown model id exits 1 and reports `is_error: true` while still reporting
@@ -429,8 +476,9 @@ assumption, and the numbers say stay on Opus.**
 Opus is the default deliberately: a subtly wrong rule silently mis-enforces real bookings, and every
 Tester retry costs a full generate-plus-test cycle, so the cheaper model is not obviously cheaper end
 to end. `benchmark.py` compares models on the golden examples, and what it can compare is bounded by
-which clients exist: `OllamaClient` serves it, `ClaudeCliClient` cannot (the harness preamble above),
-and no SDK-backed client ships — so a local model is what the numbers describe.
+which clients exist: `OllamaClient` and `GoogleAIStudioClient` serve it, `ClaudeCliClient` cannot
+(the harness preamble above), and no Anthropic-API-backed client ships — so the numbers describe a
+local model or a hosted Gemini one, and never the model this loop actually defaults to.
 
 **No local model tested holds the contract.** `qwen2.5:1.5b`, `qwen2.5:7b` and `llama3.1:8b`, run
 against all five golden examples with three retries each (fifteen runs, `--seed 0 --temperature 0`),
@@ -459,8 +507,8 @@ and flip the default — the instruction to settle it with evidence rather than 
 `rules/benchmark.py` is a CLI feeding five golden examples ("max 1 hour", "only on weekends", "max 2
 times a week", …) through the generation loop and reporting what happened, as JSON and as a terminal
 summary. It exists to tune the system prompts before any of this is wired to the web UI — prompt
-changes are judged by its numbers, not by inspection. `--client ollama|claude-cli` and a repeatable
-`--model` are what let one invocation compare backends and models side by side.
+changes are judged by its numbers, not by inspection. `--client ollama|google|claude-cli` and a
+repeatable `--model` are what let one invocation compare backends and models side by side.
 
 It sits at the top level of `rules/`, outside both packages, and `pyproject.toml` distributes only
 `rules` — so a benchmark is no more importable by the booking API than `generation` is.

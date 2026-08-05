@@ -31,15 +31,27 @@ benchmark this package exists to feed possible without cloud spend or an API key
 ``POST /api/chat`` rather than ``/api/generate`` because chat carries the system prompt as its own
 message, and this package's system prompt is long and constraint-dense — the very thing under test.
 Folding it into the user turn for ``/api/generate`` would benchmark a prompt nobody ships.
+
+**``GoogleAIStudioClient`` calls a hosted Gemini model over AI Studio's REST API** — the first
+implementation here that is both measurable (unlike the CLI) and backed by a frontier model
+(unlike anything Ollama has been shown to serve; see ``rule-engine.md``, "No local model tested
+holds the contract"). It follows ``OllamaClient``'s three-part split (a pure ``build_*_request``, a
+pure ``interpret_*_result``, one socket-touching function) for the identical reason: testable
+without a network. The system prompt goes in ``systemInstruction``, never folded into the user
+turn, for the same reason ``/api/chat`` is used over ``/api/generate`` above. Its API key travels
+in the ``x-goog-api-key`` header and never the URL, because a URL is what every proxy and
+exception handler in the path logs and this one is a credential.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from .errors import LLMCallError
@@ -53,11 +65,18 @@ __all__ = [
     "OllamaClient",
     "build_chat_request",
     "interpret_ollama_result",
+    "GoogleAIStudioClient",
+    "build_generate_content_request",
+    "interpret_google_result",
+    "read_google_api_key",
     "DEFAULT_MODEL",
     "DEFAULT_CLI_EXECUTABLE",
     "DEFAULT_CLI_TIMEOUT_SECONDS",
     "DEFAULT_OLLAMA_BASE_URL",
     "DEFAULT_OLLAMA_TIMEOUT_SECONDS",
+    "DEFAULT_GOOGLE_BASE_URL",
+    "DEFAULT_GOOGLE_TIMEOUT_SECONDS",
+    "GOOGLE_API_KEY_ENV_VAR",
 ]
 
 #: The model every agent in this package uses unless told otherwise. Opus is the default
@@ -78,6 +97,25 @@ DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 #: Wall clock for one chat call. A 1.5B model on CPU against this package's system prompt is not a
 #: fast completion — generous is the safe side to be wrong on.
 DEFAULT_OLLAMA_TIMEOUT_SECONDS = 600.0
+
+#: Google's own hosted endpoint. Unlike Ollama there is no daemon to point at a different address,
+#: so this is not a per-deployment setting, only a constructor default.
+DEFAULT_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com"
+
+#: Wall clock for one ``generateContent`` call. A Gemini 3 model can spend hundreds of tokens
+#: thinking before it answers anything — measured live at 651 ``thoughtsTokenCount`` for a 6-token
+#: visible answer — so this is generous for the same reason ``DEFAULT_OLLAMA_TIMEOUT_SECONDS`` is.
+DEFAULT_GOOGLE_TIMEOUT_SECONDS = 120.0
+
+#: The environment variable, and the ``rules/.env`` key, this client's credential is read from.
+#: Named once so every message below that has to name it — a missing key, an invalid one — says
+#: the same thing.
+GOOGLE_API_KEY_ENV_VAR = "GOOGLE_STUDIO_API_KEY"
+
+#: ``rules/.env`` itself, resolved from this file's own location rather than the process's current
+#: directory. ``benchmark.py`` is documented to be run from ``rules/``, but nothing enforces that,
+#: and a bare relative path would silently miss the file from anywhere else.
+_DEFAULT_GOOGLE_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 @dataclass(frozen=True)
@@ -463,3 +501,394 @@ def _send_chat_request(
         raise LLMCallError(
             f"Ollama's daemon is not answering at {base_url!r}. Is `ollama serve` running?"
         ) from exc
+
+
+class GoogleAIStudioClient:
+    """Calls a Gemini model through Google AI Studio's REST API, over ``urllib.request``.
+
+    The first ``LLMClient`` here that is both measurable and backed by a frontier model:
+    ``ClaudeCliClient`` cannot serve a benchmark at all (module docstring), and no model
+    ``OllamaClient`` was benchmarked against holds the rule contract (``rule-engine.md``). This one
+    is neither confined to a laptop CPU's local model selection nor opaque to token accounting.
+
+    The system prompt goes in ``systemInstruction`` and is never folded into the user turn — the
+    same reasoning ``OllamaClient`` gives for ``/api/chat`` over ``/api/generate``: this package's
+    system prompt is long, constraint-dense, and exactly the thing under test.
+
+    The API key travels in the ``x-goog-api-key`` header and never in the URL or a query string.
+    A URL is what every proxy and exception handler in the path logs, and this one is a credential
+    — keeping it out of the URL is what lets every error message below safely include the URL.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = DEFAULT_GOOGLE_BASE_URL,
+        api_key: str | None = None,
+        timeout_seconds: float = DEFAULT_GOOGLE_TIMEOUT_SECONDS,
+        temperature: float | None = None,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds!r}")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+        self.temperature = temperature
+
+    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+        if not self.api_key:
+            raise LLMCallError(
+                f"No Google AI Studio API key configured. Set {GOOGLE_API_KEY_ENV_VAR} in the "
+                "environment, or as a KEY=value line in rules/.env (gitignored)."
+            )
+        url, body = build_generate_content_request(
+            self.base_url,
+            system=system,
+            prompt=prompt,
+            model=model,
+            temperature=self.temperature,
+        )
+        status, response_body = _send_generate_content_request(
+            url,
+            body,
+            api_key=self.api_key,
+            timeout_seconds=self.timeout_seconds,
+            base_url=self.base_url,
+        )
+        return interpret_google_result(
+            status=status, body=response_body, model=model, base_url=self.base_url
+        )
+
+
+def build_generate_content_request(
+    base_url: str,
+    *,
+    system: str,
+    prompt: str,
+    model: str,
+    temperature: float | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """The exact URL and decoded request body for one ``generateContent`` call.
+
+    Split out from ``complete`` for the same reason ``build_chat_request`` is: the one part of
+    this client whose correctness is a matter of shape, and a test that had to hit the live
+    endpoint to check it would be a test that spends money.
+
+    ``seed`` is deliberately never sent, in this function or anywhere else in this client.
+    ``generationConfig`` rejects an unknown key with a 400 ("Unknown name ... Cannot find field"),
+    so acceptance of a ``seed`` field would be meaningful — but two calls made against the live API
+    with an identical ``seed`` and ``temperature: 1.0`` returned different completions, and a third
+    call with a different seed returned a third completion. The field is accepted and not honoured.
+    Sending it anyway would leave ``benchmark.py`` no honest answer for whether to record a value
+    it cannot confirm was applied; not sending it is what lets the benchmark record ``seed`` as
+    unset for this client rather than claim a value it did not apply. Do not re-add it on the
+    strength of the field existing in the schema — this was checked against the live API, not
+    assumed from the docs.
+    """
+    body: dict[str, Any] = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+    }
+    if temperature is not None:
+        body["generationConfig"] = {"temperature": temperature}
+    return f"{base_url}/v1beta/models/{model}:generateContent", body
+
+
+def interpret_google_result(*, status: int, body: str, model: str, base_url: str) -> LLMResponse:
+    """Turn one finished ``generateContent`` response into an ``LLMResponse``, or raise
+    ``LLMCallError``.
+
+    Keyed on HTTP status first, the same discipline ``interpret_ollama_result`` follows — with one
+    wrinkle Google's API has and Ollama's does not: **an invalid key comes back as HTTP 400**
+    (``"API key not valid. Please pass a valid API key."``, ``status: INVALID_ARGUMENT``, a
+    ``details[].reason`` of ``API_KEY_INVALID``), not 401, confirmed against the live API rather
+    than assumed. A 400 of that specific shape is reported as a credential failure; any other 400
+    stays a generic failure, because blaming the key for an unrelated malformed request would send
+    a developer down the wrong path.
+
+    A blocked prompt, an empty candidate list, and a candidate that finished without producing text
+    (``SAFETY``, ``RECITATION``, ``MAX_TOKENS``, or genuinely empty) are all raised from here too,
+    never returned as an ``LLMResponse`` with empty ``text`` — the same lesson
+    ``interpret_cli_result`` documents: a transport or backend failure passed on as a completion
+    gets blamed on the model, several layers later, as a syntax error.
+    """
+    if status in (401, 403):
+        raise LLMCallError(
+            f"Google AI Studio rejected the API key (HTTP {status}). {GOOGLE_API_KEY_ENV_VAR} is "
+            "missing, wrong, or not enabled for the Generative Language API. "
+            f"Server said: {_excerpt(body) or '<no detail>'}",
+            exit_code=status,
+            stderr=body,
+        )
+    if status == 400 and _is_api_key_invalid(body):
+        raise LLMCallError(
+            "Google AI Studio rejected the API key (HTTP 400, API_KEY_INVALID). "
+            f"{GOOGLE_API_KEY_ENV_VAR} is missing, wrong, or not enabled for the Generative "
+            f"Language API. Server said: {_excerpt(body) or '<no detail>'}",
+            exit_code=400,
+            stderr=body,
+        )
+    if status == 404:
+        raise LLMCallError(
+            f"Google AI Studio has no model {model!r} (404 from {base_url}). "
+            f"GET {base_url}/v1beta/models lists what this key can reach. "
+            f"Server said: {_excerpt(body) or '<no detail>'}",
+            exit_code=404,
+            stderr=body,
+        )
+    if status == 429:
+        raise LLMCallError(
+            "Google AI Studio rate-limited this call (HTTP 429). AI Studio's free tier enforces "
+            "real per-minute request limits, so a benchmark run that dies here partway through is "
+            "one rate limit, not five separate model failures. This client does not retry: the "
+            "generation loop deliberately never retries an LLMCallError, and a silent retry here "
+            f"would hide the limit instead of reporting it. Server said: "
+            f"{_excerpt(body) or '<no detail>'}",
+            exit_code=429,
+            stderr=body,
+        )
+    if status != 200:
+        raise LLMCallError(
+            f"Google AI Studio returned HTTP {status} from {base_url}: "
+            f"{_excerpt(body) or '<no detail>'}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    payload = _parse_google_payload(body, status=status)
+
+    block_reason = _get(payload, "promptFeedback", "blockReason")
+    if block_reason:
+        raise LLMCallError(
+            f"Google AI Studio blocked this prompt (blockReason={block_reason!r}, "
+            f"status {status}): {_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise LLMCallError(
+            f"Google AI Studio returned no candidates (status {status}): {_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    candidate = candidates[0]
+    finish_reason = candidate.get("finishReason") if isinstance(candidate, Mapping) else None
+    text = _join_google_text_parts(candidate) if isinstance(candidate, Mapping) else ""
+
+    if not text and finish_reason == "MAX_TOKENS":
+        raise LLMCallError(
+            "Google AI Studio hit MAX_TOKENS with no text produced. A generated rule is a few "
+            "dozen lines, so hitting the output token limit is a configuration fact worth naming "
+            f"rather than an empty completion left to be rejected later as bad rule source. "
+            f"{_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+    if not text and finish_reason not in (None, "STOP"):
+        raise LLMCallError(
+            f"Google AI Studio's candidate finished with reason {finish_reason!r} and no text "
+            f"(status {status}): {_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+    if not text:
+        raise LLMCallError(
+            f"Google AI Studio returned an empty completion (status {status}): {_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+
+    usage = payload.get("usageMetadata")
+    usage = usage if isinstance(usage, Mapping) else {}
+    candidates_tokens = _as_int(usage.get("candidatesTokenCount"))
+    thoughts_tokens = _as_int(usage.get("thoughtsTokenCount"))
+    # Deliberately not the ticket's simpler candidatesTokenCount -> output_tokens: on a thinking
+    # model that field counts only the visible answer. A measured gemini-3.5-flash call reported 6
+    # against a thoughtsTokenCount of 651 — the simple mapping would understate what the prompt
+    # actually cost by two orders of magnitude, and this number exists to be compared across
+    # models. The split stays recoverable in `raw` either way.
+    if thoughts_tokens is not None:
+        output_tokens = (candidates_tokens or 0) + thoughts_tokens
+    else:
+        output_tokens = candidates_tokens
+
+    return LLMResponse(
+        text=text,
+        model=model,
+        input_tokens=_as_int(usage.get("promptTokenCount")),
+        output_tokens=output_tokens,
+        # A hardcoded price table goes stale silently and is then reported as fact — the same
+        # argument that keeps OllamaClient's cost None.
+        cost_usd=None,
+        # The API does not report call duration; inventing one here would be a number the caller
+        # cannot tell apart from a measured one.
+        duration_ms=None,
+        raw=payload,
+    )
+
+
+def _is_api_key_invalid(body: str) -> bool:
+    """True only for Google's specific 400 shape for a bad key, confirmed against a live call:
+
+    ``{"error": {"status": "INVALID_ARGUMENT", "details": [{"reason": "API_KEY_INVALID", ...}],
+    "message": "API key not valid. Please pass a valid API key."}}``.
+
+    Checks ``details[].reason`` first and falls back to the message text, since ``details`` is
+    not documented as guaranteed present on every response shape this endpoint might return.
+    """
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, Mapping):
+        return False
+    for detail in error.get("details") or []:
+        if isinstance(detail, Mapping) and detail.get("reason") == "API_KEY_INVALID":
+            return True
+    message = error.get("message")
+    return isinstance(message, str) and "API key not valid" in message
+
+
+def _get(payload: Mapping[str, Any], *keys: str) -> Any:
+    """Walk nested ``Mapping`` lookups, returning ``None`` the moment one is missing or not a
+    ``Mapping`` rather than raising — Google's error/feedback shapes are not guaranteed present."""
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, Mapping):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _join_google_text_parts(candidate: Mapping[str, Any]) -> str:
+    """Join the ``text`` of every part that is not a thought part.
+
+    ``finishReason: MAX_TOKENS`` comes back with ``content`` as an empty object — no ``parts`` key
+    at all, confirmed against the live API — so "no parts to join" is a real, reachable state
+    handled here rather than defended against speculatively. A Gemini 3 model's thinking parts
+    carry ``thought: true`` (and/or a ``thoughtSignature``) and no usable answer text; skipping
+    them is what keeps a thinking model's completion from being polluted by its own scratch work.
+    """
+    content = candidate.get("content")
+    if not isinstance(content, Mapping):
+        return ""
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    texts = []
+    for part in parts:
+        if not isinstance(part, Mapping) or part.get("thought"):
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            texts.append(text)
+    return "".join(texts)
+
+
+def _parse_google_payload(body: str, *, status: int) -> Mapping[str, Any]:
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise LLMCallError(
+            f"Google AI Studio did not return JSON (status {status}): "
+            f"{_excerpt(body) or '<empty>'}",
+            exit_code=status,
+            stderr=body,
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise LLMCallError(
+            f"Google AI Studio returned JSON that is not an object (status {status}): "
+            f"{_excerpt(body)}",
+            exit_code=status,
+            stderr=body,
+        )
+    return payload
+
+
+def _send_generate_content_request(
+    url: str,
+    body: Mapping[str, Any],
+    *,
+    api_key: str,
+    timeout_seconds: float,
+    base_url: str,
+) -> tuple[int, str]:
+    """The one function in this client that touches a socket. Everything else is pure.
+
+    The key is set as the ``x-goog-api-key`` header and appears nowhere else — not in the URL, not
+    in a query string — which is what lets every message here and in ``interpret_google_result``
+    safely include the URL: it never carried a credential in the first place, so there is nothing
+    for a proxy log or an exception handler to leak.
+
+    Returns ``(status, response_text)`` for anything Google actually answered, including an error
+    — ``interpret_google_result`` is what turns a 400/404/429 body into the right message. Only a
+    request the server never got to answer at all — refused, or too slow — raises from here
+    directly, because there is no status/body pair to hand back for either.
+    """
+    data = json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8")
+    except TimeoutError as exc:
+        raise LLMCallError(
+            f"Google AI Studio did not answer within {timeout_seconds:g}s ({base_url})."
+        ) from exc
+    except urllib.error.URLError as exc:
+        # A connect timeout surfaces as a URLError wrapping a TimeoutError, not as a bare
+        # TimeoutError — the same non-obvious behaviour _send_chat_request documents, confirmed
+        # against a real socket rather than assumed — so the timeout message above would never
+        # fire without unwrapping `.reason` here too.
+        if isinstance(exc.reason, TimeoutError):
+            raise LLMCallError(
+                f"Google AI Studio did not answer within {timeout_seconds:g}s ({base_url})."
+            ) from exc
+        raise LLMCallError(f"Google AI Studio is not answering at {base_url!r}.") from exc
+
+
+def read_google_api_key(env_path: Path | str = _DEFAULT_GOOGLE_ENV_PATH) -> str | None:
+    """The API key: environment first, then ``rules/.env``, ``None`` if neither has it.
+
+    No ``python-dotenv``. ``rules`` and ``generation`` declare zero runtime dependencies
+    deliberately — the backend installs this package editable, so a dependency added here is a
+    cost the booking API pays forever for what is otherwise a ten-line parser. Blank lines and
+    ``#`` comments are skipped, and one matching pair of quotes around the value is stripped, the
+    way a shell would strip them.
+
+    Precedence is environment over file so a CI secret or a developer's own shell export always
+    wins over a stale value left sitting in the file.
+    """
+    value = os.environ.get(GOOGLE_API_KEY_ENV_VAR)
+    if value:
+        return value
+
+    path = Path(env_path)
+    if not path.exists():
+        return None
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, raw_value = line.partition("=")
+        if key.strip() != GOOGLE_API_KEY_ENV_VAR:
+            continue
+        found = raw_value.strip()
+        if len(found) >= 2 and found[0] == found[-1] and found[0] in "\"'":
+            found = found[1:-1]
+        return found or None
+
+    return None
