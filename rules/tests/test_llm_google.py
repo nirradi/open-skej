@@ -566,6 +566,27 @@ def test_send_generate_content_request_raises_on_a_timeout_wrapped_in_urlerror(m
     assert "did not answer within" in excinfo.value.detail
 
 
+def test_send_generate_content_request_raises_on_a_connection_reset(monkeypatch):
+    # A reset by the far end *after* the request was sent comes out of http.client while the
+    # response is being read, as a bare ConnectionResetError that urlopen never wraps in a
+    # URLError. Observed against the live API during a benchmark run, where it escaped this module
+    # and aborted the whole run with a traceback rather than one recorded CALL_ERROR the
+    # checkpoint could resume past.
+    def fake_urlopen(request, timeout):
+        raise ConnectionResetError(54, "Connection reset by peer")
+
+    monkeypatch.setattr(llm_module.urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(LLMCallError) as excinfo:
+        llm_module._send_generate_content_request(
+            "https://generativelanguage.googleapis.com/v1beta/models/m:generateContent",
+            {},
+            api_key="k",
+            timeout_seconds=5,
+            base_url="https://generativelanguage.googleapis.com",
+        )
+    assert "failed mid-request" in excinfo.value.detail
+
+
 class _FakeErrorBody:
     """The ``fp`` an ``HTTPError`` reads its body from — just enough of a file object for it."""
 

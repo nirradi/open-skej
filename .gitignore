@@ -13,10 +13,13 @@ ops
 # in here is imported by the engine or the app. Adopting one means porting it into rules/rules/.
 rules/generated/
 
-# benchmark.py run state: --checkpoint/--output JSON and hand-redirected logs. Local run state for
-# a hand-invoked benchmark, not an artifact for review.
+# benchmark.py run state: --checkpoint/--output JSON, hand-redirected logs, and the hand-pacing
+# driver that feeds one example per invocation into a shared checkpoint to stay under a hosted free
+# tier's per-minute limit. Local run state for a hand-invoked benchmark, not an artifact for review —
+# the driver names absolute paths on one machine, which is what makes it run state rather than a tool.
 rules/.benchmark-*.json
 rules/.benchmark-*.log
+rules/.benchmark-*.py
 
 # Python
 venv/

@@ -501,6 +501,19 @@ def _send_chat_request(
         raise LLMCallError(
             f"Ollama's daemon is not answering at {base_url!r}. Is `ollama serve` running?"
         ) from exc
+    except OSError as exc:
+        # A connection dropped *after* the request was sent surfaces from `http.client` while
+        # reading the response — a bare `ConnectionResetError`, which `urlopen` does not wrap in a
+        # `URLError` and the branches above therefore all miss. Left uncaught it escapes this
+        # module entirely, which is the one thing this client promises never to do: a transport
+        # failure that is not an `LLMCallError` is not recorded as a `CALL_ERROR` by the caller,
+        # so a checkpointed benchmark run dies with a traceback and no row for the example it was
+        # on. `OSError` is deliberately the widest net and deliberately last, since `URLError`,
+        # `HTTPError` and `TimeoutError` are all `OSError` subclasses handled above on their own
+        # terms.
+        raise LLMCallError(
+            f"Ollama's connection to {base_url!r} failed mid-request: {exc}"
+        ) from exc
 
 
 class GoogleAIStudioClient:
@@ -857,6 +870,17 @@ def _send_generate_content_request(
                 f"Google AI Studio did not answer within {timeout_seconds:g}s ({base_url})."
             ) from exc
         raise LLMCallError(f"Google AI Studio is not answering at {base_url!r}.") from exc
+    except OSError as exc:
+        # Same net, same reasoning, as `_send_chat_request`'s: a connection reset by the far end
+        # while the response is being read is a bare `ConnectionResetError` that `urlopen` does not
+        # wrap, so none of the branches above see it. This one is not hypothetical — a hosted
+        # endpoint resets a long generateContent call often enough that a five-example benchmark
+        # run met it, and an uncaught one aborts that run with a traceback instead of a recorded
+        # `CALL_ERROR` the checkpoint can resume past. `OSError` last, for the subclass ordering
+        # reason given there.
+        raise LLMCallError(
+            f"Google AI Studio's connection to {base_url} failed mid-request: {exc}"
+        ) from exc
 
 
 def read_google_api_key(env_path: Path | str = _DEFAULT_GOOGLE_ENV_PATH) -> str | None:
