@@ -91,10 +91,12 @@ GOLDEN_EXAMPLES: tuple[str, ...] = (
 DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b"
 
 #: GA rather than a floating ``-latest`` alias — a benchmark whose model id can drift out from
-#: under it cannot compare one run against the next. A reasonable first thing to try against
-#: Google AI Studio, not a claim it holds the contract — that is what running this benchmark
-#: against it is for.
-DEFAULT_GOOGLE_MODEL = "gemini-3.5-flash"
+#: under it cannot compare one run against the next. Unlike the ollama default above, this one
+#: *is* a claim that the model holds the contract: it took all five golden examples on the first
+#: attempt, in ten calls and 26 seconds (``rule-engine.md``). It is also the tier the free key can
+#: actually finish a run on — the flagship ``gemini-3.x-flash`` models cap at 20 requests per day
+#: per model there, below what a five-example run costs when anything retries.
+DEFAULT_GOOGLE_MODEL = "gemini-3.1-flash-lite"
 
 
 class BenchmarkStatus(str, Enum):

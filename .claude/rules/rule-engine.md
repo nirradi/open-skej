@@ -467,23 +467,55 @@ predicted — and the only checks made are that the module parses and defines a 
 with that class's parameters, so a suite carried over from a previous attempt fails against a renamed
 class and reports it as the rule being wrong.
 
-**Model: `claude-opus-4-8` by default, model ID configurable — settled by the benchmark, not by
-assumption, and the numbers say stay on Opus.**
+**Model: `claude-opus-4-8` by default for the CLI client, `gemini-3.1-flash-lite` for the Google one
+— settled by the benchmark, not by assumption.**
 
 > Do **not** use `claude-3-haiku-20240307` — retired 2026-04-19, now returns 404. Its live successor
 > is `claude-haiku-4-5` ($1/$5 per MTok).
 
-Opus is the default deliberately: a subtly wrong rule silently mis-enforces real bookings, and every
-Tester retry costs a full generate-plus-test cycle, so the cheaper model is not obviously cheaper end
-to end. `benchmark.py` compares models on the golden examples, and what it can compare is bounded by
-which clients exist: `OllamaClient` and `GoogleAIStudioClient` serve it, `ClaudeCliClient` cannot
-(the harness preamble above), and no Anthropic-API-backed client ships — so the numbers describe a
-local model or a hosted Gemini one, and never the model this loop actually defaults to.
+Opus remains the CLI client's default deliberately: a subtly wrong rule silently mis-enforces real
+bookings, and every Tester retry costs a full generate-plus-test cycle, so the cheaper model is not
+obviously cheaper end to end. What `benchmark.py` can compare is bounded by which clients exist:
+`OllamaClient` and `GoogleAIStudioClient` serve it, `ClaudeCliClient` cannot (the harness preamble
+above), and no Anthropic-API-backed client ships — so the numbers below describe a local model or a
+hosted Gemini one, and Opus itself is still unmeasured.
+
+**A hosted Gemini model holds the contract, and the cheapest tier holds it best.** Against all five
+golden examples with three retries each, at `--temperature 0` (AI Studio honours no seed, so a run is
+not bit-reproducible and the report records `seed` as unset):
+
+| Model | Result | Cost of the run |
+|---|---|---|
+| `gemini-3.1-flash-lite` | **5/5, every example on the first attempt** | 10 calls, 16k in / 7.5k out, 26s |
+| `gemini-3.5-flash-lite` | **5/5**, two examples needing retries | 18 calls, 34k in / 20k out, 156s |
+
+`gemini-3.1-flash-lite` is therefore `DEFAULT_GOOGLE_MODEL`. Newer is not better here, and the
+flagship tier is not what settled it — see the quota paragraph below.
+
+**Every failure the first run recorded was the Tester's, not the rule's, and that is the finding.**
+Before the prompt fix this run produced, the same two models scored 3/5 and 1/3 — and not one of
+those failures was a rule whose logic was wrong. Every single one was `TypeError:
+CalendarContext.__init__() missing 1 required positional argument: 'week_starts_on'`, raised on the
+first line of the Tester's own module, so the whole suite failed before the candidate was called
+once and the attempt was recorded as `TESTS_FAILED`, which reads as "the rule is wrong". A second
+instance of the same defect had the Tester building a fail-closed probe from a `BookingRequest` with
+`start_at > end_at`, which the engine type rejects at construction — again the test dying on its own
+fixture. **The Tester's system prompt now states that every constructor argument it lists is required
+and has no default, and that a fail-closed probe must be input the engine types will actually
+build** — unusable *to the rule*, never malformed to the engine. Both models went to 5/5 on the
+re-run, which is how this was settled: by measuring the change, not by re-reading the prompt.
+
+The lesson generalises past those two sentences. A shape failure in the *Tester* is indistinguishable
+in the report from a logic failure in the *rule*, and it is the more likely of the two: the Tester's
+module is loaded as ordinary Python where nothing is a free name, while a rule module is loaded into
+a namespace prepared for it. Read `last_failure` before concluding anything about a model from a
+success count.
 
 **No local model tested holds the contract.** `qwen2.5:1.5b`, `qwen2.5:7b` and `llama3.1:8b`, run
 against all five golden examples with three retries each (fifteen runs, `--seed 0 --temperature 0`),
-gave up on every one — `0/5` for every model. The failure shapes differ by size and are worth keeping
-separate, per this section's own point that a success rate erases exactly the thing worth knowing:
+gave up on every one — `0/5` for every model. That measurement predates the Tester prompt fix above,
+so its `TESTS_FAILED` counts are an upper bound on those models' real logic failures rather than a
+clean reading; the shape failures are unaffected and stand as recorded:
 
 * `qwen2.5:1.5b` mostly never reaches a working candidate at all — `RULE_REJECTED` on an unsafe
   comprehension, and `TESTS_REJECTED` from Tester output that does not parse as Python (an unclosed
@@ -492,15 +524,30 @@ separate, per this section's own point that a success rate erases exactly the th
   producing a bare `NameError: name 'BaseRule' is not defined` — the free-name promise this package's
   prelude keeps for a *rule* module does not extend to a test module that redefines the rule inline.
 * `qwen2.5:7b` and `llama3.1:8b` clear validation far more often — most attempts reach a real
-  `pytest` run against a loaded candidate — and lose there: `TESTS_FAILED` with genuine assertion
-  failures, meaning the rule's *logic* is wrong, not its shape. This is the harder failure to fix by
-  prompting alone, since the model produced code that runs and is confidently incorrect.
+  `pytest` run against a loaded candidate — and lose there, with `TESTS_FAILED` carrying genuine
+  assertion failures. Some share of those is now known to be the `week_starts_on` defect rather than
+  the rule's logic, and a re-run would say which.
 
-This is a negative result recorded as the deliverable it is, not a gap to fill later: Stream 7's
-premise of "wired to ollama mode" does not hold against any model benchmarked so far, and needs
-either a larger local model, a different prompting strategy, or replanning before it is built on top
-of this. If a future benchmark run against a different model changes this, rewrite this paragraph
-and flip the default — the instruction to settle it with evidence rather than assumption still holds.
+**A free AI Studio key cannot measure the flagship models, and that is a property of the key, not of
+the models.** The `gemini-3.x-pro` tier reports a free-tier input token quota of **0** and is not
+reachable at all. The `gemini-3.x-flash` tier reports **20 requests per day per model**, while a
+five-example run costs 10 calls at best and 40 at worst — so a run that retries anywhere exhausts the
+day's quota mid-run and records the rest as `CALL_ERROR` and `SKIPPED`. The `-flash-lite` tier is
+what a run can actually finish on, which is why both measured models come from it. A 503 naming
+"high demand" is routine there too and clears within minutes. None of this is worked around inside
+the client: `--checkpoint` and a hand-paced re-invocation are the mechanism, exactly as this
+document already says, and a client that retried a quota for you would hide the one fact worth
+knowing.
+
+**A thinking-heavy model can outlast the client's own default wall clock, and being cut off is not a
+result about the model.** `gemini-3-flash-preview` spent all 120 seconds of
+`GoogleAIStudioClient`'s default on a single generation and was recorded as an unreachable backend.
+`--timeout` therefore applies to whichever client `--client` selects rather than to ollama alone, and
+defaults to `None` meaning "leave that client's own default alone" — the two clients' defaults differ
+deliberately and neither is the other's.
+
+If a future benchmark run against a different model changes any of this, rewrite these paragraphs and
+flip the default — the instruction to settle it with evidence rather than assumption still holds.
 
 ## Benchmarking
 
@@ -555,3 +602,9 @@ silently mixing two runs that were not produced under comparable conditions — 
 
 Ollama is passed a fixed `seed` and `temperature` so two runs are comparable — a benchmark whose
 rerun differs for unrecorded reasons cannot settle the question it was built to settle.
+
+**`--timeout` bounds a call on whichever client `--client` selected**, and `--base-url` still does
+not: a base URL is a claim about where a *local daemon* lives, while every client here bounds a call
+with a wall clock and a hosted model's own default is not necessarily long enough for it (see the
+model paragraphs above). Unset means "leave that client's own default alone" rather than a number
+this CLI picks on all three clients' behalf.

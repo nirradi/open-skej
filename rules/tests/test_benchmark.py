@@ -335,9 +335,13 @@ def test_resolve_models_defaults_differ_by_client():
     assert len(cli_default) == 1
 
 
-def test_resolve_models_google_default_is_the_ga_model():
+def test_resolve_models_google_default_is_the_measured_model():
+    # Pinned to the id, not just to "whatever the constant says", because this one is a finding:
+    # the model that took all five golden examples on the first attempt. A default that drifts
+    # silently is a default nobody measured. Not a floating `-latest` alias either — a benchmark
+    # whose model id changes under it cannot compare one run against the next.
     assert resolve_models("google", None) == [benchmark.DEFAULT_GOOGLE_MODEL]
-    assert benchmark.DEFAULT_GOOGLE_MODEL == "gemini-3.5-flash"
+    assert benchmark.DEFAULT_GOOGLE_MODEL == "gemini-3.1-flash-lite"
 
 
 # --------------------------------------------------------------------------------------------
