@@ -1,21 +1,56 @@
+import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import AuthError
+from app.db.session import get_session_factory
 from app.identity.models import User
 from app.identity.router import router as spaces_router
 from app.identity.router import rule_types_router
+from app.rule_catalog import catalog
 from app.routers import resource_bookings
 from app.settings import get_settings
+
+logger = logging.getLogger(__name__)
 
 # The Vite dev server. Stream 2 owns the real deployed origins; until then this
 # is an explicit allowlist rather than "*" so credentialed requests keep working
 # unchanged once auth lands.
 DEV_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
-app = FastAPI(title="Open-Skej")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Load every generated rule type once, before this process serves its first request.
+
+    Without this, the catalog starts empty and only self-heals on a booking that misses
+    (``app.rule_catalog.RuleCatalog.lookup``) — correct, but it would mean this process's very
+    first booking against a generated type pays a database round trip that every one after it
+    would not have to. Loading here instead means the common case is warm from the first request.
+
+    Wrapped in its own ``try``/``except``: a backend that cannot reach the database at boot must
+    still start — every booking then fails closed through the path that already exists for an
+    unregistered ``rule_type`` (``app.rules_stub._UnbuildableRuleRowError``), which is a correct,
+    already-tested outcome, rather than a backend that never comes up at all because Postgres
+    happened to be slow to accept connections.
+    """
+    try:
+        session = get_session_factory()()
+        try:
+            catalog.reload(session)
+        finally:
+            session.close()
+    except Exception:
+        logger.exception("Could not load the rule catalog at startup; continuing without it.")
+    yield
+
+
+app = FastAPI(title="Open-Skej", lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,

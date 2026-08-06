@@ -34,11 +34,17 @@ app/backend/app/
   auth/          JWT verification (Auth0 JWKS, RS256) and the current-user dependency
   identity/      Users, Spaces, memberships, access requests, invitations, and each Space's own
                    rule configuration (`space_rules` rows, read and written through the
-                   `/spaces/{public_id}/rules` API)
+                   `/spaces/{public_id}/rules` API). Also `generated_rule_types` — the rule types
+                   the AI generation loop has authored, global rather than Space-scoped, stored as
+                   source plus compiled bytecode with the provenance of who created them
                    authz.py — require_space_role, the per-Space authorization dependency
                    router.py — also carries `rule_types_router` (`GET /rule-types`), the one route
                      here that is deliberately not Space-scoped: it describes the product's
                      registered rule types, not one tenant's configuration of them
+  rule_catalog.py  Every rule type this process knows: `rules.REGISTRY` plus the generated types
+                   *hoisted* out of `generated_rule_types`. Backend-owned precisely so `REGISTRY`
+                   is never written into, and the one place a stored rule is turned back into
+                   executable code — re-validated and run in a restricted namespace each time
   db/            Declarative Base, session, UtcDateTime, driver abstraction
   routers/       Booking endpoints. `resource_bookings.py` is Space-scoped and authenticated: a
                    booking is made against a Resource inside a Space the caller belongs to, resolved
@@ -103,8 +109,12 @@ decided at its Space and nowhere else, so the same oracle-free 404 covers a Reso
 yours.
 
 **Nothing is deleted.** Spaces archive (`archived_at`); access requests and invitations retain their
-decided rows as history. Consequently no foreign key carries `ON DELETE CASCADE` — there is no delete
-to cascade, and one added later would quietly destroy the audit trail.
+decided rows as history; a generated rule type retires (`status`). Consequently no foreign key
+carries `ON DELETE CASCADE` — there is no delete to cascade, and one added later would quietly
+destroy the audit trail. The one deliberate exception is a *rule instance*, which is really deleted,
+and the line between it and a retiring rule type is what anything else points at: nothing references
+an instance, while a `space_rules` row names its type by string id and would be left pointing at
+nothing.
 
 ## Domain documents
 

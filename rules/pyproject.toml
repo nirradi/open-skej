@@ -13,11 +13,16 @@ requires-python = ">=3.12"
 dependencies = []
 
 [tool.setuptools]
-# `rules` only. `generation` is the developer-facing AI loop and is deliberately left
-# out of the distribution: the booking API installs this package, so anything listed
-# here is importable in-process. "Nothing generated is imported by the app" stays a
-# property of the packaging, not a promise.
-packages = ["rules"]
+# `rules` AND `generation` — the backend's catalog (`app/backend/app/rule_catalog.py`) hoists
+# generated rule types at runtime, so `generation.harness.ENGINE_NAMES` has to be importable
+# in-process. "Nothing generated is imported by the app" is no longer a property of the
+# packaging; what replaces it is the AST validator (`rules.safety.validate_source`) run again
+# at every load, not just at write time, execution in a namespace whose builtins are
+# `rules.safety.SAFE_BUILTINS` rather than the real ones, the adversarial test suite passing in
+# the sandbox before a row is ever stored, and the controller's containment around every call a
+# hoisted rule makes thereafter. `generation` carries no dependencies of its own, so this does
+# not move the backend's dependency set.
+packages = ["rules", "generation"]
 
 [tool.black]
 line-length = 100
