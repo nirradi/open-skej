@@ -66,7 +66,9 @@ pycparser==3.0
 #
 # The path is relative to the working directory, and every caller runs pip from
 # `app/backend` — both CI jobs (`backend` and `e2e`) set `working-directory: app/backend`,
-# and a developer's venv lives there too. `rules/pyproject.toml` ships the `rules` package
-# only, so `generation` does not become importable here.
+# and a developer's venv lives there too. `rules/pyproject.toml` now ships `generation`
+# alongside `rules`, so it is importable here — `app.rule_catalog` reaches
+# `generation.harness.ENGINE_NAMES` to build the restricted namespace it hoists a generated
+# rule type into (`.claude/rules/rule-engine.md`).
 -e ../../rules
 # It carries no dependencies of its own; nothing above needs to move.

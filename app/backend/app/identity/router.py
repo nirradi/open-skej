@@ -22,7 +22,6 @@ from datetime import date, timedelta
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from rules import rule_types
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
@@ -50,6 +49,7 @@ from app.identity.schemas import (
     SpaceRuleUpdate,
     SpaceUpdate,
 )
+from app.rule_catalog import catalog
 from app.rules_stub import resolve_day_schedule
 
 router = APIRouter(prefix="/spaces", tags=["spaces"])
@@ -759,8 +759,16 @@ def get_space_schedule(
 
 @rule_types_router.get("", response_model=list[RuleTypeRead])
 def list_rule_types(user: CurrentUser) -> list[RuleTypeRead]:
-    """Every registered rule type (``rules.REGISTRY``), in the order an
-    assembled canon runs them — declared priority, not registration order.
+    """Every rule type this process knows — the seven hand-written types in
+    ``rules.REGISTRY`` plus every generated type ``app.rule_catalog.catalog``
+    has hoisted — in the order an assembled canon runs them: declared
+    priority, not registration order, with a generated type's shared
+    priority of 100 tie-broken alphabetically by id (task 7.6).
+
+    Served through ``catalog.all()`` rather than ``rules.rule_types()``
+    directly: with no rows yet in ``generated_rule_types`` the two agree
+    exactly, so this changed nothing about today's response, only about
+    what a later successful generation run adds to it.
 
     Authenticated (any signed-in user), but deliberately not Space-scoped:
     this describes what the product can configure at all, never one
@@ -769,4 +777,4 @@ def list_rule_types(user: CurrentUser) -> list[RuleTypeRead]:
     ``test_spaces_api.py``, which only walks routes under
     ``/spaces/{public_id}``.
     """
-    return [RuleTypeRead.build(rule_type) for rule_type in rule_types()]
+    return [RuleTypeRead.build(rule_type) for rule_type in catalog.all()]

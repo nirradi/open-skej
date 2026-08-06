@@ -22,7 +22,7 @@ router — the same split ``app.db.driver`` uses with ``OverlapError``.
 from datetime import datetime, time
 from typing import Optional, Sequence
 
-from rules import REGISTRY, ParamKind
+from rules import ParamKind
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -42,6 +42,7 @@ from app.identity.models import (
     User,
 )
 from app.identity.schemas import PreviewStatus, ResourceUpdate, SpaceRuleUpdate, SpaceUpdate
+from app.rule_catalog import catalog
 from app.rules_stub import SpaceRuleConfig, SpaceRuleRow
 
 # The name the auto-created first Resource is given. A fresh Space is a venue with
@@ -84,7 +85,9 @@ class InvalidOperatingHoursError(Exception):
 
 
 class UnknownRuleTypeError(Exception):
-    """A ``rule_type`` was submitted that names nothing in ``rules.REGISTRY``.
+    """A ``rule_type`` was submitted that ``app.rule_catalog.catalog`` does not know —
+    neither one of the seven hand-written types in ``rules.REGISTRY`` nor a
+    generated type this process has hoisted.
 
     Raised by ``POST``/``PATCH`` on ``/spaces/{public_id}/rules``, the only
     path that lets a caller name an arbitrary ``rule_type`` string directly.
@@ -408,6 +411,12 @@ def space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
     docstring — "it receives ``SpaceRuleConfig`` ... it does not query for
     either"), and this function's whole job is the query
     (``list_space_rules``) that ``rules_stub`` refuses to own.
+
+    ``lookup=catalog.lookup`` is passed explicitly rather than left at
+    ``SpaceRuleConfig``'s own ``REGISTRY.get`` default (task 7.6): this is
+    the caller building a config for a real booking, so it should see every
+    generated type this process has hoisted, not only the seven hand-written
+    ones.
     """
     return SpaceRuleConfig(
         timezone=space.timezone,
@@ -421,15 +430,23 @@ def space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
             )
             for row in list_space_rules(session, space)
         ),
+        lookup=catalog.lookup,
     )
 
 
 def _validate_rule_params(rule_type_id: str, params: dict) -> None:
-    """Validate ``params`` against ``REGISTRY[rule_type_id]``'s own schema —
+    """Validate ``params`` against ``catalog.lookup(rule_type_id)``'s own schema —
     the API-boundary counterpart of ``app.rules_stub``'s booking-time
     checks, run at write time so a bad row is refused with a 422 naming the
     problem rather than silently stored and only discovered as a denial (or
     a fail-closed 500-avoided-by-luck) the next time someone books.
+
+    Resolved through ``app.rule_catalog.catalog`` (task 7.6) rather than
+    ``rules.REGISTRY`` directly, so this write boundary and the booking-time
+    read boundary answer "what rule types exist" identically — a generated
+    type this process has hoisted is exactly as configurable here as one of
+    the seven hand-written ones, and an id neither knows behaves the same
+    way in both places too.
 
     Four checks, in order: an unregistered ``rule_type`` raises
     :class:`UnknownRuleTypeError`; everything else raises
@@ -450,7 +467,7 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
     "missing required" and the two type-specific checks below always see a
     complete picture.
     """
-    rule_type = REGISTRY.get(rule_type_id)
+    rule_type = catalog.lookup(rule_type_id)
     if rule_type is None:
         raise UnknownRuleTypeError(rule_type_id)
 

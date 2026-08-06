@@ -218,6 +218,37 @@ reference `resources.id` and `users.id`, and neither cascades — nothing here i
 cascade would destroy booking history the moment a Resource or user was removed. A Resource retires
 via `archived_at`, matching the Space's own end-state.
 
+## `generated_rule_types` is global, and it retires rather than deletes
+
+The rule types the AI generation loop has authored are rows in `generated_rule_types`, part of this
+production schema. A generated type is **not scoped to a Space**: it joins the catalog every Space
+can pick an instance from, exactly as the seven hand-written types in `rules.REGISTRY` do. Being
+available to a Space is not the same as being enforced on it — nothing is enforced until an admin
+adds a `space_rules` instance through the rules API above, and *that* act, not the generation, is the
+human gate.
+
+**Provenance is columns, not a comment.** `created_by_space_id` (**NOT NULL**), `created_by_user_id`,
+`created_at` and the author's original `prompt` are recorded because scoping generated types down to
+their creating Space later must be a migration over columns that already hold the answer rather than
+an archaeology exercise. NOT NULL is the load-bearing half: a nullable provenance column is empty for
+exactly the rows a later migration would need it for.
+
+**`rule_type` is unique and is never reused.** `space_rules.rule_type` stores this string, so handing
+the same id to a second rule would silently repoint every instance already naming the first one.
+
+**Retire, never delete — and this does not contradict the rules API's real `DELETE` above.** `status`
+(`active` | `retired`) is the whole removal mechanism. The distinction is what points at what: a rule
+*instance* is a configuration choice nobody references, so deleting its row strands nothing, while a
+rule *type* is named by string id from every `space_rules` row that uses it, and deleting it would
+turn each of those into a live reference to nothing. A retired type simply stops being hoisted, and
+an instance still naming it denies with the engine's generic copy through the fail-closed path an
+unregistered `rule_type` already takes (`rule-engine.md`) — refusing, never silently skipping the
+constraint the Space configured.
+
+The source, its `sha256`, the compiled `executable_bytecode`, the `python_version` and the
+`bytecode_magic` all live on the row; `rule-engine.md` owns why both version and magic are stored and
+what the load path re-proves before executing any of it.
+
 ## Spaces are not discoverable
 
 There is no endpoint listing Spaces. The only way to reach one you are not in is to be handed its

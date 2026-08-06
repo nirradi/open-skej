@@ -30,7 +30,16 @@ import app.identity  # noqa: F401
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ``disable_existing_loggers=False`` — the default is ``True``, and it does not mean "reset
+    # logging", it means "switch off every logger that already exists and is not named in this
+    # file". Alembic's own ``alembic.ini`` names ``alembic`` and ``sqlalchemy`` and nothing of
+    # ours, so under the default every ``logging.getLogger(__name__)`` the application has already
+    # created is silenced for the remaining life of the process. That is invisible when Alembic
+    # runs as a one-shot CLI and is exactly wrong the moment migrations run in-process alongside
+    # anything else: the test suite (where it silenced ``app.rule_catalog``'s hoist-failure
+    # logging, so a bad row failed quietly, which is the one thing that logging exists to prevent)
+    # and any startup path that migrates and then serves.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

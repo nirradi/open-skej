@@ -48,10 +48,21 @@ Translations that happen here and nowhere else:
   ordered tuple of rules the controller runs — see its docstring for the
   filtering, resolution, and ordering it performs, and for the fail-closed
   path a row that cannot be built takes.
+
+This module stays deliberately ORM-free, which is why it never resolves ``rule_type`` through
+``app.rule_catalog`` directly: that module is nothing but ORM (it queries ``generated_rule_types``
+on a miss), and importing it here would end the one property this module has always kept — that it
+receives its inputs already extracted and never queries for any of them itself. Instead
+``SpaceRuleConfig`` carries a ``lookup`` callable, defaulted to ``rules.REGISTRY.get`` so every
+existing caller that builds one by hand keeps seeing only the hand-written types, and overridden by
+``app.identity.service.space_rule_config`` to ``app.rule_catalog.catalog.lookup`` for the one caller
+that wants generated types too. ``_build_canon`` and ``SpaceRuleConfig.reads_history`` both resolve
+through it rather than through ``REGISTRY.get`` directly.
 """
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -69,6 +80,7 @@ from rules import (
     LocalFrame,
     MaxDurationRule,
     NotInThePastRule,
+    RuleType,
     UserContext,
     Weekday,
     evaluate_request,
@@ -183,6 +195,13 @@ class SpaceRuleRow:
     enabled: bool = True
 
 
+#: A ``rule_type`` id resolved to its registered ``RuleType``, or ``None`` if this caller knows no
+#: such type. ``app.rule_catalog.RuleTypeLookup`` is the same shape, defined again here rather than
+#: imported — this module stays ORM-free and must not import that module (see the module
+#: docstring), and the two definitions describe the same contract from either side of that seam.
+RuleTypeLookup = Callable[[str], RuleType | None]
+
+
 @dataclass(frozen=True)
 class SpaceRuleConfig:
     """The rule-relevant slice of one Space's configuration.
@@ -198,10 +217,25 @@ class SpaceRuleConfig:
     any number of instances of any registered type (task 6.6). A Space with
     no rows enforces nothing beyond ``NotInThePastRule``, exactly as a Space
     with every column null used to.
+
+    ``lookup`` is how a row's ``rule_type`` resolves to a registered
+    ``RuleType`` — passed in rather than hardcoded to ``REGISTRY.get``, since
+    this module stays ORM-free and ``app.rule_catalog`` (the caller that also
+    knows generated types) is nothing but ORM (module docstring). Defaulted
+    to ``REGISTRY.get`` so every existing caller that builds a
+    ``SpaceRuleConfig`` by hand — every test in this suite among them — keeps
+    seeing only the seven hand-written types unless it opts in; the one
+    caller that wants generated types too (``app.identity.service.space_rule_config``)
+    passes ``app.rule_catalog.catalog.lookup`` explicitly. ``compare=False``
+    and ``repr=False`` keep a bound method off this frozen dataclass's
+    equality and repr, where it would otherwise make two configs built with
+    the same rows compare unequal merely because they closed over different
+    ``RuleCatalog`` instances.
     """
 
     timezone: str
     rules: tuple[SpaceRuleRow, ...] = field(default_factory=tuple)
+    lookup: RuleTypeLookup = field(default=REGISTRY.get, compare=False, repr=False)
 
     @property
     def reads_history(self) -> bool:
@@ -227,7 +261,7 @@ class SpaceRuleConfig:
         """
         return any(
             row.enabled
-            and (declared := REGISTRY.get(row.rule_type)) is not None
+            and (declared := self.lookup(row.rule_type)) is not None
             and declared.reads_history
             for row in self.rules
         )
@@ -509,11 +543,14 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     2. **Dropped if ``applies_to`` does not match ``on_date``** — see
        ``_row_applies``. Scoping happens before the registry ever builds
        anything, uniformly for every rule type.
-    3. **Looked up in ``REGISTRY`` by ``rule_type``.** An id not registered
-       raises ``_UnbuildableRuleRowError``, caught by ``evaluate`` and turned
-       into a denial — never a skip (see that exception's docstring).
-       (``row_applies`` above, not this step, is what ``resolve_day_schedule``
-       reuses; it needs no registry lookup at all — see that function.)
+    3. **Resolved through ``config.lookup``** — ``REGISTRY`` plus, for the
+       one caller that wants them, the generated types
+       ``app.rule_catalog.catalog`` has hoisted (see ``SpaceRuleConfig``'s
+       own docstring). An id that resolves to nothing raises
+       ``_UnbuildableRuleRowError``, caught by ``evaluate`` and turned into a
+       denial — never a skip (see that exception's docstring). (``row_applies``
+       above, not this step, is what ``resolve_day_schedule`` reuses; it needs
+       no rule-type lookup at all — see that function.)
     4. **Resolved, if its type needs it** (``_resolve_for_row``), **and
        built** via ``RuleType.build``. A ``KeyError``/``TypeError``/
        ``ValueError`` from either step — a required param missing, a stored
@@ -540,7 +577,7 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
         if not row_applies(row.applies_to, on_date):
             continue
 
-        rule_type = REGISTRY.get(row.rule_type)
+        rule_type = config.lookup(row.rule_type)
         if rule_type is None:
             raise _UnbuildableRuleRowError(
                 f"space_rules row {row.id} names unregistered rule_type {row.rule_type!r}"

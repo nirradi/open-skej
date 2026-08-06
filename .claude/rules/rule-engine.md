@@ -112,9 +112,75 @@ which is exactly what an `end_minutes` above 1440 means.
 
 ## Backend integration
 
-`rules` is installed into the backend as an editable sibling package (`-e ../../rules`), and only the
-`rules` package is distributed — never `generation`. "Nothing generated is imported by the app" is
-therefore a fact about the packaging, not a promise a reviewer must keep.
+`rules` is installed into the backend as an editable sibling package (`-e ../../rules`), and
+`rules/pyproject.toml` distributes **both `rules` and `generation`**. Neither carries a runtime
+dependency, so the backend's dependency set does not move.
+
+**A generated rule now runs inside the booking process, and what replaces the guarantee that gave up
+is stated here rather than assumed.** The app once imported `rules` alone, which made "nothing
+generated is imported by the app" a fact about the packaging; that is not a fact about anything any
+more, and it is withdrawn rather than softened. The properties carrying the weight instead are all
+enforced on every load, not once at authoring time:
+
+* **The AST validator runs at write time *and* at every load.** `validate_source` re-parses the
+  stored `human_code` each time a row is hoisted (`app/backend/app/rule_catalog.py`), and a row whose
+  source no longer validates is not hoisted whatever its stored blob says.
+* **The adversarial suite passed in the sandbox before the row existed.** Nothing reaches the table
+  that did not survive the generation loop's own test run.
+* **Execution happens in a restricted namespace**, never the real builtins — see below.
+* **The controller contains every call**, exactly as it does for a hand-written rule. A generated
+  rule that raises is a denial, not a 500.
+
+The one property genuinely surrendered is that the *executed* artifact is provably the *validated*
+one: `source_sha256` binds `human_code` to itself, but nothing proves `executable_bytecode` was
+compiled from that source. That gap is why the namespace's `__import__` is a guarded one enforcing
+the import allowlist at runtime rather than the real builtin — it is the only check that binds the
+bytecode, rather than the source standing in for it, to the allowlist.
+
+**Hoisting is the load path, and it fails closed by denying rather than by skipping.**
+`app.rule_catalog` turns one `generated_rule_types` row back into a constructible `RuleType`: it
+re-validates the source, checks `sha256(human_code)` against `source_sha256` and `bytecode_magic`
+against the running `importlib.util.MAGIC_NUMBER` (the magic, not `python_version` — `marshal`'s
+format tracks the magic number, while the version string is what a human reads in a report),
+`marshal.loads` the blob, executes it, and requires **exactly one** `BaseRule` subclass to come out.
+A row failing any step is logged with its id and reason and left out of the catalog — it never
+raises past `reload`, because one bad row must not stop the others loading nor stop the process
+booting. A `space_rules` row naming a type that did not hoist then denies with `RULE_ERROR_MESSAGE`
+through the path an unregistered `rule_type` already took. That is the fail-closed outcome and needs
+no new code: **an unavailable rule is a rule that refuses, never one that is skipped**, since
+skipping it would silently drop a constraint a Space had configured.
+
+**The namespace a hoisted rule executes in binds `SAFE_BUILTINS`, the seven engine free names, and
+the two pieces of execution machinery a module cannot run without.** `SAFE_BUILTINS` is a list of
+names a rule may *write*; a compiled module also calls builtins its source never mentions — every
+`class` statement calls `__build_class__` and every `import` calls `__import__`. Withholding those
+two hardens nothing and makes *every* generated rule unhoistable, since a rule is a class by
+definition and the Generator's prompt requires it to import anything outside the seven free names.
+`__import__` is the guarded one above; `__build_class__` is handed over as-is, because building a
+class is what the source was validated as doing. The free names come from `harness.ENGINE_NAMES`
+rather than a second list, for the same reason that tuple exists at all. This namespace is
+deliberately **stricter than the sandbox**, which runs a candidate under the real builtins: the
+sandbox bounds what execution can *cost*, this bounds what it can *reach*, so a rule that passes
+there and raises `NameError` here fails closed — the direction it is safe to be wrong in.
+
+**The catalog is the backend's, and `rules.REGISTRY` is never mutated.** `REGISTRY` is a
+module-level constant in a package the backend *installs*; writing into it would invert that and
+make the engine's behaviour depend on which HTTP requests a process had served. `app.rule_catalog`
+reads it and adds its own separate map, which is the same information with the arrow pointing the
+right way. `rules_stub` resolves a `rule_type` through a `lookup` callable carried on
+`SpaceRuleConfig` rather than importing the catalog, because that module stays ORM-free and the
+catalog is nothing but ORM; the callable defaults to `REGISTRY.get`, and only
+`identity.service.space_rule_config` passes `catalog.lookup`.
+
+**The catalog reloads at startup and once on a miss, and the miss reload is throttled on the
+attempt.** Multi-worker uvicorn gives each process its own catalog, so a type hoisted in worker A is
+invisible to worker B until it reloads; reloading on every lookup would cost a query on the hot path,
+while reloading on a miss costs one only where the request was about to deny anyway. The cooldown
+stamp is taken **before** the attempt rather than after a success, because stamping on success alone
+leaves the throttle unarmed for the one failure it most needs to cover — a database that is down
+makes every miss open a fresh connection, so the moment Postgres can least absorb load is the moment
+the guard would stop working. A genuinely unknown id still denies; self-healing never substitutes
+for failing closed.
 
 `app/backend/app/rules_stub.py` is the adapter, and the whole of it. It holds no rule logic; it
 translates between the HTTP boundary and `evaluate_request`, and five translations live there and
@@ -400,10 +466,13 @@ and where the cap cannot be imposed, the timeout remains as the bound that alway
   emits a Python class inheriting `BaseRule`, relying only on `HistoryContext`, `LocalFrame` and
   standard `datetime` math, with **parameterized** variables so the rule is reusable.
 
-`rules/generation/` is a **sibling package of `rules`**, not part of it. `rules` is what the booking
-API imports and runs in-process; this is what a developer runs at a terminal to produce a candidate.
-The separation is what makes "nothing generated is imported by the app" a property of the layout
-rather than a promise.
+`rules/generation/` is a **sibling package of `rules`**, not part of it, and both are distributed.
+The layout no longer buys the app any isolation from generated code — a generated rule is hoisted
+into the booking process and run there, and `app.rule_catalog` reaches `harness.ENGINE_NAMES` from
+this package to build the namespace it runs in. What the separation still says is narrower and
+still worth saying: `rules` is the contract and the canon the API evaluates every booking through,
+while `generation` is the authoring machinery a developer or a generation job drives. "Backend
+integration" above states what replaces the isolation.
 
 **The model is called through an `LLMClient` seam** — one method, `complete(system, prompt, model)` —
 not an SDK directly. Three implementations ship. `ClaudeCliClient` shells out to
@@ -648,8 +717,9 @@ summary. It exists to tune the system prompts before any of this is wired to the
 changes are judged by its numbers, not by inspection. `--client ollama|google|claude-cli` and a
 repeatable `--model` are what let one invocation compare backends and models side by side.
 
-It sits at the top level of `rules/`, outside both packages, and `pyproject.toml` distributes only
-`rules` — so a benchmark is no more importable by the booking API than `generation` is.
+It sits at the top level of `rules/`, outside both packages, and `pyproject.toml` distributes
+`rules` and `generation` and no loose module beside them — so the benchmark itself stays
+unimportable by the booking API even though `generation` no longer is.
 
 **It is invoked by hand and never runs in CI.** It makes live model calls, and `testpaths = ["tests"]`
 is what keeps `pytest` away from it. What *is* unit-tested is report assembly from synthetic

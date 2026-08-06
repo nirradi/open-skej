@@ -39,6 +39,8 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
+    LargeBinary,
     String,
     Text,
     text,
@@ -92,6 +94,19 @@ class InvitationStatus(str, enum.Enum):
     REVOKED = "revoked"
 
 
+class GeneratedRuleTypeStatus(str, enum.Enum):
+    """Whether a generated rule type is eligible to be hoisted into the catalog.
+
+    Two values, not a delete. ``space_rules.rule_type`` rows reference a generated type by its
+    string id, so removing the row outright would strand every instance pointing at it — see
+    ``GeneratedRuleType``'s own docstring for why this is retire-not-delete rather than a
+    contradiction of this schema's "nothing is deleted" convention.
+    """
+
+    ACTIVE = "active"
+    RETIRED = "retired"
+
+
 def _string_enum(enum_cls: type[enum.Enum], name: str, length: int) -> Enum:
     """An ``Enum`` column type stored as its string value with a CHECK behind it.
 
@@ -113,6 +128,9 @@ def _string_enum(enum_cls: type[enum.Enum], name: str, length: int) -> Enum:
 _ROLE_TYPE = _string_enum(MembershipRole, "membership_role", 16)
 _ACCESS_REQUEST_STATUS_TYPE = _string_enum(AccessRequestStatus, "access_request_status", 16)
 _INVITATION_STATUS_TYPE = _string_enum(InvitationStatus, "invitation_status", 16)
+_GENERATED_RULE_TYPE_STATUS_TYPE = _string_enum(
+    GeneratedRuleTypeStatus, "generated_rule_type_status", 16
+)
 
 
 class User(Base):
@@ -281,6 +299,83 @@ class SpaceRule(Base):
         return (
             f"SpaceRule(id={self.id!r}, space_id={self.space_id!r},"
             f" rule_type={self.rule_type!r}, enabled={self.enabled!r})"
+        )
+
+
+class GeneratedRuleType(Base):
+    """One rule type produced by the AI generation loop, available to every Space.
+
+    Global rather than Space-scoped — a generated type joins the catalog every Space can pick
+    an instance from, exactly like the seven hand-written types in ``rules.REGISTRY``
+    (``ops/plans/stream-7/OVERVIEW.md``, "Generated rules are global, with provenance
+    recorded"). ``created_by_space_id`` (NOT NULL) and ``created_by_user_id`` record who made it
+    so a later migration can scope generated types down to their creating Space without an
+    archaeology exercise over rows that never recorded the answer — neither column carries
+    ``ON DELETE CASCADE``, matching every other foreign key in this schema.
+
+    ``rule_type`` is generated from the label at write time (7.7's job, not this table's) and is
+    **unique** and never reused: ``space_rules.rule_type`` stores this string, so handing the
+    same id to two different rules would silently repoint every row already using the first one
+    at the second.
+
+    **``python_version`` is what the owner asked for; ``bytecode_magic`` is what the load path
+    actually compares.** ``marshal``'s format tracks the interpreter's bytecode magic number, not
+    its version string, so the load path (``app.rule_catalog``) hoists a row only when
+    ``bytecode_magic`` matches the running interpreter's own — ``python_version`` is not
+    re-derived from it because a human reading a report wants "3.12.4", not a magic number's hex.
+    ``executable_bytecode`` is ``marshal.dumps(compile(human_code, ...))``; ``human_code`` is kept
+    alongside it, unmodified by the sandbox prelude, for display and for ``validate_source`` to
+    re-check at every load (see ``app.rule_catalog``) — the blob is what runs, the source is what
+    is provably safe.
+
+    **Retire, never delete.** ``status`` is the entire removal mechanism, exactly as ``enabled``
+    is for ``SpaceRule`` — except here retiring is permanent rather than a pause, because
+    un-retiring a type would resurrect it under instances that may have been reconfigured or
+    removed in the meantime. This does not contradict Stream 6's "a rule instance is really
+    deleted" (``SpaceRule.__doc__``): an instance is a configuration choice nobody else points
+    at, while a type is a thing other rows (``space_rules.rule_type``) point at by string id, so
+    deleting the row out from under them would turn every live reference into an unregistered
+    type — the exact failure ``rule_type`` uniqueness above exists to prevent one row from
+    causing twice.
+
+    No index on ``status`` — the only query against it is the catalog's own
+    ``WHERE status = 'active'`` reload, and this table holds a handful of generated types at any
+    real scale (a per-write human review gate keeps the count low), so a sequential scan costs
+    nothing worth trading for an index every insert would then also pay for.
+    """
+
+    __tablename__ = "generated_rule_types"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    rule_type: Mapped[str] = mapped_column(String(64), unique=True)
+    label: Mapped[str] = mapped_column(String(200))
+    description: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    prompt: Mapped[str] = mapped_column(Text)
+    human_code: Mapped[str] = mapped_column(Text)
+    source_sha256: Mapped[str] = mapped_column(String(64))
+    executable_bytecode: Mapped[bytes] = mapped_column(LargeBinary)
+    python_version: Mapped[str] = mapped_column(String(32))
+    bytecode_magic: Mapped[str] = mapped_column(String(16))
+    # A list of RuleParam-shaped dicts (7.8 fills these in); empty until then, matching every
+    # generated type's schema-less starting point.
+    param_schema: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    reads_history: Mapped[bool] = mapped_column(Boolean)
+    # 100 for every generated type — sorts after all seven hand-written types, so a
+    # deliberately-worded hand-written denial always wins a fail-fast tie
+    # (``.claude/rules/rule-engine.md``, "Generated types sort after every hand-written type").
+    priority: Mapped[int] = mapped_column(Integer, default=100, server_default=text("100"))
+    status: Mapped[GeneratedRuleTypeStatus] = mapped_column(
+        _GENERATED_RULE_TYPE_STATUS_TYPE, default=GeneratedRuleTypeStatus.ACTIVE
+    )
+    created_by_space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"))
+    created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"GeneratedRuleType(id={self.id!r}, rule_type={self.rule_type!r},"
+            f" status={self.status.value!r})"
         )
 
 
