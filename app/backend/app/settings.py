@@ -37,6 +37,24 @@ class Settings(BaseSettings):
     # guard this switch is paired with, and `app.auth.sandbox` for the rest.
     sandbox_auth: bool = False
 
+    # AI rule generation. Off by default and, exactly like `sandbox_auth` above,
+    # never inferred from a key being present: whether the capability is even
+    # available should not be discoverable by whether a request to it succeeds,
+    # which is why `app.main` registers the router conditionally rather than
+    # guarding inside the handler. The second reason is narrower and just as
+    # real — an unconfigured backend must not be able to spend money on model
+    # calls, so enabling it is a deliberate act rather than a side effect of
+    # having set `GOOGLE_STUDIO_API_KEY` for the benchmark.
+    rule_generation_enabled: bool = False
+    # `stub` | `google` | `ollama` | `claude-cli`. The default is `stub`
+    # deliberately: an enabled-but-otherwise-unconfigured backend then runs the
+    # whole flow against a canned response instead of billing anyone.
+    rule_generation_client: str = "stub"
+    google_studio_api_key: str | None = None
+    # None means "leave the selected client's own default model alone", the same
+    # convention `rules/benchmark.py`'s optional flags already keep.
+    rule_generation_model: str | None = None
+
     # The Vite dev server's default origin. A list rather than a single value so
     # task 2.8's frontend can be served from a second port without a code change.
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])

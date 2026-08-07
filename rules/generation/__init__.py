@@ -1,9 +1,22 @@
-"""The AI generation loop: a developer tool that writes rule source for a human to review.
+"""The AI generation loop: it writes rule source, and something else decides what to do with it.
 
 A sibling package of ``rules`` rather than part of it. ``rules`` is what the booking API imports and
-runs in-process; this is what a developer runs at a terminal to produce a candidate. Keeping them
-apart is what makes "nothing generated is imported by the app" a property of the layout rather than
-a promise: the engine has no reason to import this package, and does not.
+runs in-process; this package produces candidates for it — at a developer's terminal via
+``rules/benchmark.py``, and since task 7.7 inside the backend as a job
+(``app/backend/app/rule_generation.py``).
+
+That second caller ends the arrangement this docstring used to describe. Keeping the packages apart
+was what made "nothing generated is imported by the app" a property of the layout; the backend now
+imports ``generation.harness`` for its catalog and ``generation.loop`` for the job runner, so the
+guarantee is gone and four properties replace it, none of which depend on the packaging:
+
+* ``rules.safety.validate_source`` runs over the source at **every load**, not only at write time;
+* a hoisted rule executes in a namespace whose builtins are ``rules.safety.SAFE_BUILTINS``;
+* the adversarial suite must pass in the sandbox before a row is ever stored;
+* the controller's containment wraps every call a hoisted rule makes thereafter.
+
+``generation`` carries no dependencies of its own — standard library only — so having the backend
+install it does not move the booking API's dependency set.
 """
 
 from .errors import GenerationError, LLMCallError, RuleRejectedError, SuiteRejectedError

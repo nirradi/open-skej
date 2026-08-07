@@ -11,10 +11,17 @@ never delivered a verdict, and a candidate nobody could verify is exactly the ca
 not reach the canon. The check is ``result.outcome is SandboxOutcome.PASSED`` rather than
 "not FAILED", because the second admits the two outcomes that establish nothing.
 
-**Nothing here is ever imported.** ``generated/`` is an output directory, gitignored, holding a file
-a developer reads and, if they agree with it, ports into the canon by hand through a PR. That is
-what keeps a prompt injection in a rule description out of the request path: there is no code path
-from this module to anything the booking API runs.
+**Nothing written to ``generated/`` is ever imported.** It is an output directory, gitignored,
+holding a file a developer reads and, if they agree with it, ports into the canon by hand through a
+PR. Nothing imports from it and nothing ever will.
+
+That is no longer the same statement as "this module is never imported", and the difference is task
+7.7's. ``run_generation_loop`` now has a second caller — ``app.rule_generation``, running it as a
+backend job whose artifact is a database row rather than a file, which is what ``output_dir=None``
+selects. A candidate reaching the catalog that way is not unreviewed: it is the same fail-closed
+gate below, plus ``validate_source`` re-run at every load, ``SAFE_BUILTINS``, and the controller's
+containment (see ``generation/__init__.py`` for the full list, and ``.claude/rules/rule-engine.md``
+for why the packaging guarantee was spent deliberately rather than eroded).
 
 **The tests are rewritten on every attempt, never reused.** A suite imports the rule class by name
 and constructs it with its own parameters, so a suite kept from the previous attempt would fail
