@@ -93,12 +93,16 @@ as local clock times against its own IANA zone (`.claude/rules/identity-and-acce
 model) — and that split is exactly why it is the exception: a rule resolving to a different UTC
 instant per date is the one thing that needs a zone to resolve at all.
 
-**Conversion happens at the boundary, per date, never once at write time.** Resolving local operating
-hours to a UTC window is repeated for every date the question is asked about, not computed once and
-cached as a fixed offset. A cached offset is correct for the day it was computed and silently wrong
-the next time the zone's DST rule flips — the version of this bug that looks right in July and wrong
-in January. Doing the conversion at the boundary, on demand, is what keeps every entity past that
-point — a booking, a rule reading `.hour` — timezone-free and correct in both months.
+**Conversion happens at the boundary, per date, never once at write time.** Resolving a Space's local
+calendar — its day, week and month bounds, a slot grid's anchor, a frequency cap's counting window —
+to UTC instants is repeated for every date the question is asked about, not computed once and cached
+as a fixed offset. A cached offset is correct for the day it was computed and silently wrong the next
+time the zone's DST rule flips — the version of this bug that looks right in July and wrong in
+January. Doing the conversion at the boundary, on demand, is what keeps every entity past that
+point — a booking, a rule reading a bound — timezone-free and correct in both months. This is
+strictest for the rule engine itself: the only conversion left by the time a rule runs is the one the
+adapter performs once, per booking, to build `LocalFrame` (`.claude/rules/rule-engine.md`); no rule
+receives a converted clock time of its own to re-derive anything from.
 
 **Fail closed.** Any failure to positively establish that a booking is permitted results in **no
 booking**. See `.claude/rules/rule-engine.md` for the three containment paths.

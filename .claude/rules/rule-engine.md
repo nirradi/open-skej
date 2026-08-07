@@ -55,9 +55,10 @@ into a pass defeats containment *silently* — it looks like a working rule that
   types the adapter holds a bespoke case for can express anything local and a type nobody hand-wrote
   can express nothing — so a generated "no more than 3 hours a day" would count against the **UTC**
   day and be wrong for every venue that is not on UTC. Each pair is half-open and is rejected if
-  inverted: unlike `AvailabilityHoursRule`'s deliberately invertible clock times these are two
-  absolute instants with no wrap to describe, so an inversion is the caller bug it looks like — the
-  same reasoning the counting rules' window already gives. `end_minutes` **may exceed 1440 and is
+  inverted: these are two absolute instants with no wrap to describe, so an inversion is the caller
+  bug it looks like — the same reasoning the counting rules' window already gives, and (since
+  `AvailabilityHoursRule` moved onto plain minutes) nothing in this contract holds an invertible pair
+  at all any more. `end_minutes` **may exceed 1440 and is
   never capped**: that is a booking running past local midnight, and representing it is the point.
   Every bound is resolved from local midnight and nothing else, so a day, a week and a month all
   begin when the *venue's* day begins; and because a local day is 23 or 25 hours across a DST
@@ -189,16 +190,15 @@ engine types — the engine rejects a non-zero offset outright, so a booking a c
 `+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
 message**: `RuleResult(passed=True)` carries no copy, but the API shows friendly text on success. **It
 assembles the canon per Space** from that Space's own `space_rules` rows rather than running
-`DEFAULT_CANON` — a rule type the Space holds no matching row for is simply not in the canon, and a
-Space's local operating hours are resolved to a UTC window per booking date before
-`AvailabilityHoursRule` is built. **It passes Space-wide history**
+`DEFAULT_CANON` — a rule type the Space holds no matching row for is simply not in the canon.
+**It passes Space-wide history**
 only when the Space's canon includes a counting rule: the router loads the user's bookings across
 every Resource in the Space, capped to `history_window`, and passes them in; with no counting rule
 configured, history stays empty and no query runs. **It resolves the counting windows** in the
 Space's own zone — the local week and local calendar month containing the booking, converted to UTC
 instants and handed to `MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule`, which no longer derive
 them. **It resolves the `LocalFrame`** every context carries — `_build_local_frame`, the general
-form of the per-type resolution above. Those four types get bespoke resolved parameters only because
+form of the per-type resolution above. Those three types get bespoke resolved parameters only because
 they were written before the frame existed; a type nobody hand-wrote has no such case and can
 express a local day through the frame or not at all. Every bound in it comes from
 `_local_midnight_utc` and nothing else, and `_local_day_bounds` takes the *next date's* local
@@ -226,24 +226,13 @@ adapter's job of judging a booking.
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
 tracker, not be served as a polite refusal.
 
-**Every Space's operating hours resolve.** `resolve_operating_hours` has no failure mode and raises
-nothing: a local window whose UTC image lands on two calendar dates is *represented*, not refused.
-There is no `MidnightWrapError` and no containment path in the adapter for one.
-
-That error used to exist and denied every booking against any Space it fired on. It fired far more
-widely than its name suggests — not only the UTC+13/+14 zones, but any venue whose opening hour is
-earlier than its own UTC offset, or whose closing hour is late enough to cross the boundary the other
-way. `Australia/Sydney` could not open before 11:00 and `Pacific/Honolulu` could not close after
-about 13:00; ordinary hours either side made the venue permanently unbookable, with the engine's
-generic copy and nothing naming the configuration as the cause.
-
 ## The canon
 
 `canon.py` holds five hand-written request-local rules: `NotInThePastRule()`,
 `BookingHorizonRule(days)`, `MaxDurationRule(max_duration)`, `SlotAlignmentRule(slot_minutes,
-anchor)`, `AvailabilityHoursRule(opens_at, closes_at)`. They are written by hand rather than
-generated — they are the reference the generation loop is measured against, and the worked example
-of the rule shape.
+anchor)`, `AvailabilityHoursRule(opens_at_minutes, closes_at_minutes)`. They are written by hand
+rather than generated — they are the reference the generation loop is measured against, and the
+worked example of the rule shape.
 
 **Parameters live on the instance, never as module constants.** A Space allowing 45-minute bookings
 and one allowing two hours are the same rule with different arguments, so per-Space configuration is
@@ -261,11 +250,11 @@ Space configures.
 **`SlotAlignmentRule` denies a booking whose `start_at` or `end_at` is not on the grid** defined by
 `slot_minutes` and an `anchor` UTC instant — both bounds are checked, so an aligned start with an
 off-grid end is denied on the end. The adapter resolves `anchor` as the booking's own **local
-midnight**, converted to UTC, never `opens_at`: anchoring one rule's grid on another rule's parameter
-would couple two independent rule instances, and it breaks the moment the two are scoped to different
-days via `applies_to` — local midnight is a property of the date and the zone alone, both of which
-the adapter already resolves for `AvailabilityHoursRule` and the counting rules for the same reason.
-This closes a real gap rather than tightening a theoretical one: `slot_minutes` was, until this rule
+midnight**, converted to UTC, never `opens_at_minutes`: anchoring one rule's grid on another rule's
+parameter would couple two independent rule instances, and it breaks the moment the two are scoped
+to different days via `applies_to` — local midnight is a property of the date and the zone alone,
+both of which the adapter already resolves for the counting rules for the same reason. This closes
+a real gap rather than tightening a theoretical one: `slot_minutes` was, until this rule
 existed, the one piece of a Space's configuration nothing on the server read — the calendar UI
 declined to *offer* an off-grid slot, but the API accepted one anyway, which is exactly the split
 this document warns about elsewhere (the grid is advisory, the engine is the only boundary that
@@ -283,11 +272,15 @@ form field and to validate a request body's params against — one schema for bo
 independently written ones would drift, and the drift would show up as a form whose own submission
 gets refused; a declared **priority**; **`reads_history`**,
 true only for the two counting rules, so a caller can skip the Space-wide history query when nothing
-configured would read it; **`needs_local_resolution`**, true for `slot_alignment`,
-`availability_hours` and both counting rules — the four whose constructor needs values resolved
+configured would read it; **`needs_local_resolution`**, true for `slot_alignment`
+and both counting rules — the three whose constructor needs values resolved
 against the Space's own zone and the booking's own date rather than the raw stored params, which is
 what keeps every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to
-convert for itself; **`is_single`**, advisory only and never a uniqueness constraint, since the
+convert for itself. `availability_hours` is deliberately **not** one of them any more: it stores
+minutes from the venue's own local midnight directly and reads them off `context.local` inside its
+own `evaluate`, so its `build` function needs nothing resolved for it at all — the same local
+question every other type still needs an adapter to answer for it, this one answers for itself once
+handed a `LocalFrame`. **`is_single`**, advisory only and never a uniqueness constraint, since the
 engine's flat AND makes two instances of one type coherent — they AND to the stricter, which is true
 for every type whether or not it is flagged. For a type like `max_bookings_per_week` a second
 instance is almost certainly not what an admin meant, so it is `is_single`; `availability_hours`,
@@ -354,11 +347,10 @@ timezone, so every datetime it holds is UTC, and a time it prints is UTC wearing
 member refused at 19:00 local was being told the club "closes at 17:00", which is neither the time
 they typed nor the time on the door, and nothing in the message told them which clock it was in.
 `AvailabilityHoursRule` therefore names *which* bound the booking missed in words — before we open,
-after we close, the distinction `_occurrence_for` already draws — and points at the calendar for the
-hours themselves, which is where the venue's own zone is known and the only place they can be
-rendered honestly. A **duration is not an absolute time**: "at most 2 hours long" says the same thing
-everywhere and stays legal, and the check that enforces this has to tell the two apart or it will be
-loosened until it catches nothing.
+after we close — and points at the calendar for the hours themselves, which is where the venue's own
+zone is known and the only place they can be rendered honestly. A **duration is not an absolute
+time**: "at most 2 hours long" says the same thing everywhere and stays legal, and the check that
+enforces this has to tell the two apart or it will be loosened until it catches nothing.
 
 **The constraint is enforced twice, because neither enforcement covers the other's code.**
 `rules/tests/test_denial_copy.py` drives every rule in `DEFAULT_CANON` and every type `REGISTRY` can
@@ -368,28 +360,30 @@ neither collection, so the Generator's system prompt states the constraint as a 
 its own. Fixing the one rule that named an hour without teaching the Generator would have bought one
 venue and reintroduced the defect on every rule authored after it.
 
-**Availability hours are UTC hours.** `opens_at` and `closes_at` are UTC clock times and
-`start_at.time()` is a UTC wall clock, so a Space opening at 06:00 local does not open at
-`time(6, 0)` unless it sits on UTC. The adapter resolves a Space's local hours to a UTC window for
-the booking's own date before constructing the rule (see Backend integration); the engine itself has
-no timezone to convert from, and rendering those bounds in a viewer's timezone stays the UI's job.
+**Availability hours are `LocalFrame` minutes, not clock times.** `opens_at_minutes` and
+`closes_at_minutes` are plain integers — minutes from the venue's own local midnight — compared
+against `context.local.start_minutes` / `end_minutes`. There is no UTC clock time in this rule at
+all, and nothing left for the adapter to resolve per booking date: a `space_rules` row's two params
+are read straight into the rule at construction (`needs_local_resolution=False`, "The canon" below).
 
-**An inverted pair means the window crosses a UTC day, and is not an error.** `opens_at > closes_at`
-says "opens on one UTC date, closes on the next" — the only way that can be said once the date is
-dropped from a pair of `time` values. It is the ordinary case for a venue far enough from UTC, not
-a broken configuration. `AvailabilityHoursRule` therefore never compares the two bounds against each
-other: it first decides **which occurrence** of the recurring daily window the booking's own instant
-falls in (`_occurrence_for`), and both bounds it then compares come from that one decision. The old
-shape anchored `opens_at` and `closes_at` to `request.start_at.date()` independently, so for a
-request crossing the boundary one bound could be dated a day off the other — which is what
-mislabelled the denial reason, naming the closing bound for a booking that was refused for being too
-early.
+**`closes_at_minutes` may exceed 1440, and that is how a window past local midnight is represented**
+— 18:00 to 02:00 is `opens_at_minutes=1080, closes_at_minutes=1560`, plainly, with no inversion to
+read a meaning into. The constructor enforces `0 <= opens_at_minutes < 1440` and `opens_at_minutes <
+closes_at_minutes <= opens_at_minutes + 1440`: a window is at most 24 hours long and always starts on
+the day it is configured for, so what a bare pair of clock times could only express as an ambiguous
+inversion is now a value nothing can typo into existing at all. `evaluate` still has to pick between
+at most two candidate occurrences of the recurring window — today's own, or the tail of yesterday's,
+shifted back a full day (`closes_at_minutes - 1440`) — but that choice is between two non-overlapping
+integer ranges now, not a reconstruction from a bare `time` with its date stripped off.
 
-Because the inversion is load-bearing, **local ordering is enforced at the write boundary instead**:
-a Space whose `opens_at` is at or after its `closes_at` on its own wall clock is refused there (see
-`identity-and-access.md`), because by the time hours reach the engine an inversion is indistinguishable
-from the legitimate case above. That check is also the one place a venue open past its *local*
-midnight would be admitted deliberately, rather than arriving by accident through a typo.
+Because the range is enforced by the rule's own constructor, **the identical range is enforced again
+at the write boundary** (`identity-and-access.md`): a submission failing it is refused with a 422
+naming the problem rather than accepted and only discovered as `RULE_ERROR_MESSAGE` denying every
+booking the next time someone books — the same reasoning `slot_alignment`'s own write-boundary check
+already gives for mirroring its rule's constructor bound. That write-boundary check is also the one
+place a venue open past its own local midnight is admitted deliberately, rather than arriving by
+accident through a typo — the same role it always played, now stated as a range rather than an
+ordering.
 
 `frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n, window_start, window_end)` and
 `MaxBookingsPerMonthRule(n, window_start, window_end)`, the only ones whose verdict depends on
@@ -412,9 +406,9 @@ it. This is the same boundary split availability hours already follow, and `Cale
 carries **no timezone field** for the same reason it never did — a zone there would invite every
 rule, generated ones included, to convert for itself.
 
-An inverted pair is a **caller bug** here and is rejected at construction, unlike
-`AvailabilityHoursRule`, where inversion means "this window crosses a UTC day". A counting window is
-two absolute instants, not a recurring daily one, so it has no wrap to describe.
+An inverted pair is a **caller bug** here and is rejected at construction. A counting window is
+two absolute instants, not a recurring daily one, so — like `AvailabilityHoursRule` since it moved
+onto plain minutes — it has no wrap to describe at all.
 
 **A booking is counted against the window it starts in, and the window is anchored on the request
 rather than on `now`.** A request three weeks out is judged against that week's bookings, not this
