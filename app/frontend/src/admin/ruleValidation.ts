@@ -58,17 +58,16 @@ export function ruleBrokenReason(
       continue
     }
 
-    if (param.kind === 'integer') {
+    // `"integer"` and `"local_time"` are identical in storage — `kind` only ever
+    // picks the eventual widget (`rules/rules/registry.py`'s `ParamKind`
+    // docstring) — so both get the same numeric check here.
+    if (param.kind === 'integer' || param.kind === 'local_time') {
       if (typeof raw !== 'number' || !Number.isFinite(raw)) {
         return `"${param.label}" must be a number.`
       }
       if (param.minimum !== null && raw < param.minimum) {
         const unit = param.unit ? ` ${param.unit}` : ''
         return `"${param.label}" must be at least ${param.minimum}${unit}.`
-      }
-    } else if (param.kind === 'local_time') {
-      if (typeof raw !== 'string' || !/^\d{2}:\d{2}:\d{2}$/.test(raw)) {
-        return `"${param.label}" must be a time.`
       }
     }
   }

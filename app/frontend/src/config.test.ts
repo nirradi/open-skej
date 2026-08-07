@@ -186,7 +186,7 @@ describe('slotStart resolves through the Space\'s own timezone, not the viewer\'
   })
 
   it('resolves the identical wall-clock label to different instants across a DST boundary', () => {
-    // Mirrors `operating_hours.py`'s own docstring example: 07:00
+    // Mirrors `rules_stub.py`'s own docstring example: 07:00
     // Europe/Berlin is 05:00Z in July (CEST, UTC+2) and 06:00Z in January
     // (CET, UTC+1) — the same config, only the date changes.
     const berlin: CalendarConfig = { ...DEFAULT, timeZone: 'Europe/Berlin' }

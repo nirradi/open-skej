@@ -46,11 +46,22 @@ describe('ruleParamValuesFromStored', () => {
     ).toEqual({ max_duration_minutes: '90' })
   })
 
-  it('truncates a stored local_time to HH:MM for the input', () => {
-    const params = [makeRuleParam({ name: 'opens_at', kind: 'local_time' })]
+  it('renders a stored local_time (minutes from local midnight) as HH:MM for the input', () => {
+    const params = [makeRuleParam({ name: 'opens_at_minutes', kind: 'local_time' })]
 
-    expect(ruleParamValuesFromStored(params, { opens_at: '07:00:00' })).toEqual({
-      opens_at: '07:00',
+    expect(ruleParamValuesFromStored(params, { opens_at_minutes: 7 * 60 })).toEqual({
+      opens_at_minutes: '07:00',
+    })
+  })
+
+  it('wraps a local_time past 1440 minutes to an early wall-clock time', () => {
+    // A window crossing local midnight (`closes_at_minutes > 1440`) is representable in the
+    // engine, but a plain `<input type="time">` cannot express it — this is that known limit,
+    // not a bug (`ops/done/stream-7/passed-midnight.md`).
+    const params = [makeRuleParam({ name: 'closes_at_minutes', kind: 'local_time' })]
+
+    expect(ruleParamValuesFromStored(params, { closes_at_minutes: 26 * 60 })).toEqual({
+      closes_at_minutes: '02:00',
     })
   })
 
@@ -63,9 +74,11 @@ describe('ruleParamValuesFromStored', () => {
 
     // A broken row (ruleValidation.ts) still has to render something editable
     // rather than crash the page — a blank field is what an admin types a fix
-    // into.
+    // into. `local_time` is stored as minutes from local midnight (a plain
+    // number), so the wrong-type case for it is a non-numeric value, not a
+    // number — 42 would be a legitimate (if unusual) stored value now.
     expect(
-      ruleParamValuesFromStored(params, { nulled: null, wrong_type: 42 }),
+      ruleParamValuesFromStored(params, { nulled: null, wrong_type: '09:00:00' }),
     ).toEqual({ missing: '', nulled: '', wrong_type: '' })
   })
 })
@@ -77,10 +90,10 @@ describe('ruleParamValuesToWire', () => {
     expect(ruleParamValuesToWire(params, { n: '45' })).toEqual({ n: 45 })
   })
 
-  it('converts a local_time field to HH:MM:SS', () => {
+  it('converts a local_time field to minutes from local midnight', () => {
     const params = [makeRuleParam({ name: 't', kind: 'local_time' })]
 
-    expect(ruleParamValuesToWire(params, { t: '07:30' })).toEqual({ t: '07:30:00' })
+    expect(ruleParamValuesToWire(params, { t: '07:30' })).toEqual({ t: 7 * 60 + 30 })
   })
 
   it('omits a blank value entirely rather than sending null', () => {

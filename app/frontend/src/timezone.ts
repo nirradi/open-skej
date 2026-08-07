@@ -10,9 +10,9 @@
  * always asked fresh for the specific instant in question — never a fixed
  * offset computed once and reused, which is right for the day it was read
  * and silently wrong the next time the zone's DST rule flips. This mirrors
- * `app/backend/app/operating_hours.py`'s own reasoning on the backend,
- * applied to the one place the frontend needs the same conversion: turning
- * what the grid shows into the instant a click actually submits.
+ * `app/backend/app/rules_stub.py`'s `_local_midnight_utc` reasoning on the
+ * backend, applied to the one place the frontend needs the same conversion:
+ * turning what the grid shows into the instant a click actually submits.
  */
 
 /** Wall-clock parts read back from an instant, in an explicit zone. */
@@ -86,7 +86,7 @@ function offsetAt(instantMs: number, timeZone: string): number {
  * `hour`:`minute`.
  *
  * Not offset arithmetic in the sense that bit the backend once (see
- * `operating_hours.py`): `Date.UTC` below supplies only a first guess, which
+ * `rules_stub.py`'s `_local_midnight_utc`): `Date.UTC` below supplies only a first guess, which
  * is then corrected by asking `Intl.DateTimeFormat` what `timeZone`'s actual
  * offset is *at that guess*, and corrected again at the resulting instant —
  * the second pass is what keeps a guess landing on a DST transition from

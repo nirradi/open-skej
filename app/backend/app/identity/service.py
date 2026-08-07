@@ -19,7 +19,7 @@ Exceptions here are plain domain errors, translated to status codes by the
 router — the same split ``app.db.driver`` uses with ``OverlapError``.
 """
 
-from datetime import datetime, time
+from datetime import datetime
 from typing import Optional, Sequence
 
 from rules import ParamKind
@@ -53,9 +53,12 @@ FIRST_RESOURCE_NAME = "Main"
 
 # The default operating hours and slot interval a freshly created Space gets, so
 # it is immediately bookable rather than requiring an admin to visit the config
-# UI before anyone can book.
-_DEFAULT_OPENS_AT = time(9, 0)
-_DEFAULT_CLOSES_AT = time(17, 0)
+# UI before anyone can book. Minutes from local midnight, matching
+# `availability_hours`'s stored shape (`rules/rules/registry.py`) — not a
+# `time`, since the rule this seeds for reads two plain integers off
+# `context.local` and nothing here converts them.
+_DEFAULT_OPENS_AT_MINUTES = 9 * 60
+_DEFAULT_CLOSES_AT_MINUTES = 17 * 60
 _DEFAULT_SLOT_MINUTES = 60
 
 
@@ -64,23 +67,26 @@ class SpaceArchivedError(Exception):
 
 
 class InvalidOperatingHoursError(Exception):
-    """``opens_at`` is at or after ``closes_at`` on the Space's own wall clock.
+    """``opens_at_minutes`` / ``closes_at_minutes`` do not satisfy the range
+    ``AvailabilityHoursRule.__init__`` itself enforces: ``0 <= opens_at_minutes
+    < 1440`` and ``opens_at_minutes < closes_at_minutes <= opens_at_minutes +
+    1440``.
 
-    Rejected at the write boundary rather than left to the rule engine, because
-    since task 5.13 the engine can no longer tell this apart from a legitimate
-    configuration. ``AvailabilityHoursRule`` reads an *inverted* UTC pair as
-    "this window crosses a UTC calendar day" — which is what makes an ordinary
-    Sydney or Honolulu venue bookable at all — and a locally-inverted pair
-    resolves to an inverted UTC pair too. So an admin who types the closing time
-    into the opening box gets a venue that is open all night and shut all day,
-    silently, instead of one that refuses every booking loudly.
+    Rejected here, at the write boundary, for the same reason
+    ``slot_alignment``'s own boundary check mirrors
+    ``SlotAlignmentRule.__init__`` right below it in
+    ``_validate_rule_params``: a row that fails this range would still be
+    accepted by the database (``params`` is a bag of JSON, not a checked
+    shape), only to fail when ``RuleType.build`` constructs the rule at
+    booking time — which the adapter turns into ``RULE_ERROR_MESSAGE``,
+    denying *every* booking against the Space rather than naming what an
+    admin typed wrong. A 422 here, at submission time, is what lets an admin
+    form attach the message to the right field instead.
 
-    Validating here is what keeps that ambiguity out of the engine: local
-    ordering is a property of what a human typed, and this is the only layer
-    that still knows it was typed rather than derived. A venue genuinely open
-    past its own local midnight is ``DEFERRED.md`` item 18 — an unsupported
-    configuration today, and this is the check that would be relaxed to admit
-    it, deliberately, rather than it arriving by accident through a typo.
+    Since task 7.10 there is no UTC pair to invert and nothing left to typo
+    into an inversion: ``closes_at_minutes > 1440`` states a window past
+    local midnight directly, so the only way to violate this range is to
+    submit a value genuinely outside a single 24-hour local window.
     """
 
 
@@ -315,8 +321,8 @@ def create_space(
             space_id=space.id,
             rule_type="availability_hours",
             params={
-                "opens_at": _DEFAULT_OPENS_AT.isoformat(),
-                "closes_at": _DEFAULT_CLOSES_AT.isoformat(),
+                "opens_at_minutes": _DEFAULT_OPENS_AT_MINUTES,
+                "closes_at_minutes": _DEFAULT_CLOSES_AT_MINUTES,
             },
         )
     )
@@ -457,10 +463,11 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
     1440, mirroring ``SlotAlignmentRule.__init__``'s own booking-time check
     (``rules/rules/registry.py``'s own docstring names this API boundary as
     where that would eventually be enforced); and ``availability_hours``
-    rejects an ``opens_at`` at or after ``closes_at`` on the Space's own
-    wall clock, raising :class:`InvalidOperatingHoursError` — the same
-    check ``identity-and-access.md`` documents for this API, reused rather
-    than duplicated into a second exception for the identical rule.
+    rejects an ``opens_at_minutes``/``closes_at_minutes`` pair outside
+    ``AvailabilityHoursRule.__init__``'s own range, raising
+    :class:`InvalidOperatingHoursError` — the same check
+    ``identity-and-access.md`` documents for this API, reused rather than
+    duplicated into a second exception for the identical rule.
 
     Callers pass the **effective** params dict — the full set this row would
     be given, after any PATCH merge — never a partial submission, so
@@ -488,7 +495,11 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
             continue
 
         value = params[param.name]
-        if param.kind is ParamKind.INTEGER:
+        if param.kind in (ParamKind.INTEGER, ParamKind.LOCAL_TIME):
+            # `LOCAL_TIME` describes a form widget, not a storage type — the
+            # value underneath it is exactly as much a plain `int` as
+            # `INTEGER`'s is (`rules/rules/registry.py`'s `ParamKind`
+            # docstring), so the two kinds get the identical check here.
             # `type(value) is not int` rather than `isinstance`: a bool is an
             # int under `isinstance` (`True` would silently pass as `1`),
             # and `type()` is what excludes it.
@@ -498,15 +509,6 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
                 raise InvalidRuleParamsError(
                     f"Parameter {param.name!r} must be at least {param.minimum}"
                 )
-        elif param.kind is ParamKind.LOCAL_TIME:
-            if not isinstance(value, str):
-                raise InvalidRuleParamsError(
-                    f"Parameter {param.name!r} must be a local time string (HH:MM[:SS])"
-                )
-            try:
-                time.fromisoformat(value)
-            except ValueError:
-                raise InvalidRuleParamsError(f"Parameter {param.name!r} is not a valid local time")
 
     if rule_type_id == "slot_alignment":
         slot_minutes = params.get("slot_minutes")
@@ -517,13 +519,19 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
             )
 
     if rule_type_id == "availability_hours":
-        opens_at_raw = params.get("opens_at")
-        closes_at_raw = params.get("closes_at")
-        if opens_at_raw is not None and closes_at_raw is not None:
-            opens_at = time.fromisoformat(opens_at_raw)
-            closes_at = time.fromisoformat(closes_at_raw)
-            if opens_at >= closes_at:
-                raise InvalidOperatingHoursError(opens_at, closes_at)
+        # Mirrors `AvailabilityHoursRule.__init__` (`rules/rules/canon.py`)
+        # exactly, the same way the `slot_alignment` block above mirrors
+        # `SlotAlignmentRule.__init__`. `opens_at_minutes >= 0` is already
+        # guaranteed by that parameter's own declared `minimum=0` in the loop
+        # above, so only the upper bound and the pairwise relationship need
+        # checking here.
+        opens_at_minutes = params.get("opens_at_minutes")
+        closes_at_minutes = params.get("closes_at_minutes")
+        if isinstance(opens_at_minutes, int) and isinstance(closes_at_minutes, int):
+            if not (opens_at_minutes < 1440):
+                raise InvalidOperatingHoursError(opens_at_minutes, closes_at_minutes)
+            if not (opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440):
+                raise InvalidOperatingHoursError(opens_at_minutes, closes_at_minutes)
 
 
 def get_space_rule(session: Session, space: Space, rule_id: int) -> SpaceRule:
@@ -580,14 +588,14 @@ def update_space_rule(
 
     ``params``, when present, wholesale-replaces what is stored — except for
     ``availability_hours``, where a submission naming only one of
-    ``opens_at``/``closes_at`` is first merged over the row's own currently
-    stored pair before validation, so the check is made on the *effective*
-    pair the update leaves behind. Every other type gets
+    ``opens_at_minutes``/``closes_at_minutes`` is first merged over the row's
+    own currently stored pair before validation, so the check is made on the
+    *effective* pair the update leaves behind. Every other type gets
     no such merge: its schema requires whatever it requires of the
     submitted dict alone, which is what "wholesale replacement" means for
-    it. The merge is what lets the inverted-hours check below see a real
-    pair instead of failing "missing required" on a bound the caller never
-    meant to touch.
+    it. The merge is what lets ``_validate_rule_params``'s range check see a
+    real pair instead of failing "missing required" on a bound the caller
+    never meant to touch.
     """
     _require_active(space)
     rule = get_space_rule(session, space, rule_id)

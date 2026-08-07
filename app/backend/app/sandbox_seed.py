@@ -52,9 +52,10 @@ siblings.
   identical Resources (courts) sharing the one Space-level schedule.
 * ``SPACE_B_NAME`` — the manual-QA target for everything Space A deliberately
   does not exercise. Zone ``SPACE_B_TIMEZONE`` (``Australia/Sydney``, not
-  UTC and not Space A's own zone) with real ``opens_at``/``closes_at``, so the
-  per-date UTC resolution (``app.operating_hours``) is visible; a
-  ``max_duration_minutes`` of its own; and a ``max_bookings_per_week`` cap, so
+  UTC and not Space A's own zone) with real ``opens_at_minutes``/
+  ``closes_at_minutes``, so a non-UTC venue's ordinary hours are visible in
+  manual QA; a ``max_duration_minutes`` of its own; and a
+  ``max_bookings_per_week`` cap, so
   Space-wide counting across a user's bookings is observable too. Two
   Resources — the frequency cap is Space-wide, and demonstrating that
   requires a third booking to land on a *different* Resource than the first
@@ -165,17 +166,20 @@ SPACE_B_TIMEZONE = "Australia/Sydney"
 # Ordinary hours for a tennis club — and, deliberately, the exact configuration
 # that made this Space unbookable before task 5.13: Sydney sits at UTC+10
 # (AEST) / UTC+11 (AEDT), both ahead of an opens_at this early, so resolving
-# "09:00-21:00 local" to UTC pushes opening back onto the *previous* UTC
-# calendar day (23:00/22:00) while closing stays on the same one (11:00/10:00).
-# `resolve_operating_hours` now returns that inverted pair instead of raising
-# `MidnightWrapError`, and `rules.canon.AvailabilityHoursRule` reads the
-# inversion as a window crossing a UTC calendar day rather than a broken
-# config (`DEFERRED.md` items 16 and 17). Task 5.1 found the bug by running
-# this seed at 09:00-17:00 against the live API and moved it to 11:00-21:00
-# purely to work around it (PR #53) — that traded away the one fixture that
-# would catch a regression here, so 5.13 moves it back.
-SPACE_B_OPENS_AT = time(9, 0)
-SPACE_B_CLOSES_AT = time(21, 0)
+# "09:00-21:00 local" to UTC used to push opening back onto the *previous* UTC
+# calendar day while closing stayed on the same one — an inverted UTC pair
+# that `rules.canon.AvailabilityHoursRule` once had to read as a window
+# crossing a UTC calendar day rather than a broken config (`DEFERRED.md`
+# items 16 and 17). Task 5.1 found the bug by running this seed at 09:00-17:00
+# against the live API and moved it to 11:00-21:00 purely to work around it
+# (PR #53) — that traded away the one fixture that would catch a regression
+# here, so 5.13 moved it back. Task 7.10 removed the UTC resolution and the
+# inversion reasoning entirely — the rule now reads
+# ``opens_at_minutes``/``closes_at_minutes`` straight off the Space's own
+# local clock — but this Space's hours stay exactly as they were, since
+# they were never the part that was fragile.
+SPACE_B_OPENS_AT_MINUTES = 9 * 60
+SPACE_B_CLOSES_AT_MINUTES = 21 * 60
 SPACE_B_SLOT_MINUTES = 30
 SPACE_B_MAX_DURATION_MINUTES = 90
 SPACE_B_MAX_BOOKINGS_PER_WEEK = 3
@@ -415,7 +419,10 @@ def run(session: Session) -> None:
         session,
         space_b,
         "availability_hours",
-        {"opens_at": SPACE_B_OPENS_AT.isoformat(), "closes_at": SPACE_B_CLOSES_AT.isoformat()},
+        {
+            "opens_at_minutes": SPACE_B_OPENS_AT_MINUTES,
+            "closes_at_minutes": SPACE_B_CLOSES_AT_MINUTES,
+        },
     )
     _set_rule(session, space_b, "slot_alignment", {"slot_minutes": SPACE_B_SLOT_MINUTES})
     _set_rule(

@@ -20,8 +20,8 @@ from rules import RULE_ERROR_MESSAGE
 
 from app.rules_stub import (
     ALLOWED_MESSAGE,
-    AVAILABILITY_CLOSE,
-    AVAILABILITY_OPEN,
+    AVAILABILITY_CLOSE_MINUTES,
+    AVAILABILITY_OPEN_MINUTES,
     BOOKING_HORIZON_DAYS,
     MAX_BOOKING_DURATION,
     BookingRequest,
@@ -50,7 +50,7 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
     nothing the API itself has: each non-None kwarg becomes one unscoped,
     enabled `SpaceRuleRow`, with the row's registered param names supplied
     here so a case reads as the configuration it is testing rather than as a
-    row literal. `opens_at`/`closes_at` are combined into
+    row literal. `opens_at_minutes`/`closes_at_minutes` are combined into
     one `availability_hours` row and, matching `_build_canon`'s own gating,
     only when *both* are given — passing just one is exactly how
     `test_availability_needs_both_bounds_set` proves that half a
@@ -64,12 +64,12 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
         rows.append(SpaceRuleRow(id=next_id, rule_type=rule_type, params=params))
         next_id += 1
 
-    opens_at = rule_kwargs.get("opens_at")
-    closes_at = rule_kwargs.get("closes_at")
-    if opens_at is not None and closes_at is not None:
+    opens_at_minutes = rule_kwargs.get("opens_at_minutes")
+    closes_at_minutes = rule_kwargs.get("closes_at_minutes")
+    if opens_at_minutes is not None and closes_at_minutes is not None:
         add(
             "availability_hours",
-            {"opens_at": opens_at.isoformat(), "closes_at": closes_at.isoformat()},
+            {"opens_at_minutes": opens_at_minutes, "closes_at_minutes": closes_at_minutes},
         )
 
     if rule_kwargs.get("slot_minutes") is not None:
@@ -95,8 +95,8 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
 #: cases below that only care about duration/hours/horizon read the same way
 #: they did before the canon became per-Space.
 FULL_CONFIG = _config(
-    opens_at=AVAILABILITY_OPEN,
-    closes_at=AVAILABILITY_CLOSE,
+    opens_at_minutes=AVAILABILITY_OPEN_MINUTES,
+    closes_at_minutes=AVAILABILITY_CLOSE_MINUTES,
     max_duration_minutes=int(MAX_BOOKING_DURATION.total_seconds() // 60),
     booking_horizon_days=BOOKING_HORIZON_DAYS,
 )
@@ -182,7 +182,9 @@ def test_booking_starting_before_opening_is_denied():
 
 def test_booking_starting_exactly_at_opening_is_allowed():
     """The opening bound is inclusive: 06:00 is open, 05:59 is not."""
-    start = datetime.combine(DAY.date(), AVAILABILITY_OPEN, timezone.utc)
+    start = datetime.combine(DAY.date(), time(0, 0), timezone.utc) + timedelta(
+        minutes=AVAILABILITY_OPEN_MINUTES
+    )
 
     assert evaluate(request(start, start + timedelta(hours=1))).allowed
     assert not evaluate(
@@ -199,7 +201,9 @@ def test_booking_ending_after_closing_is_denied():
 
 def test_booking_ending_exactly_at_closing_is_allowed():
     """The closing bound is inclusive: ending at 23:00 is fine, 23:01 is not."""
-    closing = datetime.combine(DAY.date(), AVAILABILITY_CLOSE, timezone.utc)
+    closing = datetime.combine(DAY.date(), time(0, 0), timezone.utc) + timedelta(
+        minutes=AVAILABILITY_CLOSE_MINUTES
+    )
 
     assert evaluate(request(closing - timedelta(hours=1), closing)).allowed
     assert not evaluate(
@@ -208,8 +212,9 @@ def test_booking_ending_exactly_at_closing_is_allowed():
 
 
 def test_availability_needs_both_bounds_set():
-    """Only one of ``opens_at``/``closes_at`` set produces no ``availability_hours`` row at all."""
-    half_configured = _config(opens_at=time(9, 0))
+    """Only one of ``opens_at_minutes``/``closes_at_minutes`` set produces no
+    ``availability_hours`` row at all."""
+    half_configured = _config(opens_at_minutes=9 * 60)
     assert half_configured.rules == ()
 
     # 03:00 would be refused under FULL_CONFIG's 06:00 opening; here it passes
@@ -307,12 +312,12 @@ def test_non_positive_interval_is_rejected():
 
 
 def test_availability_hours_resolve_against_the_spaces_own_timezone():
-    """A Space's ``opens_at``/``closes_at`` are local, not UTC — resolved per date.
+    """A Space's ``opens_at_minutes``/``closes_at_minutes`` are local, not UTC.
 
     07:00 Europe/Berlin is 05:00Z in July (CEST, UTC+2). A booking at 05:00Z
     sits exactly at that resolved opening; one a minute earlier does not.
     """
-    berlin_summer = _config("Europe/Berlin", opens_at=time(7, 0), closes_at=time(22, 0))
+    berlin_summer = _config("Europe/Berlin", opens_at_minutes=7 * 60, closes_at_minutes=22 * 60)
     opening_instant = datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc)
 
     assert evaluate(
@@ -328,18 +333,46 @@ def test_availability_hours_resolve_against_the_spaces_own_timezone():
     assert not denied.allowed
 
 
+def test_availability_hours_open_at_local_9am_on_both_sides_of_a_dst_transition():
+    """A 09:00-17:00 window means local 09:00 whether or not the venue is in DST that day.
+
+    ``AvailabilityHoursRule`` no longer does any date math at all — it compares
+    ``context.local.start_minutes``/``end_minutes`` against two plain integers — so its DST
+    correctness is entirely inherited from ``_build_local_frame``'s own (already covered by
+    ``test_a_local_day_across_a_dst_transition_is_not_24_hours``). This test is the one that ties
+    the two together: a booking starting at local 09:00 is accepted on both sides of Berlin's 2026
+    spring-forward (29 March), and one starting a minute earlier is denied on both sides too, even
+    though the UTC offset — and so the UTC instant "09:00 local" resolves to — differs by an hour.
+    """
+    berlin = _config("Europe/Berlin", opens_at_minutes=9 * 60, closes_at_minutes=17 * 60)
+
+    before_transition = _tz_instant("Europe/Berlin", 2026, 3, 15, 9, 0)  # CET, UTC+1
+    after_transition = _tz_instant("Europe/Berlin", 2026, 4, 5, 9, 0)  # CEST, UTC+2
+
+    for opening_instant in (before_transition, after_transition):
+        earlier = opening_instant - timedelta(days=1)
+        assert evaluate(
+            request(opening_instant, opening_instant + timedelta(hours=1)), berlin, now=earlier
+        ).allowed
+        denied = evaluate(
+            request(opening_instant - timedelta(minutes=1), opening_instant + timedelta(hours=1)),
+            berlin,
+            now=earlier,
+        )
+        assert not denied.allowed
+
+
 def test_a_utc_day_crossing_space_accepts_a_booking_in_its_own_local_hours():
     """A Space whose local hours cross a UTC calendar day is bookable, not dead.
 
-    Pacific/Auckland is UTC+13 in the New Zealand summer (January), so an
-    ordinary 06:00-23:00 local window resolves (see
-    `app.operating_hours`) to opening 2026-01-20T17:00Z and closing
-    2026-01-21T10:00Z — no longer a `MidnightWrapError`. A booking sitting in
-    the local morning — 2026-01-21 07:00 Auckland local, which is
-    2026-01-20T18:00Z — is accepted, not refused with the engine's generic
-    "couldn't check this" copy (`DEFERRED.md` items 16 and 17).
+    Pacific/Auckland is UTC+13 in the New Zealand summer (January) — an ordinary 06:00-23:00 local
+    window is nowhere near midnight on the venue's own clock, and the adapter's local frame
+    (`_build_local_frame`) reads it in exactly those local minutes, with no UTC pair to invert or
+    cross a calendar day in at all (the mechanism this test predates: `.claude/rules/rule-engine.md`
+    on why an inverted UTC pair used to matter, and no longer does). A booking sitting in the local
+    morning — 2026-01-21 07:00 Auckland local, which is 2026-01-20T18:00Z — is accepted.
     """
-    crosses = _config("Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0))
+    crosses = _config("Pacific/Auckland", opens_at_minutes=6 * 60, closes_at_minutes=23 * 60)
     local_morning = datetime(2026, 1, 20, 18, 0, tzinfo=timezone.utc)
 
     result = evaluate(
@@ -359,7 +392,7 @@ def test_a_utc_day_crossing_space_still_denies_an_out_of_hours_booking():
     viewer would recognise, and it names none at all. Rendering the venue's hours in the venue's
     own zone stays the UI's job (`.claude/rules/rule-engine.md`).
     """
-    crosses = _config("Pacific/Auckland", opens_at=time(6, 0), closes_at=time(23, 0))
+    crosses = _config("Pacific/Auckland", opens_at_minutes=6 * 60, closes_at_minutes=23 * 60)
     # 2026-01-21 02:00 Auckland local (before the 06:00 local opening) is 2026-01-20T13:00Z.
     before_opening = datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)
 
@@ -902,12 +935,15 @@ TUESDAY = date(2026, 7, 21)
 
 
 def _hours_row(
-    row_id: int, opens: str, closes: str, applies_to: dict | None = None
+    row_id: int, opens: time, closes: time, applies_to: dict | None = None
 ) -> SpaceRuleRow:
     return SpaceRuleRow(
         id=row_id,
         rule_type="availability_hours",
-        params={"opens_at": opens, "closes_at": closes},
+        params={
+            "opens_at_minutes": opens.hour * 60 + opens.minute,
+            "closes_at_minutes": closes.hour * 60 + closes.minute,
+        },
         applies_to=applies_to,
     )
 
@@ -934,7 +970,7 @@ def test_resolve_day_schedule_with_no_rows_is_fully_unconfigured():
 def test_resolve_day_schedule_with_one_matching_row_of_each_type():
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, "09:00:00", "17:00:00"), _slot_row(2, 30)),
+        rules=(_hours_row(1, time(9, 0), time(17, 0)), _slot_row(2, 30)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
@@ -949,7 +985,7 @@ def test_two_overlapping_availability_rows_intersect_to_a_real_window():
     """9-17 and 12-20 together permit only the overlap, 12-17 — the flat AND."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, "09:00:00", "17:00:00"), _hours_row(2, "12:00:00", "20:00:00")),
+        rules=(_hours_row(1, time(9, 0), time(17, 0)), _hours_row(2, time(12, 0), time(20, 0))),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
@@ -963,7 +999,7 @@ def test_two_disjoint_availability_rows_intersect_to_nothing():
     """9-12 and 14-18 permit no overlap at all: closed all day, not a coherence error."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, "09:00:00", "12:00:00"), _hours_row(2, "14:00:00", "18:00:00")),
+        rules=(_hours_row(1, time(9, 0), time(12, 0)), _hours_row(2, time(14, 0), time(18, 0))),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
@@ -994,7 +1030,7 @@ def test_a_row_scoped_to_a_non_matching_weekday_is_excluded():
     """MONDAY is weekday 0; a row scoped to Tuesday/Thursday (1, 3) must not apply."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, "09:00:00", "17:00:00", applies_to={"weekdays": [1, 3]}),),
+        rules=(_hours_row(1, time(9, 0), time(17, 0), applies_to={"weekdays": [1, 3]}),),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
@@ -1006,7 +1042,7 @@ def test_a_row_scoped_to_a_non_matching_weekday_is_excluded():
 def test_a_row_scoped_to_a_matching_weekday_does_apply():
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, "09:00:00", "17:00:00", applies_to={"weekdays": [1]}),),
+        rules=(_hours_row(1, time(9, 0), time(17, 0), applies_to={"weekdays": [1]}),),
     )
 
     schedule = resolve_day_schedule(config, TUESDAY)
@@ -1022,7 +1058,7 @@ def test_a_disabled_row_is_never_resolved():
             SpaceRuleRow(
                 id=1,
                 rule_type="availability_hours",
-                params={"opens_at": "09:00:00", "closes_at": "17:00:00"},
+                params={"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60},
                 enabled=False,
             ),
         ),
@@ -1038,7 +1074,7 @@ def test_coherence_issue_when_hours_do_not_land_on_the_slot_grid():
     """09:15 opening on a 30-minute grid never lands on a boundary."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, "09:15:00", "17:00:00"), _slot_row(2, 30)),
+        rules=(_hours_row(1, time(9, 15), time(17, 0)), _slot_row(2, 30)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
@@ -1052,8 +1088,8 @@ def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_slot_rule():
     config = SpaceRuleConfig(
         timezone="UTC",
         rules=(
-            _hours_row(1, "09:00:00", "12:00:00"),
-            _hours_row(2, "14:00:00", "18:00:00"),
+            _hours_row(1, time(9, 0), time(12, 0)),
+            _hours_row(2, time(14, 0), time(18, 0)),
             _slot_row(3, 45),
         ),
     )

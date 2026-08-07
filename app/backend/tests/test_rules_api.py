@@ -292,13 +292,16 @@ def test_post_unknown_param_is_422_naming_it(api: Api, alice: User, space_a: Spa
 def test_post_availability_hours_inverted_is_422(api: Api, alice: User, space_a: Space) -> None:
     payload = {
         "rule_type": "availability_hours",
-        "params": {"opens_at": "17:00:00", "closes_at": "09:00:00"},
+        "params": {"opens_at_minutes": 17 * 60, "closes_at_minutes": 9 * 60},
     }
 
     response = api.as_user(alice).post(f"/spaces/{space_a.public_id}/rules", json=payload)
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Opening time must be earlier than closing time."
+    assert response.json()["detail"] == (
+        "Opening time must be within a single day, and earlier than closing time by at most 24"
+        " hours."
+    )
 
 
 def test_post_slot_alignment_not_dividing_1440_is_422(
@@ -388,23 +391,26 @@ def test_patch_replaces_params_and_revalidates(api: Api, alice: User, space_a: S
 def test_patch_availability_hours_with_only_one_bound_merges_with_the_stored_pair(
     api: Api, alice: User, space_a: Space
 ) -> None:
-    """A submission naming only one of ``opens_at``/``closes_at`` merges with
-    what is already stored rather than failing "missing required" — the same
-    effective-pair resolution ``update_space`` performs for its own PATCH.
+    """A submission naming only one of ``opens_at_minutes``/``closes_at_minutes``
+    merges with what is already stored rather than failing "missing required" —
+    the same effective-pair resolution ``update_space`` performs for its own PATCH.
     """
     rule = _create_rule(
         api,
         alice,
         space_a,
         rule_type="availability_hours",
-        params={"opens_at": "09:00:00", "closes_at": "17:00:00"},
+        params={"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60},
     )
     url = f"/spaces/{space_a.public_id}/rules/{rule['id']}"
 
-    response = api.as_user(alice).patch(url, json={"params": {"opens_at": "10:00:00"}})
+    response = api.as_user(alice).patch(url, json={"params": {"opens_at_minutes": 10 * 60}})
 
     assert response.status_code == 200
-    assert response.json()["params"] == {"opens_at": "10:00:00", "closes_at": "17:00:00"}
+    assert response.json()["params"] == {
+        "opens_at_minutes": 10 * 60,
+        "closes_at_minutes": 17 * 60,
+    }
 
 
 def test_patch_null_params_is_422(api: Api, alice: User, space_a: Space) -> None:
