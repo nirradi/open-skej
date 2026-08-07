@@ -63,7 +63,10 @@ app/frontend/    React SPA
   src/admin/     Space creation, members, invitations, the access-request queue, the Space's
                    timezone, and — at `/s/{public_id}/rules` — a generic editor over the Space's
                    own rule instances, built from each rule type's declared parameter schema rather
-                   than one form per type
+                   than one form per type. The same page also carries a panel to author a rule
+                   type in English rather than only configure one from a declared schema: a
+                   prompt, a polled generation job, and a hand-off into the same "Add a rule" flow
+                   once it succeeds
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/
   interfaces.py  The rule contract — authoritative, read before writing any rule

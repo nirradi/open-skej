@@ -116,8 +116,21 @@ export default defineConfig({
        * onto a seeded sandbox session (`global-setup.ts` runs
        * `app.sandbox_seed`) instead of depending on the unauthenticated
        * calendar, so the frontend needs a real backend to mint tokens from.
+       *
+       * `RULE_GENERATION_ENABLED` registers the rule-drafts routes
+       * `RuleAuthoringPanel` needs (task 7.9); `RULE_GENERATION_CLIENT=stub`
+       * is already this backend's own default, named here rather than left
+       * implicit so this suite never starts billing a real model the moment
+       * that default ever changes — `generation.stub.StubLLMClient` answers
+       * in milliseconds and never varies, which is the whole reason it exists
+       * (`rules/generation/stub.py`).
        */
-      env: { DATABASE_URL, SANDBOX_AUTH: 'true' },
+      env: {
+        DATABASE_URL,
+        SANDBOX_AUTH: 'true',
+        RULE_GENERATION_ENABLED: 'true',
+        RULE_GENERATION_CLIENT: 'stub',
+      },
       /**
        * Never reuse. A backend already listening on 8000 is almost certainly a
        * developer's own `uvicorn`, pointed at their real database — reusing it

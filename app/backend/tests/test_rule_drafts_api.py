@@ -557,11 +557,14 @@ def test_submitting_a_prompt_returns_202_and_runs_the_job(
     assert body["prompt"] == PROMPT
     assert body["status"] == "queued"
     assert body["generated_rule_type"] is None
+    assert body["human_code"] is None
 
     follow_up = api.as_user(alice).get(f"/spaces/{space_a.public_id}/rule-drafts/{body['id']}")
     assert follow_up.status_code == 200
-    assert follow_up.json()["status"] == "succeeded"
-    assert follow_up.json()["generated_rule_type"]
+    follow_up_body = follow_up.json()
+    assert follow_up_body["status"] == "succeeded"
+    assert follow_up_body["generated_rule_type"]
+    assert "class " in follow_up_body["human_code"]
 
 
 def test_a_second_in_flight_job_is_refused_with_409(

@@ -128,7 +128,7 @@ def list_rule_drafts(context: AdminContext, session: SessionDep) -> list[RuleDra
         .scalars()
         .all()
     )
-    return [RuleDraftRead.build(job, rule_type=_rule_type_for(session, job)) for job in jobs]
+    return [RuleDraftRead.build(job, **_generated_type_fields(session, job)) for job in jobs]
 
 
 @router.get("/{public_id}/rule-drafts/{draft_id}", response_model=RuleDraftRead)
@@ -149,7 +149,7 @@ def read_rule_draft(draft_id: int, context: AdminContext, session: SessionDep) -
     ).scalar_one_or_none()
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=JOB_NOT_FOUND_DETAIL)
-    return RuleDraftRead.build(job, rule_type=_rule_type_for(session, job))
+    return RuleDraftRead.build(job, **_generated_type_fields(session, job))
 
 
 def _in_flight_job(session: Session, space_id: int) -> RuleGenerationJob | None:
@@ -178,16 +178,21 @@ def _in_flight_job(session: Session, space_id: int) -> RuleGenerationJob | None:
     )
 
 
-def _rule_type_for(session: Session, job: RuleGenerationJob) -> str | None:
-    """The ``rule_type`` string this job produced, or ``None`` if it produced nothing.
+def _generated_type_fields(session: Session, job: RuleGenerationJob) -> dict[str, str | None]:
+    """The two ``RuleDraftRead.build`` keyword args sourced from the type this job produced.
 
-    The string, not the integer id: it is what ``space_rules.rule_type`` stores, so it is the
-    value a page needs to offer "add an instance of this" as the next step.
+    ``rule_type`` (the string, not the integer id — what ``space_rules.rule_type`` stores, so it
+    is the value a page needs to offer "add an instance of this" as the next step) and
+    ``human_code`` (the verified source, for the succeeded state's read-only disclosure). One
+    query rather than two: both live on the same row, and a job that produced nothing has neither.
     """
     if job.generated_rule_type_id is None:
-        return None
-    return session.execute(
-        select(GeneratedRuleType.rule_type).where(
+        return {"rule_type": None, "human_code": None}
+    row = session.execute(
+        select(GeneratedRuleType.rule_type, GeneratedRuleType.human_code).where(
             GeneratedRuleType.id == job.generated_rule_type_id
         )
-    ).scalar_one_or_none()
+    ).one_or_none()
+    if row is None:
+        return {"rule_type": None, "human_code": None}
+    return {"rule_type": row.rule_type, "human_code": row.human_code}

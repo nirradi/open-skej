@@ -388,10 +388,20 @@ export interface RuleParamRead {
  * Mirrors `RuleTypeRead` — one registered rule type (`rules.REGISTRY`), as
  * `GET /rule-types` serves it. Describes what the product can configure at
  * all, never one Space's configuration of it — see `SpaceRuleRead` below.
+ *
+ * `description` is prose for an admin choosing between rule types — "what it
+ * refuses" — never a restatement of the code. For a hand-written type it is
+ * authored alongside the type; for a generated one it is the model's own
+ * account of what it built (task 7.8's manifest call), not the admin's
+ * original prompt. `AddRulePanel` renders it under the selected type so the
+ * picker stays a `<select>` of labels rather than growing into a combobox —
+ * see `.claude/rules/identity-and-access.md`, "The picker gains
+ * descriptions".
  */
 export interface RuleTypeRead {
   rule_type: string
   label: string
+  description: string
   priority: number
   reads_history: boolean
   needs_local_resolution: boolean
@@ -479,6 +489,56 @@ export interface SpaceRuleUpdateInput {
   params?: Record<string, unknown>
   applies_to?: RuleAppliesTo | null
   enabled?: boolean
+}
+
+/** Mirrors `RuleGenerationJobStatus` in `app/backend/app/identity/models.py`. */
+export type RuleGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed'
+
+/**
+ * One pass through generate → test → run, as `RuleGenerationJob.attempts`
+ * stores it and `RuleDraftRead` serves it verbatim. `outcome` mirrors
+ * `AttemptOutcome`'s wire value (`"passed"`, `"tests_failed"`, …) but is left
+ * as `string` here rather than a literal union, since this client never
+ * branches on it — only counts entries, to say which attempt a running job is
+ * on. The capped `failure` text is pytest output and traceback excerpts
+ * written for the model, and `RuleAuthoringPanel` deliberately never renders
+ * it — the same category of thing `RULE_ERROR_MESSAGE` exists to keep out of
+ * the UI.
+ */
+export interface RuleDraftAttempt {
+  number: number | null
+  outcome: string | null
+  failure: string | null
+}
+
+/**
+ * Mirrors `RuleDraftRead` — one rule-generation job, as an admin polling
+ * `POST`/`GET .../rule-drafts` sees it.
+ *
+ * `human_code` is the verified rule's own source, present only once `status`
+ * is `"succeeded"` — `null` at every other status, including `"failed"`: a
+ * failed job produced no verified candidate to show. `generated_rule_type`
+ * is the `rule_type` string the job produced (not its integer id), which is
+ * what `SpaceRuleCreateInput.rule_type` and the "Add a rule" picker both
+ * need. `attempts` and `error` are read for the failed state's summary only
+ * — see `RuleAuthoringPanel` for why the per-attempt `failure` text (pytest
+ * output written for the model) is deliberately never rendered.
+ */
+export interface RuleDraftRead {
+  id: number
+  prompt: string
+  status: RuleGenerationJobStatus
+  attempts: RuleDraftAttempt[]
+  error: string | null
+  generated_rule_type: string | null
+  human_code: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** The body of `POST /spaces/{public_id}/rule-drafts`. Mirrors `RuleDraftCreate`. */
+export interface RuleDraftCreateInput {
+  prompt: string
 }
 
 /**
