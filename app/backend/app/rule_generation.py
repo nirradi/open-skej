@@ -128,10 +128,28 @@ def run_generation_job(
     has been sent, by which point FastAPI has already closed the request-scoped session. It is
     also what the tests call directly, without an HTTP layer in the way.
 
-    Every exit path leaves the job at ``succeeded`` or ``failed``. The ``except Exception`` around
-    the run is deliberately broad — a job that raises out of a background task would otherwise
-    leave a row ``running`` forever, and the in-flight unique index turns that into a permanent
-    outage for that one tenant rather than one lost generation.
+    Every exit path leaves the job at ``succeeded`` or ``failed`` — with the two early returns
+    below as the only exception, and they are not really exceptions: a vanished job or one this
+    call did not claim (``QUEUED`` at entry, checked below) was never this run's to finish, and
+    leaving its row untouched is correct, not incomplete.
+
+    Once the job is claimed and moved to ``running``, everything through the ``succeeded``/
+    ``failed`` commit — building the client, the generation loop, ``_attempt_summary``,
+    ``_write_rule_type`` (which ``compile()``\\ s and ``marshal.dumps()``\\ s model-authored
+    source), and the commit itself — runs inside one ``except Exception`` that is deliberately
+    broad. A job that raises anywhere in that span would otherwise leave a row ``running``
+    forever, and the in-flight unique index turns that into a permanent outage for that one
+    tenant rather than one lost generation. The handler rolls back, re-fetches the job (the
+    rollback may have expired the instance already in hand), and marks it FAILED with the
+    exception's ``type: message`` as the error — the same recovery shape ``sweep_orphaned_
+    generation_jobs`` relies on existing, just triggered by a raise instead of a restart.
+
+    ``catalog.reload(session)`` is deliberately *outside* that handler, in a try/except of its
+    own. It only runs once the job has already been committed ``succeeded``, and by then the row
+    genuinely is a success — the type is written, verified, and in the database. A failure to
+    hoist it into this process's in-memory catalog is a live-reload problem, not a generation
+    problem: the type is invisible here until the next restart or the next miss-triggered reload,
+    but it exists, and reporting the job FAILED would contradict the row the database is holding.
     """
     factory = session_factory or get_session_factory()
     session = factory()
@@ -153,10 +171,20 @@ def run_generation_job(
         job.status = RuleGenerationJobStatus.RUNNING
         session.commit()
 
-        settings = _settings()
         try:
+            settings = _settings()
             result = _run_loop(session, job, client=client or build_generation_client(settings))
-        except Exception as exc:  # noqa: BLE001 — see the docstring: nothing may escape.
+            job.attempts = [_attempt_summary(attempt) for attempt in result.attempts]
+            if result.succeeded and result.rule_source:
+                rule_row = _write_rule_type(session, job, result)
+                job.generated_rule_type_id = rule_row.id
+                job.status = RuleGenerationJobStatus.SUCCEEDED
+                job.error = None
+            else:
+                job.status = RuleGenerationJobStatus.FAILED
+                job.error = _failure_summary(result)
+            session.commit()
+        except Exception as exc:  # noqa: BLE001 — see the docstring: nothing here may escape.
             logger.exception("Rule generation job %s raised; failing it.", job_id)
             session.rollback()
             job = session.get(RuleGenerationJob, job_id)
@@ -166,21 +194,23 @@ def run_generation_job(
                 session.commit()
             return
 
-        job.attempts = [_attempt_summary(attempt) for attempt in result.attempts]
-        if result.succeeded and result.rule_source:
-            rule_row = _write_rule_type(session, job, result)
-            job.generated_rule_type_id = rule_row.id
-            job.status = RuleGenerationJobStatus.SUCCEEDED
-            job.error = None
-            session.commit()
-            # Hoist it live. Without this the type exists in the database but not in this
-            # process's catalog until the next restart or the next miss-triggered reload, and the
-            # admin who just generated it would be told their own new type does not exist.
-            catalog.reload(session)
-        else:
-            job.status = RuleGenerationJobStatus.FAILED
-            job.error = _failure_summary(result)
-            session.commit()
+        if job.status is RuleGenerationJobStatus.SUCCEEDED:
+            try:
+                # Hoist it live. Without this the type exists in the database but not in this
+                # process's catalog until the next restart or the next miss-triggered reload, and
+                # the admin who just generated it would be told their own new type does not
+                # exist. This is deliberately its own try/except, outside the failure handler
+                # above: the job is already committed succeeded by this point, so a reload
+                # failure here is a stale-catalog problem, not a failed generation, and must not
+                # flip a row the database already correctly recorded as a success.
+                catalog.reload(session)
+            except Exception:  # noqa: BLE001 — degraded, not failed; see the docstring.
+                logger.exception(
+                    "Rule generation job %s succeeded but the live catalog reload failed; the "
+                    "new type is in the database but will not appear until the next restart or "
+                    "a subsequent reload.",
+                    job_id,
+                )
     finally:
         session.close()
 
@@ -381,8 +411,12 @@ def _unique_rule_type(session: Session, prompt: str) -> str:
 
     ``rule_type`` is unique and **never reused**: ``space_rules.rule_type`` stores this string, so
     handing the same id to a second type would silently repoint every instance of the first one.
-    A collision therefore takes a numeric suffix rather than replacing anything, and the base is
-    truncated so the suffix fits inside ``String(64)`` rather than overflowing it.
+    A collision therefore takes a numeric suffix rather than replacing anything. ``base`` is
+    already capped at 48 characters, well short of ``_MAX_RULE_TYPE_CHARS`` (64), so today's
+    suffixes never actually hit the ``base[: _MAX_RULE_TYPE_CHARS - len(tail)]`` slice below — it
+    is defence in depth, not load-bearing yet. It is what keeps `candidate` inside
+    ``String(64)`` rather than overflowing it if the 48-character cap on ``base`` is ever raised
+    without this function being revisited.
     """
     base = _slug(prompt)[:48] or "generated_rule"
     candidate = base

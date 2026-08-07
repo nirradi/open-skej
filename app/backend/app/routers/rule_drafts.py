@@ -153,15 +153,29 @@ def read_rule_draft(draft_id: int, context: AdminContext, session: SessionDep) -
 
 
 def _in_flight_job(session: Session, space_id: int) -> RuleGenerationJob | None:
-    """This Space's queued-or-running job, if it has one."""
-    return session.execute(
-        select(RuleGenerationJob).where(
-            RuleGenerationJob.space_id == space_id,
-            RuleGenerationJob.status.in_(
-                (RuleGenerationJobStatus.QUEUED, RuleGenerationJobStatus.RUNNING)
-            ),
+    """This Space's queued-or-running job, if it has one.
+
+    Reads with ``.scalars().first()`` rather than ``.scalar_one_or_none()`` on purpose. This
+    function's only job is to answer "does this Space have a live job", and the partial unique
+    index ``uq_rule_generation_jobs_in_flight`` is what guarantees the answer is at most one row —
+    ``scalar_one_or_none`` would just be re-asserting that guarantee and raising
+    ``MultipleResultsFound`` (a 500 that tells the admin nothing) if it were ever violated. The
+    caller only wants a 409 either way: "a job is already in flight, don't start another" is the
+    correct response whether there is exactly one such job or, through some future bug, more than
+    one — refusing the new job is what defends the invariant, not reporting on how badly it broke.
+    """
+    return (
+        session.execute(
+            select(RuleGenerationJob).where(
+                RuleGenerationJob.space_id == space_id,
+                RuleGenerationJob.status.in_(
+                    (RuleGenerationJobStatus.QUEUED, RuleGenerationJobStatus.RUNNING)
+                ),
+            )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .first()
+    )
 
 
 def _rule_type_for(session: Session, job: RuleGenerationJob) -> str | None:

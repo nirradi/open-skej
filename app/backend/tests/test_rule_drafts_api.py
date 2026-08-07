@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from generation.stub import StubLLMClient
 
 import app.main as main_module
+import app.rule_generation as rule_generation
 from app.auth.dependencies import get_current_user
 from app.db.models import Base
 from app.db.session import get_session
@@ -296,6 +297,52 @@ def test_a_failing_generation_leaves_the_history_and_no_rule_type(
     assert all(attempt["outcome"] != "passed" for attempt in job.attempts)
 
     assert session.execute(select(GeneratedRuleType)).scalars().all() == []
+
+
+def test_a_crash_after_the_loop_succeeds_still_fails_the_job_and_frees_the_space(
+    session: Session,
+    session_factory,
+    space_a: Space,
+    alice: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug this test exists to guard against: a crash *after* the loop must still fail the job.
+
+    ``_write_rule_type`` runs after ``_run_loop`` has already returned a PASSED result — it is the
+    step that ``compile()``\\ s and ``marshal.dumps()``\\ s the model-authored source and writes the
+    catalog row. In the code this regression tests against, the ``except Exception`` around the run
+    covered only the loop itself; anything that raised in ``_write_rule_type``, the status commit,
+    or the live catalog reload escaped `run_generation_job` entirely and the job's row was left at
+    ``running``, uncommitted, forever.
+
+    That is not a cosmetic wart. `rule_generation_jobs` has a partial unique index over
+    `status IN ('queued', 'running')`, so one row stuck at `running` permanently blocks that Space
+    from ever starting another generation — until the backend restarts and the sweep clears it. So
+    the assertion that actually matters here is not merely that the job ends up `FAILED`; it is
+    that a fresh `_queue_job` for the same Space succeeds immediately afterwards, which is the one
+    thing a stuck-`running` row would have refused.
+
+    The call below must not raise — after the fix, `_write_rule_type` raising is caught by the
+    same handler that covers the loop, and the exception is swallowed rather than propagated.
+    """
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rule_generation, "_write_rule_type", _boom)
+
+    job_id = _queue_job(session, space_a, alice)
+
+    run_generation_job(job_id, session_factory=session_factory, client=StubLLMClient())
+
+    job = _reload_job(session, job_id)
+    assert job.status is RuleGenerationJobStatus.FAILED
+    assert job.error
+    assert "boom" in job.error
+
+    # The actual harm the partial unique index causes: without the fix this second queue attempt
+    # would violate it, because the first job would still be sitting at `running`.
+    assert _queue_job(session, space_a, alice) != job_id
 
 
 # --- The recording ----------------------------------------------------------------------------

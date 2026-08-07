@@ -27,7 +27,7 @@ with the wrong kind of code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import generator, tester
 from .errors import LLMCallError
@@ -237,7 +237,13 @@ class StubLLMClient:
 
     fail_first_attempts: int = 0
     always_unsafe: bool = False
-    _generator_calls: int = 0
+
+    #: Run state, not a third axis of configuration: it counts this instance's own Generator
+    #: turns so `complete` can compare against `fail_first_attempts` above. Excluded from
+    #: `__init__` (a caller has no business seeding it — `StubLLMClient(0, False, 5)` would
+    #: silently start a "fresh" client mid-retry) and from `__repr__` (it is not part of what
+    #: configures this client, only of what it remembers having done).
+    _generator_calls: int = field(default=0, init=False, repr=False)
 
     def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
         if system == generator.SYSTEM_PROMPT:
