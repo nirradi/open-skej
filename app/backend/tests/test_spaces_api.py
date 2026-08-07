@@ -157,6 +157,15 @@ def _all_space_scoped_routes() -> set[tuple[str, str]]:
 # leaving the ownership floor to its own tests —
 # ``test_a_member_cancelling_another_members_booking_is_refused_and_the_booking_survives``
 # and its neighbours in ``test_resource_bookings_api.py``, not this table.
+#
+# **The rule-drafts routes are deliberately absent from this table.** They are
+# registered by a conditional ``include_router`` (``RULE_GENERATION_ENABLED``,
+# off by default), so they are not in the OpenAPI schema this table is compared
+# against for *equality* — listing them here would break
+# ``test_every_space_scoped_route_is_classified``, which is the guard that makes
+# the table worth having. They are admin+, and that is proven by an equivalent
+# sweep over an app built with generation enabled:
+# ``test_rule_drafts_api.py::test_every_rule_draft_route_is_admin_only``.
 ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
     ("GET", "/spaces/{public_id}"): MembershipRole.MEMBER,
     ("PATCH", "/spaces/{public_id}"): MembershipRole.ADMIN,

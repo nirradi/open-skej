@@ -249,6 +249,53 @@ The source, its `sha256`, the compiled `executable_bytecode`, the `python_versio
 `bytecode_magic` all live on the row; `rule-engine.md` owns why both version and magic are stored and
 what the load path re-proves before executing any of it.
 
+## Generation is a job, and the API over it does not exist unless it is switched on
+
+Writing one of those rows takes minutes and up to eight model calls, so an admin submits a prompt and
+polls. Four tables and one router carry it.
+
+`rule_generation_jobs` holds the request: `space_id`, `user_id`, the `prompt`, a status of
+`queued | running | succeeded | failed`, the per-attempt `attempts` history, an `error` for a human
+to read, and the `generated_rule_types` row it produced, if any. `prompt_versions` and
+`rule_generation_exchanges` are the recording — one exchange row per model call, pointing at a system
+prompt stored **once, keyed on its sha256** rather than copied onto every call. `rule-engine.md` owns
+why the exchanges are kept at all and what the retry turn contains.
+
+**A partial unique index makes the constraint precise**: `uq_rule_generation_jobs_in_flight` is
+unique on `space_id` `WHERE status IN ('queued','running')`. The same shape and the same reasoning as
+`uq_space_access_requests_pending` — uniqueness over the *live* rows only, so one Space cannot queue
+five generations at once, while a Space that generated yesterday can generate again today. A plain
+`UNIQUE (space_id)` would permit exactly one generation per Space ever.
+
+That index is also why **`app.main`'s lifespan sweeps orphaned jobs to `failed` at boot**. The runner
+is in-process and does not survive a restart, so a `running` row at boot describes a job nobody is
+executing — and with this index, one stale row is not merely stale, it is a permanent block on that
+Space ever generating again. The sweep is the release valve, not housekeeping. It runs in its own
+`try`/`except`, the same posture as the catalog reload beside it: a database slow to accept
+connections at boot must not stop the backend coming up.
+
+**The routes are `admin+`, and on a normally-configured backend they do not exist.**
+`POST /spaces/{public_id}/rule-drafts` (202, or 409 when one is already in flight), `GET` on the
+collection, and `GET` on one id. `app.main` registers the router only when `RULE_GENERATION_ENABLED`
+is set — a conditional `include_router`, exactly as for sandbox auth mode, so a caller gets a genuine
+404 rather than a 403 that would first require the route to exist in order to refuse it. Whether the
+capability is present is not discoverable by whether a request to it succeeds. There is a second
+reason here that sandbox mode does not have: every job spends real model calls, so an unconfigured
+deployment cannot be induced to spend money by anyone who guesses the URL. `RULE_GENERATION_ENABLED`
+is a dedicated boolean and is **never inferred** from an API key being present.
+
+A job id belonging to another Space returns the **identical 404** as one that names nothing, resolved
+in one query scoped to `space_id` — the standing rule; the difference between "no such job" and "not
+your job" is itself information about another tenant.
+
+**These three routes are absent from `test_spaces_api.py`'s `ROLE_TABLE`**, which is compared for
+equality against the app's OpenAPI schema and therefore cannot list a conditionally-registered route.
+The equivalent sweep lives in `test_rule_drafts_api.py`, over an app built with generation enabled.
+
+Note the asymmetry the route docstrings state: **the job is Space-scoped, the rule type it produces
+is global.** Authorisation to *generate* is a Space authorisation; the artifact is not scoped to that
+Space, and the provenance columns above are what a later migration would use to scope it.
+
 ## Spaces are not discoverable
 
 There is no endpoint listing Spaces. The only way to reach one you are not in is to be handed its

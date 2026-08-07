@@ -709,6 +709,68 @@ deliberately and neither is the other's.
 If a future benchmark run against a different model changes any of this, rewrite these paragraphs and
 flip the default — the instruction to settle it with evidence rather than assumption still holds.
 
+### The loop also runs in the backend, as a job
+
+`app.rule_generation.run_generation_job` drives the same `run_generation_loop` from inside the
+booking process, with `output_dir=None` — the artifact directory is a developer-review affordance,
+and this path's artifact is a database row. `identity-and-access.md` owns the tables, the API and the
+admin gate; what belongs here is what the runner is allowed to do with a result.
+
+**Only `AttemptOutcome.PASSED` writes a `generated_rule_types` row.** A timeout is not a success and
+a crash is not a success. The loop's own docstring says this about `generated/`; here the consequence
+is a row in a catalog that judges real bookings, so it is the second place it has to be true. Any
+other outcome fails the job with its attempt history and writes nothing. After a successful write the
+runner calls `catalog.reload`, so the type is live in that process without a restart — the other
+workers pick it up through the miss-triggered reload described under "Backend integration".
+
+`reads_history` is derived from the validated source by a **deliberately over-inclusive** check. The
+two errors are not symmetric: a false positive costs one history query the rule ignores, while a
+false negative hands the rule an empty history and makes it silently *permissive* — a "no more than
+three a week" rule counting zero existing bookings and allowing one it should have refused. When the
+cheap check errs in the safe direction, take the cheap check.
+
+**The generation client is chosen by `RULE_GENERATION_CLIENT`, and `stub` is the default.**
+`generation.stub.StubLLMClient` answers with a canned, valid rule and a canned suite, deterministically
+and with no network or subprocess, and it sits at the `LLMClient` seam — so E2E and the backend suite
+drive every layer this feature builds without a live model call, the same split the benchmark already
+draws by never running in CI. Defaulting to it means an enabled-but-otherwise-unconfigured backend
+runs the whole flow against a canned response instead of billing anyone.
+
+### Every prompt and completion is persisted, in our own database
+
+There is **no LangChain, no LangGraph and no tracing SDK** in this project and none is being added.
+`rules/pyproject.toml` declares zero runtime dependencies deliberately, because the package installs
+into the backend and anything listed there is a cost the booking API pays forever; the prompts are
+user-authored text from a multi-tenant product, so shipping them to a third party is a data-sharing
+decision that is free now and expensive to unwind; and a generated rule enforces bookings for years
+while a hosted free tier keeps traces for weeks.
+
+So `RecordingClient.on_exchange` writes a `rule_generation_exchanges` row per model call **as the run
+progresses**, not once at the end — a process that dies at attempt three still leaves the first two
+attempts' prompts behind. **The retry turn is what the recording is for**: on a retry `build_prompt`
+hands the model back its own failing source plus the validator or pytest output verbatim, and that is
+both the entire prompt-debugging surface and the only evidence of why a rule now enforcing a venue's
+bookings reads the way it does. `user_prompt` is therefore stored untruncated.
+
+A system prompt is stored **once, by sha256**, in `prompt_versions` rather than copied onto every
+exchange. Size is the smaller half of the argument — the Generator's is ~5.7 kB against up to eight
+calls per generation — and the join is the real one: *which system-prompt version produced which
+outcome* is the question prompt tuning asks, and the question a pile of near-identical copies cannot
+answer without diffing them first. The `agent` label is derived by comparing the system prompt to
+`SYSTEM_PROMPT` / `TESTER_SYSTEM_PROMPT`, and the attempt number positionally — each Generator turn
+opens an attempt — because the recorder sits at the `LLMClient` seam and must not learn about loops.
+
+What this gives up is the *UX* a tracing product provides: prompt diffing, replay, cost dashboards. A
+Postgres table has none of that. The same wrapper is where an exporter would attach if that pain ever
+becomes real; self-hosted Langfuse is the candidate, since this project already runs docker-compose
+and it keeps tenant prompts on our own infrastructure.
+
+Measured from real stub runs, one generation costs roughly **3.6 kB** across the job and exchange
+rows when it passes first time and **4.9 kB** with one retry, plus a one-off ~10 kB of
+`prompt_versions` shared by every job forever. A real model's completions run longer than the stub's,
+so treat those as the floor. Retention is deliberately **not** decided here — nothing is deployed and
+a policy invented inside a task is one nobody agreed to — but the decision now has a number attached.
+
 ## Benchmarking
 
 `rules/benchmark.py` is a CLI feeding five golden examples ("max 1 hour", "only on weekends", "max 2
@@ -737,6 +799,13 @@ would give the engine's retry loop a benchmark's concern to carry forever. The w
 same seam the loop already calls through. Sums follow the metadata fields' own convention — present
 values sum, and all-absent is `None` rather than `0`, so a local model's unknown price is not
 reported as free.
+
+**That claim survives, and it now has a second consumer.** `RecordingClient` lives in
+`generation/llm.py` rather than inside `benchmark.py`, records both directions rather than only the
+response, and serves the benchmark and the backend's job runner from one implementation. The loop is
+unchanged — it still returns strings, still discards every `LLMResponse`, and still does not know
+that anyone is watching. That is the property the seam was for, and moving the wrapper is what spends
+it rather than eroding it.
 
 **An `LLMCallError` aborts the rest of that model's run.** The loop does not retry one because
 another prompt does not fix an unreachable daemon or an unpulled model id; the same reasoning holds

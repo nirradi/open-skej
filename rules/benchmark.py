@@ -17,7 +17,12 @@ to ``run_generation_loop``.** The loop returns strings and discards every ``LLMR
 correctly, since threading benchmark metadata out of it would give the engine's retry loop a
 benchmark's concern to carry forever. ``RecordingClient`` is what recovers that metadata instead:
 it sits at the same seam the loop already calls through, wrapping the real client for the duration
-of one example and handing back everything it observed.
+of one example and handing back everything it observed. It now lives in ``generation/llm.py``
+rather than here — the backend's job runner needed the same recording, both directions this time,
+to persist every prompt and completion a generation job makes (`.claude/rules/rule-engine.md`,
+"Recording what was said to the model") — and this module imports it rather than keeping a second
+copy. ``responses`` on it stays exactly the shape this module always used, so nothing below this
+line changed beyond the import.
 
 **An ``LLMCallError`` aborts the rest of that model's run, not just the example it hit.** The
 loop's own docstring says the same error is not retried within one example: an unreachable daemon
@@ -50,6 +55,7 @@ from generation.llm import (
     LLMClient,
     LLMResponse,
     OllamaClient,
+    RecordingClient,
     read_google_api_key,
 )
 from generation.loop import MAX_RETRIES, LoopResult, run_generation_loop
@@ -390,26 +396,6 @@ def _sum_optional(values: Iterable[int | float | None]) -> int | float | None:
     if not present:
         return None
     return sum(present)
-
-
-@dataclass
-class RecordingClient:
-    """Wraps an ``LLMClient`` and remembers every ``LLMResponse`` it returned.
-
-    This is the whole reason the seam in ``llm.py`` exists in this shape: the loop calls
-    ``client.complete`` and nothing else, so anything that also implements ``complete`` can sit
-    between the loop and the real backend without the loop knowing the difference. Construct one
-    per example — a fresh ``responses`` list — wrapping the same underlying client, and read
-    ``responses`` back once the loop returns.
-    """
-
-    wrapped: LLMClient
-    responses: list[LLMResponse] = field(default_factory=list)
-
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
-        response = self.wrapped.complete(system=system, prompt=prompt, model=model)
-        self.responses.append(response)
-        return response
 
 
 def build_example_report(

@@ -46,19 +46,24 @@ exception handler in the path logs and this one is a credential.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from .errors import LLMCallError
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "LLMResponse",
     "LLMClient",
+    "RecordedExchange",
+    "RecordingClient",
     "ClaudeCliClient",
     "build_command",
     "interpret_cli_result",
@@ -155,6 +160,78 @@ class LLMClient(Protocol):
     def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
         """Return the model's completion for ``prompt`` under ``system``."""
         ...
+
+
+@dataclass(frozen=True)
+class RecordedExchange:
+    """One completion, with the turn that produced it. What ``RecordingClient`` accumulates.
+
+    ``system`` and ``prompt`` are kept alongside ``response`` because a response on its own does
+    not say what was asked — and what was asked is the half of a generation run that the retry loop
+    itself discards (``run_generation_loop`` returns strings and drops every ``LLMResponse``; see
+    that module's docstring for why that stays true). This dataclass is what a caller sitting at
+    this seam gets to keep instead: the whole exchange, both directions, one object per call.
+    """
+
+    system: str
+    prompt: str
+    model: str
+    response: LLMResponse
+
+
+@dataclass
+class RecordingClient:
+    """Wraps an ``LLMClient`` and remembers every exchange it mediated, in both directions.
+
+    This is the whole reason the ``LLMClient`` seam exists in this shape: the loop calls
+    ``client.complete`` and nothing else, so anything that also implements ``complete`` can sit
+    between the loop and the real backend without the loop knowing the difference. It started life
+    inside ``benchmark.py``, recording only the ``LLMResponse`` half — enough for a benchmark, which
+    only ever asks "what did this cost" — and is promoted here, recording the ``system``/``prompt``
+    half too, because the backend's job runner needs the question as much as the answer: on a
+    retry, ``generator.build_prompt`` hands the model back its own failing source and the failure
+    text verbatim, and that turn is the entire point of persisting exchanges at all
+    (``rule-engine.md``, "Recording what was said to the model").
+
+    Construct one per run — a fresh ``exchanges`` list — wrapping the real client, and read
+    ``exchanges`` back once the loop returns. ``responses`` stays as a read-only view for the sake
+    of every caller that only ever wanted the old, response-only shape: ``benchmark.py`` and its
+    tests build reports from a list of ``LLMResponse``, and re-deriving that list from
+    ``exchanges`` here is what lets neither have to change beyond an import.
+
+    ``on_exchange``, when given, is called with each ``RecordedExchange`` immediately after the
+    call that produced it returns — which is how the backend's job runner persists one exchange row
+    per model call as a multi-minute generation run progresses, rather than only once at the end
+    when there would be nothing left to resume from if the process died mid-run. A hook that raises
+    is caught and logged rather than left to propagate: the hook is a side effect of recording,
+    never a step the generation loop itself depends on, and letting a database write failure abort
+    an in-flight model call would fail the *booking* feature (rule generation) for a *reporting*
+    reason (an exchange could not be persisted) — the opposite of this project's fail-closed
+    posture, which reserves failing hard for cases where the outcome itself cannot be trusted.
+    """
+
+    wrapped: LLMClient
+    on_exchange: Callable[[RecordedExchange], None] | None = None
+    exchanges: list[RecordedExchange] = field(default_factory=list)
+
+    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+        response = self.wrapped.complete(system=system, prompt=prompt, model=model)
+        exchange = RecordedExchange(system=system, prompt=prompt, model=model, response=response)
+        self.exchanges.append(exchange)
+        if self.on_exchange is not None:
+            try:
+                self.on_exchange(exchange)
+            except Exception:
+                logger.exception(
+                    "on_exchange hook raised while recording a completion; the exchange is kept "
+                    "in memory (see `exchanges`) but may not have been persisted."
+                )
+        return response
+
+    @property
+    def responses(self) -> list[LLMResponse]:
+        """Every response seen, in order — the shape this class had before promotion."""
+        return [exchange.response for exchange in self.exchanges]
 
 
 class ClaudeCliClient:

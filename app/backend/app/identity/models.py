@@ -107,6 +107,34 @@ class GeneratedRuleTypeStatus(str, enum.Enum):
     RETIRED = "retired"
 
 
+class RuleGenerationJobStatus(str, enum.Enum):
+    """How far one generation run has got.
+
+    ``queued`` and ``running`` are the two *in-flight* values, and the pair is load-bearing
+    rather than descriptive: the partial unique index on ``rule_generation_jobs`` is written
+    over exactly these two, so a Space may hold at most one live job while keeping every
+    finished one.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class PromptAgent(str, enum.Enum):
+    """Which agent in the generation loop authored a stored prompt.
+
+    Three, not two: the loop's Generator and Tester each carry their own system prompt, and
+    7.8's manifest step will be a third. Naming it now means the enum does not have to change
+    under rows that already exist.
+    """
+
+    GENERATOR = "generator"
+    TESTER = "tester"
+    MANIFEST = "manifest"
+
+
 def _string_enum(enum_cls: type[enum.Enum], name: str, length: int) -> Enum:
     """An ``Enum`` column type stored as its string value with a CHECK behind it.
 
@@ -131,6 +159,10 @@ _INVITATION_STATUS_TYPE = _string_enum(InvitationStatus, "invitation_status", 16
 _GENERATED_RULE_TYPE_STATUS_TYPE = _string_enum(
     GeneratedRuleTypeStatus, "generated_rule_type_status", 16
 )
+_RULE_GENERATION_JOB_STATUS_TYPE = _string_enum(
+    RuleGenerationJobStatus, "rule_generation_job_status", 16
+)
+_PROMPT_AGENT_TYPE = _string_enum(PromptAgent, "prompt_agent", 16)
 
 
 class User(Base):
@@ -566,4 +598,151 @@ class SpaceInvitation(Base):
         return (
             f"SpaceInvitation(id={self.id!r}, space_id={self.space_id!r},"
             f" email={self.email!r}, status={self.status.value!r})"
+        )
+
+
+class RuleGenerationJob(Base):
+    """One admin's request to have a rule type written, and what became of it.
+
+    Generation is generate → adversarial suite → sandbox run, up to three retries: minutes of
+    wall clock and up to eight model calls. That cannot be the body of an HTTP request, so it is
+    a row an admin polls (``ops/plans/stream-7/OVERVIEW.md``, "Generation is a job, not a
+    request"). The runner is in-process — no broker — and ``app.rule_generation`` owns the
+    transitions.
+
+    **The job is Space-scoped; the rule type it produces is not.** ``space_id`` records who was
+    authorised to spend the model calls, while ``generated_rule_types`` rows are global and carry
+    their own provenance columns. The two are deliberately not the same statement, and reading
+    this FK as scoping the artifact would be wrong.
+
+    ``attempts`` keeps one entry per pass — ``number``, ``outcome`` and the capped ``failure``
+    text — and deliberately **not** the rule or test source. Those are already stored verbatim in
+    ``rule_generation_exchanges``: the source is a Generator response, and on a retry it is
+    quoted back inside the next turn's ``user_prompt``. Copying it here would duplicate the
+    largest field in the schema up to three times per job to say nothing new, while the failure
+    text is what an admin actually reads to understand why their rule did not land.
+
+    ``error`` is the last failure in prose, for display; ``attempts`` is the history behind it.
+    A failed job has both and no ``generated_rule_type_id`` — only ``AttemptOutcome.PASSED``
+    writes a type, so a timeout and a crash leave the catalog untouched.
+    """
+
+    __tablename__ = "rule_generation_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    prompt: Mapped[str] = mapped_column(Text)
+    status: Mapped[RuleGenerationJobStatus] = mapped_column(
+        _RULE_GENERATION_JOB_STATUS_TYPE, default=RuleGenerationJobStatus.QUEUED
+    )
+    # A list of {"number", "outcome", "failure"} dicts, in order. See the class docstring for
+    # why the rule and test source are not among them.
+    attempts: Mapped[list[Any]] = mapped_column(JSONB, default=list)
+    error: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    generated_rule_type_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("generated_rule_types.id"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        # At most one live job per Space, and no constraint at all on finished ones — the same
+        # shape and the same reasoning as ``uq_space_access_requests_pending``. A plain
+        # ``UNIQUE (space_id)`` would let a Space generate exactly one rule type ever; this lets
+        # it generate again tomorrow while stopping it queueing five at once today.
+        #
+        # It is also why ``sweep_orphaned_generation_jobs`` exists: a process that dies mid-run
+        # leaves a ``running`` row that this index turns into a permanent outage for that one
+        # tenant, so the sweep at boot is not tidiness, it is the release valve.
+        Index(
+            "uq_rule_generation_jobs_in_flight",
+            "space_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"RuleGenerationJob(id={self.id!r}, space_id={self.space_id!r},"
+            f" status={self.status.value!r})"
+        )
+
+
+class PromptVersion(Base):
+    """One system prompt, stored once and referenced by every exchange that used it.
+
+    The Generator's system prompt is ~5.7 kB and one generation is up to eight calls across two
+    agents — roughly 46 kB of near-identical bytes per rule if each exchange carried its own
+    copy. Keying on ``sha256`` stores it once.
+
+    Size is the smaller half of the argument. The real one is the join prompt tuning needs:
+    *which system-prompt version produced which outcome*, which is the question
+    ``rules/benchmark.py``'s per-attempt reporting is already built around and which a pile of
+    verbatim copies cannot answer without diffing them first. Editing a system prompt mints a new
+    row here rather than mutating one, so old exchanges keep pointing at the text that actually
+    produced them.
+
+    ``first_seen_at``, not ``created_at``: the row is written the first time a hash is *observed*,
+    which is not when the prompt was authored.
+    """
+
+    __tablename__ = "prompt_versions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True)
+    agent: Mapped[PromptAgent] = mapped_column(_PROMPT_AGENT_TYPE)
+    prompt_text: Mapped[str] = mapped_column("text", Text)
+    first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"PromptVersion(id={self.id!r}, agent={self.agent.value!r},"
+            f" sha256={self.sha256[:12]!r}…)"
+        )
+
+
+class RuleGenerationExchange(Base):
+    """One call to the model and its answer, kept because the retry turn is the whole story.
+
+    Without this table every prompt the feature sends is lost the moment the call returns, and
+    the exchange that matters most goes with it: on a retry ``build_prompt`` hands the model back
+    its own failing source plus the validator or pytest output verbatim, and *that* — what we
+    told it after it failed — is the entire prompt-debugging surface. It is also the only
+    evidence of why a rule now enforcing a venue's bookings reads the way it does.
+
+    ``user_prompt`` is therefore stored **verbatim and untruncated**. It is the turn that varies;
+    the system prompt it was paired with is one FK away in ``prompt_versions``, and the two
+    together reconstruct the exact call.
+
+    ``attempt`` is derived positionally by ``app.rule_generation`` — each Generator exchange opens
+    a new attempt — rather than carried by the recorder. ``generation.RecordingClient`` sits at
+    the ``LLMClient`` seam and knows nothing about loops or attempts, which is precisely the
+    property that lets one recorder serve both the benchmark and the backend
+    (``.claude/rules/rule-engine.md``).
+
+    The three metric columns are nullable rather than defaulting to zero, the same convention
+    ``LLMResponse`` keeps: a backend that does not report token counts must not read as one that
+    reported none. **No row here ever contains the API key.**
+    """
+
+    __tablename__ = "rule_generation_exchanges"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_id: Mapped[int] = mapped_column(ForeignKey("rule_generation_jobs.id"), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    agent: Mapped[PromptAgent] = mapped_column(_PROMPT_AGENT_TYPE)
+    prompt_version_id: Mapped[int] = mapped_column(ForeignKey("prompt_versions.id"))
+    user_prompt: Mapped[str] = mapped_column(Text)
+    response_text: Mapped[str] = mapped_column(Text)
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+    def __repr__(self) -> str:
+        return (
+            f"RuleGenerationExchange(id={self.id!r}, job_id={self.job_id!r},"
+            f" attempt={self.attempt!r}, agent={self.agent.value!r})"
         )
