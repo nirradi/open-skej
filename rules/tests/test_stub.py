@@ -9,6 +9,8 @@ pytest run.
 from generation.errors import LLMCallError
 from generation.generator import SYSTEM_PROMPT as GENERATOR_SYSTEM_PROMPT
 from generation.loop import AttemptOutcome, run_generation_loop
+from generation.manifest import SYSTEM_PROMPT as MANIFEST_SYSTEM_PROMPT
+from generation.manifest import generate_manifest
 from generation.stub import StubLLMClient
 from generation.tester import SYSTEM_PROMPT as TESTER_SYSTEM_PROMPT
 
@@ -32,9 +34,25 @@ def test_stub_dispatches_on_the_real_system_prompts_not_a_guess():
 
     generator_answer = client.complete(system=GENERATOR_SYSTEM_PROMPT, prompt="anything")
     tester_answer = client.complete(system=TESTER_SYSTEM_PROMPT, prompt="anything")
+    manifest_answer = client.complete(system=MANIFEST_SYSTEM_PROMPT, prompt="anything")
 
     assert "class StubMaxDurationRule" in generator_answer.text
     assert "candidate_rule" in tester_answer.text
+    assert "max_duration" in manifest_answer.text
+
+
+def test_the_stub_manifest_describes_the_stub_rule_and_survives_the_cross_check():
+    """The manifest call made after the loop passes, driven end to end against the stub's own
+    canned rule — the same shape the backend's job runner exercises against a real one."""
+    client = StubLLMClient()
+    result = run_generation_loop("max 2 hours", client=client, output_dir=None)
+
+    manifest = generate_manifest(result.rule_source, "max 2 hours", client=client)
+
+    assert manifest.label
+    assert manifest.description
+    assert [param.name for param in manifest.params] == ["max_duration"]
+    assert manifest.reads_history is False
 
 
 def test_stub_reports_no_token_usage_rather_than_fabricated_zeros():

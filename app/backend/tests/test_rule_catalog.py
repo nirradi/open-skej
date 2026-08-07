@@ -115,7 +115,7 @@ def _signed_row(source: str, **overrides) -> GeneratedRuleType:
         id=1,
         rule_type=f"generated-{abs(hash(source)) % 1_000_000}",
         label="A generated rule",
-        description=None,
+        description="A generated rule, for testing.",
         prompt="a rule, for testing",
         human_code=source,
         source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),

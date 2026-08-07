@@ -474,6 +474,7 @@ class RuleTypeRead(BaseModel):
 
     rule_type: str
     label: str
+    description: str
     priority: int
     reads_history: bool
     needs_local_resolution: bool
@@ -485,6 +486,7 @@ class RuleTypeRead(BaseModel):
         return cls(
             rule_type=rule_type.rule_type,
             label=rule_type.label,
+            description=rule_type.description,
             priority=rule_type.priority,
             reads_history=rule_type.reads_history,
             needs_local_resolution=rule_type.needs_local_resolution,
