@@ -22,6 +22,15 @@ and its ``on_exchange`` hook persists one ``RuleGenerationExchange`` per model c
 progresses*, so a process that dies at attempt three still leaves the first two attempts' prompts
 behind. The loop itself is untouched — it still returns strings and discards every ``LLMResponse``
 (``.claude/rules/rule-engine.md``), and it does not learn that anyone is watching.
+
+**The manifest call is a fourth model call, made once, only after the loop reports success.**
+``generation.manifest.generate_manifest`` describes the verified candidate — a label, a
+description, and a parameter schema cross-checked against the class's own ``__init__`` — and
+``_write_rule_type`` below stores its answer rather than a placeholder derived from the prompt.
+It runs against the *same* recorder the loop used, so its exchange is persisted exactly like a
+Generator or Tester turn (``.claude/rules/rule-engine.md``, "The manifest call"). A rejected
+manifest is not retried — see ``ManifestRejectedError`` — so it fails the job through the same
+broad ``except Exception`` that already covers ``_write_rule_type``.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ import logging
 import marshal
 import platform
 import re
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -48,8 +58,11 @@ from generation.llm import (
     read_google_api_key,
 )
 from generation.loop import LoopResult, run_generation_loop
+from generation.manifest import MANIFEST_SYSTEM_PROMPT, RuleManifest, generate_manifest
 from generation.stub import StubLLMClient
 from generation.tester import TESTER_SYSTEM_PROMPT
+
+from rules import RuleParam
 
 from app.db.session import get_session_factory
 from app.identity.models import (
@@ -134,15 +147,18 @@ def run_generation_job(
     leaving its row untouched is correct, not incomplete.
 
     Once the job is claimed and moved to ``running``, everything through the ``succeeded``/
-    ``failed`` commit — building the client, the generation loop, ``_attempt_summary``,
-    ``_write_rule_type`` (which ``compile()``\\ s and ``marshal.dumps()``\\ s model-authored
-    source), and the commit itself — runs inside one ``except Exception`` that is deliberately
-    broad. A job that raises anywhere in that span would otherwise leave a row ``running``
-    forever, and the in-flight unique index turns that into a permanent outage for that one
-    tenant rather than one lost generation. The handler rolls back, re-fetches the job (the
-    rollback may have expired the instance already in hand), and marks it FAILED with the
+    ``failed`` commit — building the client, the generation loop, ``_attempt_summary``, the
+    manifest call, ``_write_rule_type`` (which ``compile()``\\ s and ``marshal.dumps()``\\ s
+    model-authored source), and the commit itself — runs inside one ``except Exception`` that is
+    deliberately broad. A job that raises anywhere in that span would otherwise leave a row
+    ``running`` forever, and the in-flight unique index turns that into a permanent outage for
+    that one tenant rather than one lost generation. The handler rolls back, re-fetches the job
+    (the rollback may have expired the instance already in hand), and marks it FAILED with the
     exception's ``type: message`` as the error — the same recovery shape ``sweep_orphaned_
-    generation_jobs`` relies on existing, just triggered by a raise instead of a restart.
+    generation_jobs`` relies on existing, just triggered by a raise instead of a restart. A
+    ``ManifestRejectedError`` — a mismatch between the manifest and the rule's real constructor —
+    is exactly such a raise, and is what fails the job for it: there is no manifest retry turn
+    (``generation.manifest``'s own docstring says why).
 
     ``catalog.reload(session)`` is deliberately *outside* that handler, in a try/except of its
     own. It only runs once the job has already been committed ``succeeded``, and by then the row
@@ -173,10 +189,21 @@ def run_generation_job(
 
         try:
             settings = _settings()
-            result = _run_loop(session, job, client=client or build_generation_client(settings))
+            recorder = _build_recorder(session, job, client or build_generation_client(settings))
+            model_kwargs = _model_kwargs(settings)
+            # `output_dir=None` is load-bearing. `rules/generated/` is a developer-review
+            # affordance for someone reading a candidate at a terminal; this path's artifact is a
+            # database row, and writing a file the backend never reads again would leave the
+            # container accumulating them.
+            result = run_generation_loop(
+                job.prompt, client=recorder, output_dir=None, **model_kwargs
+            )
             job.attempts = [_attempt_summary(attempt) for attempt in result.attempts]
             if result.succeeded and result.rule_source:
-                rule_row = _write_rule_type(session, job, result)
+                manifest = generate_manifest(
+                    result.rule_source, job.prompt, client=recorder, **model_kwargs
+                )
+                rule_row = _write_rule_type(session, job, result, manifest)
                 job.generated_rule_type_id = rule_row.id
                 job.status = RuleGenerationJobStatus.SUCCEEDED
                 job.error = None
@@ -256,22 +283,33 @@ def _settings() -> Settings:
     return get_settings()
 
 
-def _run_loop(session: Session, job: RuleGenerationJob, *, client: LLMClient) -> LoopResult:
-    """Drive the loop with the recorder attached, persisting each exchange as it happens."""
+def _build_recorder(session: Session, job: RuleGenerationJob, client: LLMClient) -> RecordingClient:
+    """Wrap ``client`` so every call it answers — loop and manifest alike — is persisted as it
+    happens.
+
+    Built once per job and reused for both the generation loop and the manifest call that follows
+    it, so the manifest's own exchange lands in the same table through the same hook rather than a
+    second recorder nobody wired up. ``state`` is shared for the same reason: it is what lets
+    ``_record_exchange`` attribute the manifest exchange to the attempt that actually succeeded,
+    without the recorder itself knowing anything about attempts.
+    """
     state = {"attempt": 0}
 
     def persist(exchange: RecordedExchange) -> None:
         _record_exchange(session, job, exchange, state)
 
-    recorder = RecordingClient(wrapped=client, on_exchange=persist)
-    settings = _settings()
-    kwargs = {}
-    if settings.rule_generation_model:
-        kwargs["model"] = settings.rule_generation_model
-    # `output_dir=None` is load-bearing. `rules/generated/` is a developer-review affordance for
-    # someone reading a candidate at a terminal; this path's artifact is a database row, and
-    # writing a file the backend never reads again would leave the container accumulating them.
-    return run_generation_loop(job.prompt, client=recorder, output_dir=None, **kwargs)
+    return RecordingClient(wrapped=client, on_exchange=persist)
+
+
+def _model_kwargs(settings: Settings) -> dict[str, str]:
+    """The ``model=`` keyword argument every generation-loop call takes, or none at all.
+
+    ``None`` means "leave the selected client's own default model alone" — the same convention
+    ``rules/benchmark.py``'s optional flags already keep — so an unset ``RULE_GENERATION_MODEL``
+    must not become a literal ``model=None`` passed to ``run_generation_loop`` or
+    ``generate_manifest``, both of which default the argument themselves.
+    """
+    return {"model": settings.rule_generation_model} if settings.rule_generation_model else {}
 
 
 def _record_exchange(
@@ -284,9 +322,12 @@ def _record_exchange(
 
     ``attempt`` is derived here rather than carried by the recorder: each Generator turn opens a
     new attempt, so the attempt number is the count of Generator exchanges seen so far. The
-    recorder sits at the ``LLMClient`` seam and knows nothing about loops, attempts or retries —
-    which is exactly the property that lets one recorder serve both the benchmark and this runner.
-    Deriving it here keeps that seam thin and puts the knowledge in the layer that already has it.
+    manifest call is made once, after the loop has already finished, so it opens no attempt of its
+    own — it lands on ``state["attempt"]`` exactly as last left by the Generator, which is the
+    attempt that actually succeeded. The recorder sits at the ``LLMClient`` seam and knows nothing
+    about loops, attempts or retries — which is exactly the property that lets one recorder serve
+    both the benchmark and this runner. Deriving it here keeps that seam thin and puts the
+    knowledge in the layer that already has it.
     """
     agent = _agent_for(exchange.system)
     if agent is PromptAgent.GENERATOR:
@@ -317,17 +358,20 @@ def _record_exchange(
 def _agent_for(system: str) -> PromptAgent:
     """Which agent sent this system prompt.
 
-    Exact equality against the two module-level constants, the same dispatch ``StubLLMClient``
-    uses. A system prompt matching neither is not something to guess at — it is recorded as the
-    Generator's only because a row must name something, and the mismatch is logged so a reworded
-    prompt that broke this comparison is visible rather than silently mislabelling every row.
+    Exact equality against the three module-level constants, the same dispatch ``StubLLMClient``
+    uses. A system prompt matching none of them is not something to guess at — it is recorded as
+    the Generator's only because a row must name something, and the mismatch is logged so a
+    reworded prompt that broke this comparison is visible rather than silently mislabelling every
+    row.
     """
     if system == SYSTEM_PROMPT:
         return PromptAgent.GENERATOR
     if system == TESTER_SYSTEM_PROMPT:
         return PromptAgent.TESTER
+    if system == MANIFEST_SYSTEM_PROMPT:
+        return PromptAgent.MANIFEST
     logger.warning(
-        "Recording an exchange whose system prompt matches neither generation agent; "
+        "Recording an exchange whose system prompt matches none of the three generation agents; "
         "labelling it 'generator'. Has a system prompt been reworded?"
     )
     return PromptAgent.GENERATOR
@@ -360,23 +404,30 @@ def _prompt_version(session: Session, system: str, agent: PromptAgent) -> Prompt
 
 
 def _write_rule_type(
-    session: Session, job: RuleGenerationJob, result: LoopResult
+    session: Session, job: RuleGenerationJob, result: LoopResult, manifest: RuleManifest
 ) -> GeneratedRuleType:
-    """Store the verified candidate as a catalog row. Only ever called for a PASSED result."""
+    """Store the verified candidate as a catalog row. Only ever called for a PASSED result.
+
+    ``label``, ``description``, ``param_schema`` and ``reads_history`` all come from ``manifest``
+    — the model's own account of the rule, already cross-checked against its real constructor
+    (``generation.manifest.generate_manifest``) — rather than a placeholder derived from the
+    admin's prompt. The prompt itself is still stored on ``prompt``, but only as provenance, never
+    as the description an admin reads in the picker.
+    """
     source = result.rule_source or ""
     rule_type = _unique_rule_type(session, job.prompt)
     row = GeneratedRuleType(
         rule_type=rule_type,
-        label=_label_for(job.prompt),
-        description=None,  # 7.8 authors this from the model; a picker entry until then.
+        label=manifest.label,
+        description=manifest.description,
         prompt=job.prompt,
         human_code=source,
         source_sha256=hashlib.sha256(source.encode("utf-8")).hexdigest(),
         executable_bytecode=marshal.dumps(compile(source, "<generated>", "exec")),
         python_version=platform.python_version(),
         bytecode_magic=importlib.util.MAGIC_NUMBER.hex(),
-        param_schema=[],  # 7.8 fills this in.
-        reads_history=_reads_history(source),
+        param_schema=[_param_schema_entry(param) for param in manifest.params],
+        reads_history=manifest.reads_history,
         priority=GENERATED_RULE_PRIORITY,
         status=GeneratedRuleTypeStatus.ACTIVE,
         created_by_space_id=job.space_id,
@@ -387,17 +438,21 @@ def _write_rule_type(
     return row
 
 
-def _reads_history(source: str) -> bool:
-    """Whether this rule needs the Space's booking history, judged over-inclusively on purpose.
+def _param_schema_entry(param: RuleParam) -> dict[str, Any]:
+    """One declared parameter as the JSON dict ``param_schema`` stores.
 
-    A substring check, not an AST walk, and the crudeness is the point: the two errors are not
-    symmetric. A false *positive* costs one history query the rule then ignores. A false
-    *negative* hands the rule an empty history, so a "no more than three bookings a week" rule
-    counts zero existing bookings and **allows** a booking it should have refused — silently
-    permissive, which is the one direction this codebase never accepts. When the cheap check is
-    wrong in the safe direction, take the cheap check.
+    The exact shape ``app.rule_catalog.hoist`` rebuilds a ``RuleParam`` from
+    (``RuleParam(**{**entry, "kind": ParamKind(entry["kind"])})``), so this and that stay the two
+    directions of one conversion rather than draft their own shapes.
     """
-    return "history" in source
+    return {
+        "name": param.name,
+        "kind": param.kind.value,
+        "label": param.label,
+        "unit": param.unit,
+        "required": param.required,
+        "minimum": param.minimum,
+    }
 
 
 def _slug(text: str) -> str:
@@ -440,12 +495,6 @@ def _rule_type_taken(session: Session, rule_type: str) -> bool:
         ).first()
         is not None
     )
-
-
-def _label_for(prompt: str) -> str:
-    """A human label for the picker, from the prompt, until 7.8 has the model write one."""
-    collapsed = " ".join(prompt.split())
-    return collapsed[:197] + "…" if len(collapsed) > 200 else collapsed
 
 
 def _attempt_summary(attempt: object) -> dict[str, object]:

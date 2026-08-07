@@ -16,20 +16,21 @@ from a real one except by the fact that it never fails for a reason a real backe
 timeout, a rate limit, an unreachable daemon) and never varies for a reason a real model would (two
 identical calls always get the identical answer).
 
-**Dispatch is by which agent is calling, never by guessing at the prompt.** ``generate_rule`` and
-``generate_tests`` each send their own fixed ``SYSTEM_PROMPT`` — imported here from ``.generator``
-and ``.tester`` themselves, compared by exact equality — so this client answers correctly no matter
-what the *user* turn says, which is the only turn ``build_prompt``/``build_test_prompt`` actually
-vary per call. A substring guess over the prompt text would break the moment either system prompt
-was reworded, silently, since nothing would fail until this client answered the wrong agent's turn
-with the wrong kind of code.
+**Dispatch is by which agent is calling, never by guessing at the prompt.** ``generate_rule``,
+``generate_tests`` and ``generate_manifest`` each send their own fixed ``SYSTEM_PROMPT`` —
+imported here from ``.generator``, ``.tester`` and ``.manifest`` themselves, compared by exact
+equality — so this client answers correctly no matter what the *user* turn says, which is the
+only turn each agent's own ``build_*_prompt`` actually varies per call. A substring guess over the
+prompt text would break the moment any system prompt was reworded, silently, since nothing would
+fail until this client answered the wrong agent's turn with the wrong kind of code.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
-from . import generator, tester
+from . import generator, manifest, tester
 from .errors import LLMCallError
 from .llm import DEFAULT_MODEL, LLMResponse
 
@@ -204,6 +205,27 @@ def test_evaluate_returns_a_rule_result():
     assert hasattr(result, "fail_reason")
 """
 
+#: The manifest this stub's Manifest turn hands back for `_STUB_RULE_SOURCE`. `params` names
+#: exactly `StubMaxDurationRule.__init__`'s one argument — `max_duration` — because
+#: `generate_manifest`'s cross-check would reject anything else, canned response included.
+_STUB_MANIFEST_SOURCE = json.dumps(
+    {
+        "label": "Maximum duration (stub)",
+        "description": "Caps how long a single booking may run. Canned output of StubLLMClient.",
+        "params": [
+            {
+                "name": "max_duration",
+                "kind": "integer",
+                "label": "Maximum duration",
+                "unit": "minutes",
+                "required": True,
+                "minimum": 1,
+            }
+        ],
+        "reads_history": False,
+    }
+)
+
 
 @dataclass
 class StubLLMClient:
@@ -232,7 +254,10 @@ class StubLLMClient:
 
     The Tester turn never varies: :data:`_STUB_TEST_SOURCE` only exercises
     :data:`_STUB_RULE_SOURCE`, which is the only rule this stub's Generator ever hands to a
-    *successful* attempt, so there is exactly one Tester answer that ever needs to exist.
+    *successful* attempt, so there is exactly one Tester answer that ever needs to exist. The
+    Manifest turn — a third call this client answers, made by callers driving 7.8's manifest step
+    after the loop passes, not by the loop itself — never varies for the identical reason:
+    :data:`_STUB_MANIFEST_SOURCE` describes :data:`_STUB_RULE_SOURCE` and only ever needs to.
     """
 
     fail_first_attempts: int = 0
@@ -252,14 +277,17 @@ class StubLLMClient:
             text = _UNSAFE_RULE_SOURCE if unsafe else _STUB_RULE_SOURCE
         elif system == tester.SYSTEM_PROMPT:
             text = _STUB_TEST_SOURCE
+        elif system == manifest.SYSTEM_PROMPT:
+            text = _STUB_MANIFEST_SOURCE
         else:
             # Exact-equality dispatch (see the module docstring) means this is not a real model
             # struggling with an unfamiliar prompt — it is a caller invoking this stub with a
-            # system prompt neither generation agent sends, which is a caller bug and is reported
-            # as one rather than answered with a guess.
+            # system prompt none of the three generation agents send, which is a caller bug and
+            # is reported as one rather than answered with a guess.
             raise LLMCallError(
-                "StubLLMClient does not recognise this system prompt: it matches neither "
-                "generation.generator.SYSTEM_PROMPT nor generation.tester.SYSTEM_PROMPT."
+                "StubLLMClient does not recognise this system prompt: it matches none of "
+                "generation.generator.SYSTEM_PROMPT, generation.tester.SYSTEM_PROMPT, or "
+                "generation.manifest.SYSTEM_PROMPT."
             )
 
         # No token counts, no cost, no duration: this stub made no call anywhere, and reporting

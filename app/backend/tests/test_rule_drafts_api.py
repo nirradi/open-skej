@@ -270,7 +270,66 @@ def test_a_job_runs_to_succeeded_and_the_type_is_live_in_the_catalog(
     assert row.human_code
     assert row.executable_bytecode
 
+    # The manifest call's answer, stored rather than a placeholder derived from the prompt.
+    assert row.label
+    assert row.label != PROMPT
+    assert row.description
+    assert row.param_schema == [
+        {
+            "name": "max_duration",
+            "kind": "integer",
+            "label": "Maximum duration",
+            "unit": "minutes",
+            "required": True,
+            "minimum": 1,
+        }
+    ]
+    assert row.reads_history is False
+
     assert catalog.get(row.rule_type) is not None
+
+
+def test_a_generated_type_is_served_by_rule_types_and_validates_a_space_rule_post(
+    api: Api, session: Session, session_factory, space_a: Space, alice: User
+) -> None:
+    """The rest of the acceptance criterion: `GET /rule-types` serves the generated type's label,
+    description and param schema, and `POST /spaces/{id}/rules` naming it validates `params`
+    against that schema — the same 422-naming-the-param path the registry types already get,
+    through `app.identity.service.create_space_rule` reading `catalog.lookup` either way. No new
+    code needed for this path is the point being tested.
+    """
+    job_id = _queue_job(session, space_a, alice)
+    run_generation_job(job_id, session_factory=session_factory, client=StubLLMClient())
+    job = _reload_job(session, job_id)
+    row = session.get(GeneratedRuleType, job.generated_rule_type_id)
+
+    listing = api.as_user(alice).get("/rule-types")
+    assert listing.status_code == 200
+    entry = next(e for e in listing.json() if e["rule_type"] == row.rule_type)
+    assert entry["label"] == row.label
+    assert entry["description"] == row.description
+    assert entry["params"] == [
+        {
+            "name": "max_duration",
+            "kind": "integer",
+            "label": "Maximum duration",
+            "unit": "minutes",
+            "required": True,
+            "minimum": 1,
+        }
+    ]
+
+    missing_param = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/rules", json={"rule_type": row.rule_type, "params": {}}
+    )
+    assert missing_param.status_code == 422
+    assert "max_duration" in missing_param.json()["detail"]
+
+    valid = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/rules",
+        json={"rule_type": row.rule_type, "params": {"max_duration": 90}},
+    )
+    assert valid.status_code == 201
 
 
 def test_a_failing_generation_leaves_the_history_and_no_rule_type(
@@ -351,7 +410,8 @@ def test_a_crash_after_the_loop_succeeds_still_fails_the_job_and_frees_the_space
 def test_every_model_call_is_recorded_in_order_with_its_agent_and_attempt(
     session: Session, session_factory, space_a: Space, alice: User
 ) -> None:
-    """One exchange row per model call — a successful first attempt is Generator then Tester."""
+    """One exchange row per model call — a successful first attempt is Generator, Tester, then
+    the Manifest call made once the loop has already passed."""
     job_id = _queue_job(session, space_a, alice)
 
     run_generation_job(job_id, session_factory=session_factory, client=StubLLMClient())
@@ -360,6 +420,7 @@ def test_every_model_call_is_recorded_in_order_with_its_agent_and_attempt(
     assert [(row.attempt, row.agent) for row in rows] == [
         (1, PromptAgent.GENERATOR),
         (1, PromptAgent.TESTER),
+        (1, PromptAgent.MANIFEST),
     ]
     assert all(row.user_prompt and row.response_text for row in rows)
     # The stub reports no token counts and no duration, and those columns say so rather than
@@ -418,13 +479,14 @@ def test_two_generations_sharing_a_system_prompt_produce_one_prompt_version_row(
     session.expire_all()
     versions = session.execute(select(PromptVersion)).scalars().all()
     assert sorted(version.agent for version in versions) == sorted(
-        [PromptAgent.GENERATOR, PromptAgent.TESTER]
+        [PromptAgent.GENERATOR, PromptAgent.TESTER, PromptAgent.MANIFEST]
     )
-    assert len({version.sha256 for version in versions}) == 2
+    assert len({version.sha256 for version in versions}) == 3
 
-    # Four model calls across the two jobs, all pointing at those same two rows.
+    # Six model calls across the two jobs — Generator, Tester, Manifest per job — all pointing
+    # at those same three rows.
     exchanges = session.execute(select(RuleGenerationExchange)).scalars().all()
-    assert len(exchanges) == 4
+    assert len(exchanges) == 6
     assert {exchange.prompt_version_id for exchange in exchanges} == {
         version.id for version in versions
     }

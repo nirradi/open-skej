@@ -275,11 +275,13 @@ counts).
 seven classes above a runtime identity separate from being importable Python. A registered type
 declares: a **stable string id** (`not_in_the_past`, `max_duration`, `slot_alignment`,
 `availability_hours`, …) that a future `space_rules.rule_type` column stores — never the Python class
-name, since renaming the class must not silently orphan every row that named it; an **ordered
-parameter schema**, one `RuleParam` per constructor argument (name, kind, label, unit, required, a
-minimum), rich enough to render an admin form field and to validate a request body's params against
-— one schema for both jobs, because two independently written ones would drift, and the drift would
-show up as a form whose own submission gets refused; a declared **priority**; **`reads_history`**,
+name, since renaming the class must not silently orphan every row that named it; a **label** and a
+**description** — the description is prose for an admin choosing between rule types, "what it
+refuses", never a restatement of the code; an **ordered parameter schema**, one `RuleParam` per
+constructor argument (name, kind, label, unit, required, a minimum), rich enough to render an admin
+form field and to validate a request body's params against — one schema for both jobs, because two
+independently written ones would drift, and the drift would show up as a form whose own submission
+gets refused; a declared **priority**; **`reads_history`**,
 true only for the two counting rules, so a caller can skip the Space-wide history query when nothing
 configured would read it; **`needs_local_resolution`**, true for `slot_alignment`,
 `availability_hours` and both counting rules — the four whose constructor needs values resolved
@@ -298,6 +300,27 @@ constructed instance of the class it names. `slot_minutes` must divide 1440 so a
 number of slots; the schema has no field to express that bound, so it is stated twice — at the write
 boundary, where an admin gets a 422 naming the constraint (`identity-and-access.md`), and inside
 `SlotAlignmentRule`'s own constructor, which keeps it true for a row written by any other means.
+
+**A generated type's label, description and parameter schema are authored by the model, not the
+admin's own prompt, and the parameter schema is derived rather than trusted.** The prompt that asked
+for the rule is retained as provenance (`identity-and-access.md`) but is never shown to an admin
+choosing a rule type — it is the request, not the description of what was built. Once the generation
+loop reports `PASSED`, one further model call (`generation.manifest.generate_manifest`, "the
+manifest call") is made against the exact verified source, never a candidate still under retry, and
+answers three things: a short `label`, a `description` written for someone who will never read the
+Python, and a `params` list declaring each constructor argument's `kind` (one of `ParamKind`'s
+members and nothing else — a kind the model invents is a field nobody wrote a widget for), `label`,
+`unit`, `required` and `minimum`. **The parameter names are then cross-checked against
+`inspect.signature` of the class the verified source actually defines** — same set, no extras, no
+omissions apart from `self`. This is the load-bearing check: a manifest that disagrees with
+`__init__` would let an admin form submit a body that raises `TypeError` building the rule, which the
+adapter turns into a denial, which reads to that admin as every booking refused for no visible
+reason. A mismatch — `ManifestRejectedError` — fails the job outright rather than triggering a retry:
+the rule source already survived its own adversarial suite, and regenerating it to fix a description
+would throw away the artifact that passed. **`reads_history` is corrected against the source, never
+trusted from the model's claim alone** — `true` stands only if the source also mentions
+`context.history`, because the damaging direction is a false positive that would run a counting rule
+against a history nobody queried, silently permissive in exactly the way this codebase never accepts.
 
 **Rule order comes from a type's declared priority, never from row order, insertion order, or an
 admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of

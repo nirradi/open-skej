@@ -392,6 +392,7 @@ class RuleCatalog:
             return RuleType(
                 rule_type=row.rule_type,
                 label=row.label,
+                description=row.description,
                 priority=row.priority,
                 params=schema_params,
                 reads_history=row.reads_history,

@@ -12,6 +12,11 @@ hand-coding a third of it.
 * a **stable string id** — never the Python class name. A future ``space_rules.rule_type`` column
   stores this id on a running venue's configuration; renaming the class it happens to be implemented
   by must not silently orphan every row that named it.
+* a **label** and a **description** — the description is prose for an admin choosing a rule, "what
+  it refuses", written for someone who will never read the Python. Hand-written for each of the
+  seven types below; for a generated type it is authored by the model in a manifest call made after
+  the generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
+  prompt.
 * an **ordered parameter schema** (``RuleParam``) — rich enough to render a form field and to
   validate a request body's params against, because those are the same five facts
   (``kind``/``label``/``unit``/``required``/``minimum``) read by two different callers. One schema
@@ -134,10 +139,19 @@ BuildFn = Callable[[Mapping[str, Any], "Mapping[str, Any] | None"], BaseRule]
 
 @dataclass(frozen=True)
 class RuleType:
-    """Everything a registered rule type declares about itself. See the module docstring."""
+    """Everything a registered rule type declares about itself. See the module docstring.
+
+    ``description`` is prose for an admin choosing a rule, never for a developer reading the
+    source — "what it refuses", in a sentence or two. Hand-written for each of the seven types
+    below; for a generated type it is authored by the model in a manifest call made after the
+    generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
+    prompt, and validated non-empty the same way ``label`` and ``rule_type`` already are: a picker
+    where some entries explain themselves and others do not is worse than one where none do.
+    """
 
     rule_type: str
     label: str
+    description: str
     priority: int
     params: tuple[RuleParam, ...]
     reads_history: bool
@@ -150,6 +164,8 @@ class RuleType:
             raise ValueError("RuleType.rule_type must not be empty")
         if not self.label:
             raise ValueError("RuleType.label must not be empty")
+        if not self.description:
+            raise ValueError("RuleType.description must not be empty")
         if not isinstance(self.priority, int):
             raise TypeError(f"RuleType.priority must be an int, got {type(self.priority).__name__}")
         if not callable(self.build):
@@ -244,6 +260,7 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="not_in_the_past",
         label="Not in the past",
+        description="Refuses a booking that starts in the past.",
         priority=10,
         params=(),
         reads_history=False,
@@ -254,6 +271,8 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="booking_horizon",
         label="Booking horizon",
+        description="Refuses a booking made too far in advance — more than the configured "
+        "number of days from now.",
         priority=20,
         params=(
             RuleParam(
@@ -273,6 +292,7 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="max_duration",
         label="Maximum duration",
+        description="Refuses a booking longer than the configured maximum duration.",
         priority=30,
         params=(
             RuleParam(
@@ -292,6 +312,9 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="slot_alignment",
         label="Slot alignment",
+        description="Refuses a booking whose start or end time does not land on the Space's own "
+        "time grid — for example, on a 30-minute grid a booking may start and end on the hour or "
+        "the half hour, but not at ten past.",
         priority=35,
         params=(
             RuleParam(
@@ -311,6 +334,7 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="availability_hours",
         label="Availability hours",
+        description="Refuses a booking outside the Space's own opening hours, in its local time.",
         priority=40,
         params=(
             RuleParam(
@@ -336,6 +360,8 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="max_bookings_per_week",
         label="Max bookings per week",
+        description="Refuses a booking once a member already holds the configured number of "
+        "bookings in that week, counted across every Resource in the Space.",
         priority=50,
         params=(
             RuleParam(
@@ -355,6 +381,8 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="max_bookings_per_month",
         label="Max bookings per month",
+        description="Refuses a booking once a member already holds the configured number of "
+        "bookings in that calendar month, counted across every Resource in the Space.",
         priority=60,
         params=(
             RuleParam(

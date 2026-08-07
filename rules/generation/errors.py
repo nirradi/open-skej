@@ -16,6 +16,7 @@ __all__ = [
     "LLMCallError",
     "RuleRejectedError",
     "SuiteRejectedError",
+    "ManifestRejectedError",
 ]
 
 
@@ -82,3 +83,24 @@ class SuiteRejectedError(GenerationError):
         super().__init__(reason)
         self.reason = reason
         self.source = source
+
+
+class ManifestRejectedError(GenerationError):
+    """The model answered, and what it produced is not an acceptable manifest.
+
+    Raised after the rule has already passed the sandbox — the source is not in question, only
+    the description of it. There is deliberately no fourth model call to correct one: the
+    artifact worth keeping is the rule that already survived its own adversarial suite, and
+    regenerating it to fix a label or a mismatched parameter name would throw that away for
+    nothing wrong with it. A caller that catches this treats it as a job failure, not a retry
+    (``rule-engine.md``, "The manifest call").
+
+    ``payload`` is what the reason is about — the model's raw text for a parsing or field
+    failure, the rule source itself for a signature-loading failure — the same role
+    ``RuleRejectedError.source`` plays.
+    """
+
+    def __init__(self, reason: str, *, payload: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.payload = payload
