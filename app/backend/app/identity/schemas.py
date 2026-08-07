@@ -648,6 +648,11 @@ class RuleDraftRead(BaseModel):
     The prompts and completions behind them are **not** exposed by this API: they are an operator
     and prompt-tuning artifact (``rule_generation_exchanges``), read from the database, not
     something the admin who typed one sentence is owed a model's full reasoning transcript for.
+
+    ``human_code`` is the verified rule's own source — present only once a job has succeeded, and
+    absent (``None``) at every other status. Unlike the exchanges, this one *is* meant for the
+    admin: they are about to enforce it on their members, and a disclosure they never have to open
+    is better than a feature that runs code on their bookings and shows them nothing.
     """
 
     id: int
@@ -656,11 +661,18 @@ class RuleDraftRead(BaseModel):
     attempts: list
     error: Optional[str]
     generated_rule_type: Optional[str]
+    human_code: Optional[str]
     created_at: datetime
     updated_at: datetime
 
     @classmethod
-    def build(cls, job: RuleGenerationJob, *, rule_type: Optional[str] = None) -> "RuleDraftRead":
+    def build(
+        cls,
+        job: RuleGenerationJob,
+        *,
+        rule_type: Optional[str] = None,
+        human_code: Optional[str] = None,
+    ) -> "RuleDraftRead":
         return cls(
             id=job.id,
             prompt=job.prompt,
@@ -668,6 +680,7 @@ class RuleDraftRead(BaseModel):
             attempts=list(job.attempts or []),
             error=job.error,
             generated_rule_type=rule_type,
+            human_code=human_code,
             created_at=job.created_at,
             updated_at=job.updated_at,
         )

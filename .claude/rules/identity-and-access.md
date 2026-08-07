@@ -469,6 +469,27 @@ and naming the wrong one is worse than naming none. The diagnosis goes to the co
 An admin dashboard for Space creation, share links, and member management. Role menus offer only
 roles at or below the actor's own, which is a convenience — the server's 403 is the boundary.
 
+**`SpaceRulesPage` carries a rule-authoring panel alongside the generic rule editor, admin+.** An
+admin types a booking constraint in plain English and submits it; the panel does not hold a
+request open for the minutes generation takes, it holds a job id and polls
+`GET /spaces/{public_id}/rule-drafts/{id}` — every two seconds at first, backing off after the
+first minute, paused while the tab is hidden and resumed the instant it is visible again. On
+mount it calls `GET .../rule-drafts` to resume an in-flight job, so a page reload during a
+three-minute generation does not read as the job having vanished. A `not_found` on either route is
+read as "this backend does not have `RULE_GENERATION_ENABLED` set" (`rule-engine.md`) and the panel
+renders nothing at all, the same absent-not-broken posture the conditionally-registered route
+itself takes — a normally-configured backend without the capability should look like a product
+without the feature. A succeeded job shows the generated type's own label and description and an
+offer to add it to the Space, which preselects the type in the existing "Add a rule" panel rather
+than opening a second path to the same action; its `human_code` sits behind a disclosure, since an
+admin about to enforce a rule on their members should be able to see what it does. A failed job
+never renders an attempt's own failure text — that is pytest output written for the model to read,
+not for an admin — and leaves the prompt in the box, editable and resubmittable. The "Add a rule"
+picker itself renders the selected type's description underneath the `<select>` rather than
+growing into a combobox: a list of labels alone stops being enough to choose from once generated
+types sit beside the seven hand-written ones, and a description is enough to fix that at any list
+length this product expects.
+
 `/s/{public_id}` serves both sides of the door. A non-member sees the cold-link preview and the
 access request; a member lands **in the Space** — its name, description, and a picker onto its
 Resources, each linking to that Resource's calendar at `/s/{public_id}/resources/{id}` — rather than

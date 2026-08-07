@@ -20,6 +20,7 @@ import {
   type AppliesToDraft,
 } from './AppliesToEditor'
 import { messageFor } from './messages'
+import { RuleAuthoringPanel } from './RuleAuthoringPanel'
 import {
   RuleParamsForm,
   emptyRuleParamValues,
@@ -169,13 +170,28 @@ function Shell({ space, children }: { space?: Space; children: ReactNode }) {
   )
 }
 
-type RegistryLoad = { kind: 'ok'; ruleTypes: RuleTypeRead[] } | { kind: 'error'; message: string } | null
+type RegistryLoad =
+  { kind: 'ok'; ruleTypes: RuleTypeRead[] } | { kind: 'error'; message: string } | null
 type RulesLoad = { kind: 'ok'; rules: SpaceRuleRead[] } | { kind: 'error'; message: string } | null
 
 /** Fetches the registry and the Space's configured rules, then renders the editor. */
 function RulesManager({ space }: { space: Space }) {
   const [registryLoad, setRegistryLoad] = useState<RegistryLoad>(null)
   const [rulesLoad, setRulesLoad] = useState<RulesLoad>(null)
+  // The rule type a just-succeeded generation job offered to add — set when
+  // the admin clicks "Add this rule to the Space" on `RuleAuthoringPanel`,
+  // and what preselects it in `AddRulePanel` below.
+  const [preselectedType, setPreselectedType] = useState<string | null>(null)
+
+  function fetchRuleTypes() {
+    return listRuleTypes().then((result) => {
+      setRegistryLoad(
+        result.outcome === 'ok'
+          ? { kind: 'ok', ruleTypes: result.data }
+          : { kind: 'error', message: messageFor(result) },
+      )
+    })
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -248,7 +264,10 @@ function RulesManager({ space }: { space: Space }) {
   function handleUpdated(rule: SpaceRuleRead) {
     setRulesLoad((current) =>
       current?.kind === 'ok'
-        ? { kind: 'ok', rules: current.rules.map((existing) => (existing.id === rule.id ? rule : existing)) }
+        ? {
+            kind: 'ok',
+            rules: current.rules.map((existing) => (existing.id === rule.id ? rule : existing)),
+          }
         : current,
     )
   }
@@ -273,12 +292,21 @@ function RulesManager({ space }: { space: Space }) {
         </p>
       ) : null}
 
+      <RuleAuthoringPanel
+        space={space}
+        disabled={archived}
+        ruleTypes={ruleTypes}
+        onJobSucceeded={() => void fetchRuleTypes()}
+        onAddToSpace={setPreselectedType}
+      />
+
       <AddRulePanel
         space={space}
         ruleTypes={ruleTypes}
         existingRules={rules}
         onCreated={handleCreated}
         disabled={archived}
+        preselectedType={preselectedType}
       />
 
       <section className="rounded-lg border border-slate-200 bg-white p-4" data-testid="rules-list">
@@ -322,6 +350,26 @@ function sortRulesForDisplay(rules: SpaceRuleRead[], ruleTypes: RuleTypeRead[]):
  * weekday or a set of dates is an edit on the row afterward
  * (`RuleRow`'s own `AppliesToEditor`), not a second copy of that editor on
  * this form.
+ *
+ * ## The picker shows a description, not a combobox
+ *
+ * With generated types in the same list as the seven hand-written ones, a
+ * `<select>` of labels alone is not enough to choose from — a list of names
+ * is navigable at seven entries and is not at thirty (task 7.9). Rendering
+ * the selected type's own `description` underneath is enough; this stays a
+ * plain `<select>` rather than growing into a combobox. Generated types get
+ * no visual distinction beyond that description — they are the same kind of
+ * thing to an admin, and marking one "AI-generated" here would invite a
+ * judgement the admin has no basis to make at this point.
+ *
+ * ## `preselectedType`
+ *
+ * Set by `RulesManager` when the admin chooses "Add this rule to the Space"
+ * on a just-succeeded `RuleAuthoringPanel` job — the drop-in the task
+ * describes. Applied with the same compare-during-render idiom `RuleRow`
+ * uses for its own external resets (`rowKey`) rather than an effect, since
+ * this repo's eslint config forbids calling `setState` synchronously inside
+ * one.
  */
 function AddRulePanel({
   space,
@@ -329,12 +377,14 @@ function AddRulePanel({
   existingRules,
   onCreated,
   disabled,
+  preselectedType,
 }: {
   space: Space
   ruleTypes: RuleTypeRead[]
   existingRules: SpaceRuleRead[]
   onCreated: (rule: SpaceRuleRead) => void
   disabled: boolean
+  preselectedType?: string | null
 }) {
   const [selectedType, setSelectedType] = useState('')
   const [values, setValues] = useState<RuleParamValues>({})
@@ -348,6 +398,12 @@ function AddRulePanel({
     const type = ruleTypes.find((candidate) => candidate.rule_type === next)
     setValues(type ? emptyRuleParamValues(type.params) : {})
     setError('')
+  }
+
+  const [seenPreselect, setSeenPreselect] = useState<string | null | undefined>(preselectedType)
+  if (preselectedType && preselectedType !== seenPreselect) {
+    setSeenPreselect(preselectedType)
+    handleSelectType(preselectedType)
   }
 
   const alreadyHasInstance =
@@ -379,7 +435,10 @@ function AddRulePanel({
   }
 
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4" data-testid="add-rule-panel">
+    <section
+      className="rounded-lg border border-slate-200 bg-white p-4"
+      data-testid="add-rule-panel"
+    >
       <h2 className="text-sm font-semibold text-slate-900">Add a rule</h2>
 
       <div className="mt-3">
@@ -401,6 +460,11 @@ function AddRulePanel({
             </option>
           ))}
         </select>
+        {ruleType ? (
+          <p className="mt-1 text-xs text-slate-600" data-testid="add-rule-type-description">
+            {ruleType.description}
+          </p>
+        ) : null}
       </div>
 
       {ruleType ? (
@@ -463,7 +527,9 @@ function RuleRow({
   const [paramValues, setParamValues] = useState<RuleParamValues>(
     ruleType ? ruleParamValuesFromStored(ruleType.params, rule.params) : {},
   )
-  const [appliesDraft, setAppliesDraft] = useState<AppliesToDraft>(draftFromAppliesTo(rule.applies_to))
+  const [appliesDraft, setAppliesDraft] = useState<AppliesToDraft>(
+    draftFromAppliesTo(rule.applies_to),
+  )
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -577,7 +643,10 @@ function RuleRow({
           </button>
 
           {confirmingDelete ? (
-            <span className="flex items-center gap-2" data-testid={`rule-${rule.id}-delete-confirm`}>
+            <span
+              className="flex items-center gap-2"
+              data-testid={`rule-${rule.id}-delete-confirm`}
+            >
               <button
                 type="button"
                 className="rounded bg-red-700 px-2 py-1 text-sm text-white disabled:opacity-50"

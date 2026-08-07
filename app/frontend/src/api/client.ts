@@ -26,6 +26,7 @@ import type {
   MembershipRole,
   MutatingResult,
   Resource,
+  RuleDraftRead,
   RuleTypeRead,
   Space,
   SpacePreview,
@@ -1190,7 +1191,9 @@ export async function listRuleTypes(): Promise<AuthenticatedResult<RuleTypeRead[
  * `GET /spaces/{public_id}/rules` — every rule instance configured for this
  * Space, scoped and unscoped, enabled and disabled alike. Members and up.
  */
-export async function listSpaceRules(publicId: string): Promise<AuthenticatedResult<SpaceRuleRead[]>> {
+export async function listSpaceRules(
+  publicId: string,
+): Promise<AuthenticatedResult<SpaceRuleRead[]>> {
   return authenticatedRequest<SpaceRuleRead[]>(`/spaces/${encodeURIComponent(publicId)}/rules`)
 }
 
@@ -1225,10 +1228,10 @@ export async function updateSpaceRule(
   ruleId: number,
   patch: SpaceRuleUpdateInput,
 ): Promise<MutatingResult<SpaceRuleRead>> {
-  return mutatingRequest<SpaceRuleRead>(
-    `/spaces/${encodeURIComponent(publicId)}/rules/${ruleId}`,
-    { method: 'PATCH', ...jsonBody(patch) },
-  )
+  return mutatingRequest<SpaceRuleRead>(`/spaces/${encodeURIComponent(publicId)}/rules/${ruleId}`, {
+    method: 'PATCH',
+    ...jsonBody(patch),
+  })
 }
 
 /**
@@ -1244,4 +1247,69 @@ export async function deleteSpaceRule(
   return mutatingRequest<null>(`/spaces/${encodeURIComponent(publicId)}/rules/${ruleId}`, {
     method: 'DELETE',
   })
+}
+
+/**
+ * `POST /spaces/{public_id}/rule-drafts` — ask for a rule type to be written
+ * from one sentence of English. Admin+.
+ *
+ * 202, not 201: nothing is created yet, a job has been accepted and the
+ * caller polls `getRuleDraft` for it. `conflict` means this Space already has
+ * a job queued or running — the server allows one live generation per Space.
+ * `invalid_request` covers an empty or over-long prompt.
+ *
+ * Registered only when the backend has `RULE_GENERATION_ENABLED` set — see
+ * `listRuleDrafts` for how a caller tells that apart from an ordinary 404.
+ */
+export async function createRuleDraft(
+  publicId: string,
+  prompt: string,
+): Promise<MutatingResult<RuleDraftRead>> {
+  return mutatingRequest<RuleDraftRead>(`/spaces/${encodeURIComponent(publicId)}/rule-drafts`, {
+    method: 'POST',
+    ...jsonBody({ prompt }),
+  })
+}
+
+/**
+ * `GET /spaces/{public_id}/rule-drafts` — this Space's recent generation
+ * jobs, newest first. Admin+.
+ *
+ * `RuleAuthoringPanel` calls this once on mount so a page reload does not
+ * lose a job an admin is waiting on: it looks for a `queued` or `running`
+ * entry and resumes polling it if one is there.
+ *
+ * **`not_found` here means the capability itself is absent**, not that this
+ * particular Space is missing one. `POST /spaces/{public_id}/rule-drafts` and
+ * its siblings are registered only when the backend has
+ * `RULE_GENERATION_ENABLED` set (`.claude/rules/identity-and-access.md`), so
+ * against an unconfigured deployment this route does not exist at all and
+ * every request under it — this one included — gets FastAPI's own bare 404.
+ * The panel reads that as "the feature is off" and hides itself entirely
+ * rather than rendering an error, matching the 404-not-403 posture the
+ * backend already uses for a capability that is deliberately absent.
+ */
+export async function listRuleDrafts(
+  publicId: string,
+): Promise<AuthenticatedResult<RuleDraftRead[]>> {
+  return authenticatedRequest<RuleDraftRead[]>(
+    `/spaces/${encodeURIComponent(publicId)}/rule-drafts`,
+  )
+}
+
+/**
+ * `GET /spaces/{public_id}/rule-drafts/{draft_id}` — one job's current state.
+ * Admin+. What `RuleAuthoringPanel` polls while a job is queued or running.
+ *
+ * `not_found` covers a `draft_id` belonging to another Space, indistinguishable
+ * from one that does not exist — the same 404-not-403 treatment every other
+ * scoped id in this client gets.
+ */
+export async function getRuleDraft(
+  publicId: string,
+  draftId: number,
+): Promise<AuthenticatedResult<RuleDraftRead>> {
+  return authenticatedRequest<RuleDraftRead>(
+    `/spaces/${encodeURIComponent(publicId)}/rule-drafts/${draftId}`,
+  )
 }

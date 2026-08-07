@@ -29,6 +29,7 @@ import {
   createSpaceRule,
   deleteSpaceRule,
   getSpace,
+  listRuleDrafts,
   listRuleTypes,
   listSpaceRules,
   updateSpaceRule,
@@ -44,12 +45,16 @@ vi.mock('../api', () => ({
   createSpaceRule: vi.fn(),
   updateSpaceRule: vi.fn(),
   deleteSpaceRule: vi.fn(),
+  createRuleDraft: vi.fn(),
+  listRuleDrafts: vi.fn(),
+  getRuleDraft: vi.fn(),
 }))
 
 /** A rule type the real registry does not have — see the module docstring. */
 const INVENTED_RULE_TYPE: RuleTypeRead = {
   rule_type: 'test_invented_thing',
   label: 'Invented Thing (test only)',
+  description: 'Refuses whatever this invented test type is configured to refuse.',
   priority: 999,
   reads_history: false,
   needs_local_resolution: false,
@@ -78,6 +83,14 @@ beforeEach(() => {
   vi.mocked(getSpace).mockResolvedValue(ok(makeSpace({ my_role: 'admin' })))
   vi.mocked(listRuleTypes).mockResolvedValue(ok([makeRuleType()]))
   vi.mocked(listSpaceRules).mockResolvedValue(ok([]))
+  // `RuleAuthoringPanel` is not this file's subject — see
+  // `RuleAuthoringPanel.test.tsx` — so it is defaulted out of the way here by
+  // reading as "generation disabled", the same 404 a normally-configured
+  // backend serves for these routes.
+  vi.mocked(listRuleDrafts).mockResolvedValue({
+    outcome: 'not_found',
+    message: "We couldn't find that.",
+  })
 })
 
 afterEach(() => {
@@ -127,19 +140,35 @@ describe('SpaceRulesPage — generic over the registry', () => {
 
     fireEvent.change(select, { target: { value: 'test_invented_thing' } })
 
-    const integerInput = (await screen.findByTestId(
-      'add-rule-param-threshold',
-    )) as HTMLInputElement
+    const integerInput = (await screen.findByTestId('add-rule-param-threshold')) as HTMLInputElement
     expect(integerInput.type).toBe('number')
 
     const timeInput = screen.getByTestId('add-rule-param-cutoff_time') as HTMLInputElement
     expect(timeInput.type).toBe('time')
   })
+
+  it("renders the selected type's description, proving the picker is not a hardcoded list", async () => {
+    vi.mocked(listRuleTypes).mockResolvedValue(ok([makeRuleType(), INVENTED_RULE_TYPE]))
+
+    renderPage()
+
+    const select = await screen.findByTestId('add-rule-type-select')
+    expect(screen.queryByTestId('add-rule-type-description')).toBeNull()
+
+    fireEvent.change(select, { target: { value: 'test_invented_thing' } })
+
+    const description = await screen.findByTestId('add-rule-type-description')
+    expect(description.textContent).toBe(INVENTED_RULE_TYPE.description)
+  })
 })
 
 describe('SpaceRulesPage — create, pause, delete', () => {
   it('creates a rule and shows it in the list', async () => {
-    const created = makeSpaceRule({ id: 5, rule_type: 'max_duration', params: { max_duration_minutes: 90 } })
+    const created = makeSpaceRule({
+      id: 5,
+      rule_type: 'max_duration',
+      params: { max_duration_minutes: 90 },
+    })
     vi.mocked(createSpaceRule).mockResolvedValue(ok(created))
 
     renderPage()

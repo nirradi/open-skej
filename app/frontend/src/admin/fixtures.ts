@@ -21,6 +21,7 @@ import type {
   Invitation,
   Member,
   Resource,
+  RuleDraftRead,
   RuleParamRead,
   RuleTypeRead,
   Space,
@@ -147,6 +148,7 @@ export function makeRuleType(overrides: Partial<RuleTypeRead> = {}): RuleTypeRea
   return {
     rule_type: 'max_duration',
     label: 'Maximum booking duration',
+    description: 'Refuses a booking longer than the configured duration.',
     priority: 30,
     reads_history: false,
     needs_local_resolution: false,
@@ -164,6 +166,25 @@ export function makeSpaceRule(overrides: Partial<SpaceRuleRead> = {}): SpaceRule
     params: { max_duration_minutes: 90 },
     applies_to: null,
     enabled: true,
+    created_at: '2026-07-01T10:00:00.000Z',
+    updated_at: '2026-07-01T10:00:00.000Z',
+    ...overrides,
+  }
+}
+
+/**
+ * One rule-generation job, as `GET`/`POST .../rule-drafts` serve it. Defaults
+ * to a `queued` job with no attempts yet — the shape every job starts as.
+ */
+export function makeRuleDraft(overrides: Partial<RuleDraftRead> = {}): RuleDraftRead {
+  return {
+    id: 200,
+    prompt: 'no booking may be longer than one hour',
+    status: 'queued',
+    attempts: [],
+    error: null,
+    generated_rule_type: null,
+    human_code: null,
     created_at: '2026-07-01T10:00:00.000Z',
     updated_at: '2026-07-01T10:00:00.000Z',
     ...overrides,
