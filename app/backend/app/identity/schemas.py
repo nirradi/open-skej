@@ -35,6 +35,8 @@ from app.identity.models import (
     InvitationStatus,
     MembershipRole,
     Resource,
+    RuleGenerationJob,
+    RuleGenerationJobStatus,
     Space,
     SpaceAccessRequest,
     SpaceInvitation,
@@ -613,4 +615,57 @@ class DayScheduleRead(BaseModel):
             opens_at=schedule.opens_at,
             closes_at=schedule.closes_at,
             coherence_issue=schedule.coherence_issue,
+        )
+
+
+# The longest rule-generation prompt the API accepts, capped here at the wire boundary rather
+# than inside the runner. **A cap, not a filter.** The text becomes part of a model prompt and
+# nothing anywhere sanitises, strips or escapes it, deliberately: the AST validator over the
+# *generated source* is the boundary (``rules.safety.validate_source``, run at write time and
+# again at every load). A rule that survives the validator, the adversarial suite and the sandbox
+# is safe whatever its description said; a rule that does not never reaches the catalog however
+# innocent its description read. This number exists because an unbounded string costs tokens and
+# a Text column, not because a shorter one is a safer one.
+_RULE_PROMPT_MAX = 500
+
+
+class RuleDraftCreate(BaseModel):
+    """The body of ``POST /spaces/{public_id}/rule-drafts``: one sentence of English."""
+
+    prompt: str = Field(min_length=1, max_length=_RULE_PROMPT_MAX)
+
+
+class RuleDraftRead(BaseModel):
+    """One generation job, as the admin polling it sees it.
+
+    ``generated_rule_type`` is the ``rule_type`` string rather than the row's integer id: it is
+    what a ``space_rules`` row names, so it is the value the page needs in order to offer "add an
+    instance of this" next, and the integer id would be one more thing to look up.
+
+    ``attempts`` crosses the wire as stored — number, outcome and capped failure text per attempt.
+    The prompts and completions behind them are **not** exposed by this API: they are an operator
+    and prompt-tuning artifact (``rule_generation_exchanges``), read from the database, not
+    something the admin who typed one sentence is owed a model's full reasoning transcript for.
+    """
+
+    id: int
+    prompt: str
+    status: RuleGenerationJobStatus
+    attempts: list
+    error: Optional[str]
+    generated_rule_type: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def build(cls, job: RuleGenerationJob, *, rule_type: Optional[str] = None) -> "RuleDraftRead":
+        return cls(
+            id=job.id,
+            prompt=job.prompt,
+            status=job.status,
+            attempts=list(job.attempts or []),
+            error=job.error,
+            generated_rule_type=rule_type,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
         )

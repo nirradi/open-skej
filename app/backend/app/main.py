@@ -13,6 +13,7 @@ from app.identity.models import User
 from app.identity.router import router as spaces_router
 from app.identity.router import rule_types_router
 from app.rule_catalog import catalog
+from app.rule_generation import sweep_orphaned_generation_jobs
 from app.routers import resource_bookings
 from app.settings import get_settings
 
@@ -47,6 +48,21 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
             session.close()
     except Exception:
         logger.exception("Could not load the rule catalog at startup; continuing without it.")
+
+    # Fail every generation job left in flight by a process that is no longer running. An
+    # in-process runner does not survive a restart, so a ``running`` row at boot describes a job
+    # nobody is executing — and the partial unique index over in-flight rows would turn that one
+    # stale row into a permanent block on that Space ever generating again. Its own
+    # ``try``/``except`` for the same reason as the reload above: a database slow to accept
+    # connections at boot must not stop the backend coming up.
+    try:
+        session = get_session_factory()()
+        try:
+            sweep_orphaned_generation_jobs(session)
+        finally:
+            session.close()
+    except Exception:
+        logger.exception("Could not sweep orphaned rule generation jobs at startup.")
     yield
 
 
@@ -73,6 +89,21 @@ if get_settings().sandbox_auth:
     from app.routers import sandbox as sandbox_router
 
     app.include_router(sandbox_router.router)
+
+if get_settings().rule_generation_enabled:
+    # Conditional for the same reason as the sandbox block above, and it is worth
+    # stating rather than inheriting: `/spaces/{id}/rule-drafts` must not exist at
+    # all on a backend that has not opted into rule generation, so a caller there
+    # gets a 404 rather than a 403 that would first require the route to exist in
+    # order to refuse it. Whether the capability is present is not discoverable by
+    # whether a request to it succeeds.
+    #
+    # There is a second reason here that sandbox auth does not have: every job
+    # spends real model calls, so a deployment that never set the flag cannot be
+    # induced to spend money by anyone who guesses the URL.
+    from app.routers import rule_drafts as rule_drafts_router
+
+    app.include_router(rule_drafts_router.router)
 
 
 @app.exception_handler(AuthError)
