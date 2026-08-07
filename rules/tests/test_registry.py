@@ -21,7 +21,7 @@ catches a build function silently ignoring the parameters it was handed.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -57,11 +57,21 @@ def request(start_at: datetime, end_at: datetime) -> BookingRequest:
     return BookingRequest(user_id=USER, resource_id=RESOURCE, start_at=start_at, end_at=end_at)
 
 
-def context(*bookings: BookingRecord, now: datetime = NOW) -> Context:
+def context(
+    *bookings: BookingRecord,
+    now: datetime = NOW,
+    frame_for: datetime | None = None,
+    frame_end: datetime | None = None,
+) -> Context:
+    """Most rules here read only the request and their own parameters, so the frame's exact bounds
+    are inert for them and the default (anchored on ``now``) is fine. ``AvailabilityHoursRule``
+    reads ``context.local`` directly, so its own tests pass ``frame_for``/``frame_end`` matching the
+    request under test — see ``test_build_availability_hours_reads_raw_minutes_params_directly``.
+    """
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
-        local=utc_frame(now),
+        local=utc_frame(frame_for if frame_for is not None else now, frame_end),
         history=HistoryContext(bookings=bookings),
     )
 
@@ -96,7 +106,7 @@ def test_all_seven_stable_ids_are_registered():
         ("booking_horizon", ("days",)),
         ("max_duration", ("max_duration_minutes",)),
         ("slot_alignment", ("slot_minutes",)),
-        ("availability_hours", ("opens_at", "closes_at")),
+        ("availability_hours", ("opens_at_minutes", "closes_at_minutes")),
         ("max_bookings_per_week", ("max_bookings",)),
         ("max_bookings_per_month", ("max_bookings",)),
     ],
@@ -164,12 +174,13 @@ def test_reads_history_is_true_only_for_the_two_counting_types():
     }
 
 
-def test_needs_local_resolution_is_true_for_hours_slot_alignment_and_the_two_counting_types():
+def test_needs_local_resolution_is_true_for_slot_alignment_and_the_two_counting_types():
     """`slot_alignment` needs its `anchor` resolved against the Space's zone and the booking's own
-    date, the same reason `availability_hours` and the counting rules need local resolution."""
+    date, the same reason the counting rules need local resolution. `availability_hours` no longer
+    does: it stores minutes-from-local-midnight directly and reads `context.local` itself, so its
+    build function needs nothing resolved for it (`rules/rules/registry.py`)."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.needs_local_resolution} == {
         "slot_alignment",
-        "availability_hours",
         "max_bookings_per_week",
         "max_bookings_per_month",
     }
@@ -208,16 +219,14 @@ def test_every_integer_param_has_a_positive_minimum():
         assert param.required is True
 
 
-def test_local_time_params_have_no_numeric_bound():
-    time_params = [
-        param
-        for declared in REGISTRY.values()
-        for param in declared.params
-        if param.kind is ParamKind.LOCAL_TIME
-    ]
-    assert time_params
-    for param in time_params:
-        assert param.minimum is None
+def test_local_time_params_are_bounded_within_a_single_day():
+    """Both are stored as minutes from local midnight (``rules/rules/registry.py``): a value below
+    zero, or a bare ``closes_at_minutes`` of zero, is meaningless on its own — the pairwise relation
+    between the two is a separate check `AvailabilityHoursRule`'s own constructor makes."""
+    assert REGISTRY["availability_hours"].params[0].name == "opens_at_minutes"
+    assert REGISTRY["availability_hours"].params[0].minimum == 0
+    assert REGISTRY["availability_hours"].params[1].name == "closes_at_minutes"
+    assert REGISTRY["availability_hours"].params[1].minimum == 1
 
 
 # --- build() behaves identically to constructing the class directly ---------------------------
@@ -250,7 +259,9 @@ def test_build_max_duration_behaves_like_the_class():
 def test_build_slot_alignment_reads_resolved_anchor_not_a_raw_param():
     """`SlotAlignmentRule` needs a UTC `anchor` instant — the constructor this build function calls
     takes it from `resolved`, never from `params`, since resolving the Space's local midnight for
-    the booking's own date is a future adapter's job, exactly like `availability_hours`'s UTC pair.
+    the booking's own date is the adapter's job. `availability_hours` used to need the identical
+    treatment for its UTC pair; it no longer does, because it now stores minutes-from-local-midnight
+    directly and needs nothing resolved (see the test below).
     """
     anchor = datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc)
     resolved = {"anchor": anchor}
@@ -265,23 +276,26 @@ def test_build_slot_alignment_reads_resolved_anchor_not_a_raw_param():
     assert built.evaluate(on_grid, context()).passed
 
 
-def test_build_availability_hours_reads_resolved_utc_times_not_raw_params():
-    """`AvailabilityHoursRule` only ever speaks UTC — the constructor this build function calls
-    takes the *resolved* UTC pair, never the Space's raw local `opens_at`/`closes_at`, since
-    resolving local hours to a UTC window per date is a future adapter's job."""
-    resolved = {"opens_at": time(6, 0), "closes_at": time(23, 0)}
-    built = REGISTRY["availability_hours"].build({}, resolved)
-    direct = AvailabilityHoursRule(opens_at=time(6, 0), closes_at=time(23, 0))
+def test_build_availability_hours_reads_raw_minutes_params_directly():
+    """`AvailabilityHoursRule` needs no local resolution any more (`needs_local_resolution=False`)
+    — the constructor this build function calls reads the two minutes-from-local-midnight params
+    straight off the stored row, exactly like `max_duration` or `booking_horizon` above."""
+    params = {"opens_at_minutes": 6 * 60, "closes_at_minutes": 23 * 60}
+    built = REGISTRY["availability_hours"].build(params)
+    direct = AvailabilityHoursRule(opens_at_minutes=6 * 60, closes_at_minutes=23 * 60)
 
     too_early = request(
         datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc),
         datetime(2026, 7, 20, 5, 30, tzinfo=timezone.utc),
     )
-    assert built.evaluate(too_early, context()) == direct.evaluate(too_early, context())
-    assert not built.evaluate(too_early, context()).passed
+    too_early_context = context(frame_for=too_early.start_at, frame_end=too_early.end_at)
+    assert built.evaluate(too_early, too_early_context) == direct.evaluate(
+        too_early, too_early_context
+    )
+    assert not built.evaluate(too_early, too_early_context).passed
 
     inside = request(NOW, NOW + timedelta(hours=1))
-    assert built.evaluate(inside, context()).passed
+    assert built.evaluate(inside, context(frame_for=NOW, frame_end=NOW + timedelta(hours=1))).passed
 
 
 def test_build_max_bookings_per_week_behaves_like_the_class():

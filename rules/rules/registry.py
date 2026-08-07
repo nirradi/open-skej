@@ -86,9 +86,13 @@ class ParamKind(str, Enum):
     """The shape of one declared parameter.
 
     Only two values, because only two are needed by the seven types registered below: a plain
-    positive integer (a day count, a minute count, a booking count) and a local wall-clock time of
-    day (an opening or closing hour). A ``str`` subclass so a future API boundary serialises this as
-    the plain string a form or a JSON body already expects, without a translation table.
+    positive integer (a day count, a minute count, a booking count) and a local time of day
+    presented as a clock but **stored as an integer** — minutes from local midnight (an opening or
+    closing hour). ``LOCAL_TIME`` describes *presentation*, not storage: the value underneath it is
+    exactly as much an ``int`` as ``INTEGER``'s is, which is what lets a form render a time-of-day
+    widget (09:00) while the wire and the database hold the plain minute count (540) the rule
+    actually reads off ``context.local``. A ``str`` subclass so a future API boundary serialises
+    this as the plain string a form or a JSON body already expects, without a translation table.
     """
 
     INTEGER = "integer"
@@ -107,10 +111,15 @@ class RuleParam:
 
     ``minimum`` is the only bound these seven types need: every integer parameter registered below
     must be positive (a zero-day horizon, a zero-minute duration or a zero-minute slot means
-    nothing), and a local time of day has no numeric bound to speak of. Nothing here declares a
-    maximum or a step, because nothing registered needs one — add a bound against the type that
-    actually requires it. ``slot_minutes`` additionally must *divide* 1440, which this schema has no
-    field to express; that enforcement stays inside ``SlotAlignmentRule``'s own constructor until a
+    nothing), and a ``LOCAL_TIME`` parameter's own ``minimum`` bounds only the single value it names
+    in isolation (``opens_at_minutes >= 0``, ``closes_at_minutes >= 1``) — the pairwise relationship
+    between the two (``opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440``) has no
+    single-field ``minimum`` to express it and is enforced where ``AvailabilityHoursRule``'s own
+    constructor and the write-boundary validation both already enforce it
+    (``.claude/rules/identity-and-access.md``). Nothing here declares a maximum or a step, because
+    nothing registered needs one *as a single-field bound* — add one against the type that actually
+    requires it. ``slot_minutes`` additionally must *divide* 1440, which this schema has no field to
+    express either; that enforcement stays inside ``SlotAlignmentRule``'s own constructor until a
     future task adds it at the API boundary (see the module docstring's build-function note).
     """
 
@@ -215,13 +224,15 @@ def _build_slot_alignment(
 
 
 def _build_availability_hours(
-    params: Mapping[str, Any], resolved: Mapping[str, Any] | None
+    params: Mapping[str, Any], resolved: Mapping[str, Any] | None = None
 ) -> BaseRule:
-    # `AvailabilityHoursRule` only ever speaks UTC. `params` holds the Space's raw local wall-clock
-    # hours as authored; `resolved` holds the UTC pair a future adapter resolves per booking date —
-    # the constructor takes the latter, never the former.
-    assert resolved is not None
-    return AvailabilityHoursRule(opens_at=resolved["opens_at"], closes_at=resolved["closes_at"])
+    # Unlike every other type with `needs_local_resolution`, this one needs no per-booking
+    # resolution at all any more: `params` already holds the two minutes-from-local-midnight
+    # integers the rule reads directly, with nothing left for an adapter to convert.
+    return AvailabilityHoursRule(
+        opens_at_minutes=params["opens_at_minutes"],
+        closes_at_minutes=params["closes_at_minutes"],
+    )
 
 
 def _build_max_bookings_per_week(
@@ -338,22 +349,24 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         priority=40,
         params=(
             RuleParam(
-                name="opens_at",
+                name="opens_at_minutes",
                 kind=ParamKind.LOCAL_TIME,
                 label="Opens at",
                 unit=None,
                 required=True,
+                minimum=0,
             ),
             RuleParam(
-                name="closes_at",
+                name="closes_at_minutes",
                 kind=ParamKind.LOCAL_TIME,
                 label="Closes at",
                 unit=None,
                 required=True,
+                minimum=1,
             ),
         ),
         reads_history=False,
-        needs_local_resolution=True,
+        needs_local_resolution=False,
         is_single=False,
         build=_build_availability_hours,
     ),
