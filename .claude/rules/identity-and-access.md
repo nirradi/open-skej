@@ -168,24 +168,27 @@ including the six that were once columns on `spaces`, is created and edited at `
 (`SpaceRulesPage`). A Resource has no configuration to edit;
 `PATCH /spaces/{public_id}/resources/{resource_id}` renames it and nothing more.
 
-**`opens_at` and `closes_at` are stored together, in one `availability_hours` row, required together.**
-Both are `required` parameters of that rule type, so a row holding one bound without the other is not
-a state the type can build from, and it is refused rather than stored. A Space enforcing no hours at
-all holds no `availability_hours` row at all: "not enforced" is the *absence* of a row here, exactly
-as it is for every other rule type, never a row with a bound left empty.
-`opens_at` must be earlier than `closes_at` on the Space's own wall clock, and that is enforced
-here or nowhere: a pair that inverts locally is refused with **422**. This is not tidiness: the rule
-engine reads an *inverted* UTC window as "this window crosses a UTC calendar day", which is what makes
-a venue in Sydney or Honolulu bookable at all (`rule-engine.md`), and locally-inverted hours resolve
-to an inverted UTC pair too. The engine cannot tell them apart, so an admin who typed the closing time
-into the opening box would get a Space open all night and shut all day — silently, and in the
-*permissive* direction. This layer is the last one that still knows the values were typed rather than
-derived.
+**`opens_at_minutes` and `closes_at_minutes` are stored together, in one `availability_hours` row,
+required together.** Both are `required` parameters of that rule type, so a row holding one bound
+without the other is not a state the type can build from, and it is refused rather than stored. A
+Space enforcing no hours at all holds no `availability_hours` row at all: "not enforced" is the
+*absence* of a row here, exactly as it is for every other rule type, never a row with a bound left
+empty. Both are minutes from the Space's own local midnight (`rule-engine.md`), and
+`opens_at_minutes` must be earlier than `closes_at_minutes` by at most 24 hours — `0 <=
+opens_at_minutes < 1440` and `opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440` — and
+that range is enforced here or nowhere: a pair failing it is refused with **422**. This is not
+tidiness: `AvailabilityHoursRule`'s own constructor enforces the identical range, so a submission
+failing it here would otherwise be stored and only discovered as `RULE_ERROR_MESSAGE` denying every
+booking the next time someone books. This layer is what turns that into a 422 naming the problem
+while an admin is still looking at the form, instead of a Space that silently refuses everyone.
 
 The check is made on the **effective pair after the patch is applied**, not on the payload: a PATCH
-naming only `opens_at` is a legal partial update, and whether it inverts depends on the `closes_at`
-the row already holds. Relaxing it is how a venue open past its own local midnight would be admitted,
-deliberately, if that is ever wanted.
+naming only `opens_at_minutes` is a legal partial update, and whether the pair still satisfies the
+range depends on the `closes_at_minutes` the row already holds. A venue open past its own local
+midnight — `closes_at_minutes > 1440` — is admitted by this same check today, not by relaxing it
+further: it is exactly as valid a value as any same-day window, since the range is measured in
+minutes rather than compared as clock times with a date stripped off
+(`ops/done/stream-7/passed-midnight.md`).
 
 A `timezone` is validated as a real IANA name at the boundary — an unknown name or a fixed offset
 (`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
@@ -202,11 +205,12 @@ required parameter, an unknown parameter, or one of the wrong kind or below its 
 is refused with **422** naming the specific parameter, so a later admin form can attach the message
 to the right field rather than a generic complaint. `slot_alignment`'s `slot_minutes` must divide
 1440, enforced here rather than left to surface only at booking time. `availability_hours` carries
-the inverted-hours check above — an `opens_at` at or after `closes_at` on the Space's own wall clock
-is a **422**, because the engine cannot tell an inverted pair from a legitimate UTC-day-crossing
-window and is not asked to. A `PATCH` naming only one of `opens_at`/`closes_at` resolves the
-effective pair against what the row already has stored, rather than failing "missing required" on a
-bound the caller never meant to touch. A rule id that names nothing, or names a row
+the range check above — `opens_at_minutes` and `closes_at_minutes` failing `0 <= opens_at_minutes <
+1440` or `opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440` is a **422**, mirroring
+`AvailabilityHoursRule`'s own constructor bound exactly as `slot_alignment`'s check mirrors
+`SlotAlignmentRule`'s. A `PATCH` naming only one of `opens_at_minutes`/`closes_at_minutes` resolves
+the effective pair against what the row already has stored, rather than failing "missing required" on
+a bound the caller never meant to touch. A rule id that names nothing, or names a row
 in another Space, gets the identical **404** on `PATCH`/`DELETE` — the same 404-not-403 treatment a
 foreign Resource id gets, since the lookup is scoped to `space_id` in one query and a foreign id
 discloses nothing about being live elsewhere. `DELETE` is a real delete, unlike everywhere else in
@@ -407,7 +411,8 @@ draws: it must never offer what the server would refuse, and it is never what re
 
 **Every clock the grid draws is the Space's own, never the viewer's.** The day columns, the slot
 axis, the greyed hours, and the instant a click submits all resolve through the Space's own
-`timezone` — the same zone `resolve_operating_hours` uses on the backend — via `Intl.DateTimeFormat`
+`timezone` — the same zone the backend resolves `LocalFrame` against (`rule-engine.md`) — via
+`Intl.DateTimeFormat`
 with an explicit zone, asked fresh per date rather than cached as an offset, for the identical reason
 the backend conversion is repeated per date rather than done once at write time. A viewer whose own
 zone differs from the Space's sees that only as a secondary hint alongside the grid, never a second

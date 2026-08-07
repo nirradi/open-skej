@@ -143,7 +143,7 @@ export function slotStartMinutes(index: number, config: CalendarConfig = calenda
  * The date-plus-minutes pair is resolved to an instant by `zonedTimeToInstant`
  * (`timezone.ts`) rather than by adding milliseconds to a UTC guess, so a slot
  * lands on the intended wall-clock time across a DST boundary — the same
- * per-date resolution `operating_hours.py` uses on the backend, and the
+ * per-date resolution `rules_stub.py`'s `_local_midnight_utc` uses on the backend, and the
  * reason a Space's 13:00 in July and its 13:00 in January can be (and, near a
  * DST transition, are) different real instants for the identical wall-clock
  * label.

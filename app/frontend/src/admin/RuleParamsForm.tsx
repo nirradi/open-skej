@@ -17,10 +17,14 @@ import type { RuleParamRead } from '../api'
  * field renders for it.
  *
  * Values are held as strings throughout — the shape every HTML input already
- * produces — and converted to the wire's `number` / `"HH:MM:SS"` only at the
- * edges (`ruleParamValuesToWire`), the same input-is-a-string,
+ * produces — and converted to the wire's shape only at the edges
+ * (`ruleParamValuesToWire`), the same input-is-a-string,
  * convert-at-the-boundary shape `SpaceSchedulePanel` already uses for its own
- * numeric and time fields.
+ * numeric and time fields. Both `kind`s are a plain `number` on the wire —
+ * `"local_time"` describes the widget (`<input type="time">`, an `"HH:MM"`
+ * display string), never the storage type: the value underneath it is minutes
+ * from local midnight, exactly as much a plain integer as `"integer"`'s is
+ * (`rules/rules/registry.py`'s `ParamKind` docstring).
  */
 export type RuleParamValues = Record<string, string>
 
@@ -36,6 +40,16 @@ export function emptyRuleParamValues(params: RuleParamRead[]): RuleParamValues {
  * all collapse to `''` here rather than throwing — this is also how a
  * *broken* row (see `ruleValidation.ts`) becomes editable at all: the admin
  * needs a blank field to type a fix into, not a crash.
+ *
+ * A `"local_time"` value is stored as minutes from local midnight (a plain
+ * `number`, matching `"integer"`'s own storage — see the module docstring)
+ * and rendered here as the `"HH:MM"` string `<input type="time">` expects.
+ * `((raw % 1440) + 1440) % 1440` normalises the ordinary case cleanly; a
+ * value at or past 1440 — a Space configured with a window that crosses
+ * local midnight — wraps to an early wall-clock time in this display. That
+ * is a known, accepted limitation of the plain time widget, not a bug: an
+ * admin authoring such a window is out of scope here
+ * (`ops/done/stream-7/passed-midnight.md`).
  */
 export function ruleParamValuesFromStored(
   params: RuleParamRead[],
@@ -47,7 +61,14 @@ export function ruleParamValuesFromStored(
     if (raw === undefined || raw === null) {
       values[param.name] = ''
     } else if (param.kind === 'local_time') {
-      values[param.name] = typeof raw === 'string' ? raw.slice(0, 5) : ''
+      if (typeof raw === 'number' && Number.isFinite(raw)) {
+        const minutes = ((raw % 1440) + 1440) % 1440
+        const hours = Math.floor(minutes / 60)
+        values[param.name] =
+          `${String(hours).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`
+      } else {
+        values[param.name] = ''
+      }
     } else {
       values[param.name] = String(raw)
     }
@@ -57,12 +78,13 @@ export function ruleParamValuesFromStored(
 
 /**
  * The draft, converted to the wire shape `SpaceRuleCreateInput.params` /
- * `SpaceRuleUpdateInput.params` expect: `number` for `"integer"`, `"HH:MM:SS"`
- * for `"local_time"`. A blank optional value is omitted from the object
- * entirely rather than sent as `null` — matching `SpaceRuleCreate`, which has
- * no way to mark one param of a `params` dict absent except leaving the key
- * out. Call `ruleParamsAreValid` first; this function does not itself refuse
- * a blank required value.
+ * `SpaceRuleUpdateInput.params` expect: a plain `number` for both `kind`s —
+ * `"local_time"`'s `"HH:MM"` display string becomes minutes from local
+ * midnight, the shape the rule actually reads off `context.local`. A blank
+ * optional value is omitted from the object entirely rather than sent as
+ * `null` — matching `SpaceRuleCreate`, which has no way to mark one param of
+ * a `params` dict absent except leaving the key out. Call `ruleParamsAreValid`
+ * first; this function does not itself refuse a blank required value.
  */
 export function ruleParamValuesToWire(
   params: RuleParamRead[],
@@ -72,7 +94,12 @@ export function ruleParamValuesToWire(
   for (const param of params) {
     const value = values[param.name] ?? ''
     if (value === '') continue
-    wire[param.name] = param.kind === 'local_time' ? `${value}:00` : Number(value)
+    if (param.kind === 'local_time') {
+      const [hours, minutes] = value.split(':').map(Number)
+      wire[param.name] = hours * 60 + minutes
+    } else {
+      wire[param.name] = Number(value)
+    }
   }
   return wire
 }

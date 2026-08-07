@@ -94,15 +94,34 @@ describe('ruleBrokenReason', () => {
     expect(ruleBrokenReason(types, row)).toBe('"Max duration" must be at least 5 minutes.')
   })
 
-  it('flags a local_time value not stored as HH:MM:SS', () => {
+  it('flags a local_time value stored as the wrong JS type', () => {
+    // `local_time` is stored as minutes from local midnight, exactly like `integer` —
+    // `kind` only ever picks the eventual widget (`rules/rules/registry.py`'s
+    // `ParamKind` docstring), so a non-numeric value is broken the same way.
     const types = [
       makeRuleType({
         rule_type: 'availability_hours',
-        params: [makeRuleParam({ name: 'opens_at', kind: 'local_time', label: 'Opens' })],
+        params: [makeRuleParam({ name: 'opens_at_minutes', kind: 'local_time', label: 'Opens' })],
       }),
     ]
-    const row = { rule_type: 'availability_hours', params: { opens_at: '7am' } }
+    const row = { rule_type: 'availability_hours', params: { opens_at_minutes: '7am' } }
 
-    expect(ruleBrokenReason(types, row)).toBe('"Opens" must be a time.')
+    expect(ruleBrokenReason(types, row)).toBe('"Opens" must be a number.')
+  })
+
+  it('flags a local_time value below its declared minimum', () => {
+    const types = [
+      makeRuleType({
+        rule_type: 'availability_hours',
+        params: [
+          makeRuleParam({ name: 'opens_at_minutes', kind: 'local_time', label: 'Opens', minimum: 0 }),
+        ],
+      }),
+    ]
+    const row = { rule_type: 'availability_hours', params: { opens_at_minutes: -5 } }
+
+    // `makeRuleParam`'s default `unit` is `'minutes'`, and the message names it —
+    // identical to the `integer` case above.
+    expect(ruleBrokenReason(types, row)).toBe('"Opens" must be at least 0 minutes.')
   })
 })

@@ -23,7 +23,7 @@ A third guard, over the AI generation loop's system prompt, lives in
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -72,11 +72,17 @@ def request(start_at: datetime, end_at: datetime) -> BookingRequest:
     return BookingRequest(user_id=USER, resource_id=RESOURCE, start_at=start_at, end_at=end_at)
 
 
-def context(now: datetime = NOW, *, frame_for: datetime | None = None, history=()) -> Context:
+def context(
+    now: datetime = NOW,
+    *,
+    frame_for: datetime | None = None,
+    frame_end: datetime | None = None,
+    history=(),
+) -> Context:
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
-        local=utc_frame(frame_for if frame_for is not None else now),
+        local=utc_frame(frame_for if frame_for is not None else now, frame_end),
         history=HistoryContext(bookings=tuple(history)),
     )
 
@@ -112,7 +118,10 @@ _DEFAULT_CANON_SCENARIOS = {
             datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc),
             datetime(2026, 7, 20, 3, 30, tzinfo=timezone.utc),
         ),
-        context(frame_for=datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)),
+        context(
+            frame_for=datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc),
+            frame_end=datetime(2026, 7, 20, 3, 30, tzinfo=timezone.utc),
+        ),
     ),
 }
 
@@ -169,14 +178,17 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
         ),
     },
     "availability_hours": {
-        "params": {"opens_at": time(9, 0), "closes_at": time(17, 0)},
-        "resolved": {"opens_at": time(9, 0), "closes_at": time(17, 0)},
+        "params": {"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60},
+        "resolved": None,
         "case": lambda: (
             request(
                 datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc),
                 datetime(2026, 7, 20, 5, 30, tzinfo=timezone.utc),
             ),
-            context(frame_for=datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc)),
+            context(
+                frame_for=datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc),
+                frame_end=datetime(2026, 7, 20, 5, 30, tzinfo=timezone.utc),
+            ),
         ),
     },
     "max_bookings_per_week": {
@@ -235,14 +247,22 @@ def test_every_registered_type_denies_without_naming_an_absolute_time():
 
 
 def test_the_availability_rule_names_no_time_on_either_side_of_its_window():
-    rule = AvailabilityHoursRule(opens_at=time(9, 0), closes_at=time(17, 0))
+    rule = AvailabilityHoursRule(opens_at_minutes=9 * 60, closes_at_minutes=17 * 60)
     day = datetime(2026, 7, 20, tzinfo=timezone.utc)
 
     before_open = request(day.replace(hour=5), day.replace(hour=5, minute=30))
     after_close = request(day.replace(hour=16, minute=30), day.replace(hour=18))
 
-    _assert_denies_with_no_absolute_time(rule, before_open, context(frame_for=before_open.start_at))
-    _assert_denies_with_no_absolute_time(rule, after_close, context(frame_for=after_close.start_at))
+    _assert_denies_with_no_absolute_time(
+        rule,
+        before_open,
+        context(frame_for=before_open.start_at, frame_end=before_open.end_at),
+    )
+    _assert_denies_with_no_absolute_time(
+        rule,
+        after_close,
+        context(frame_for=after_close.start_at, frame_end=after_close.end_at),
+    )
 
 
 # --- A duration is not an absolute time ---------------------------------------------------------

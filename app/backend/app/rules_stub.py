@@ -26,12 +26,13 @@ Translations that happen here and nowhere else:
   distinct timezone translation, per rule type, resolved fresh for every
   booking's own date rather than once at write time (``CLAUDE.md``,
   "Conversion happens at the boundary, per date, never once at write time"):
-  an ``availability_hours`` row's local ``opens_at``/``closes_at`` resolve to
-  a UTC window via ``app.operating_hours``; a ``slot_alignment`` row's
-  ``anchor`` resolves to the Space's own local midnight via
-  ``_local_midnight_utc``; and both counting rules' ``[window_start,
-  window_end)`` resolve from the local week/month via ``_local_week_bounds``
-  / ``_local_month_bounds``. See ``_resolve_for_row``.
+  a ``slot_alignment`` row's ``anchor`` resolves to the Space's own local
+  midnight via ``_local_midnight_utc``; and both counting rules'
+  ``[window_start, window_end)`` resolve from the local week/month via
+  ``_local_week_bounds`` / ``_local_month_bounds``. See ``_resolve_for_row``.
+  ``availability_hours`` needs none of this any more — its params are already
+  minutes from local midnight, read straight off ``context.local`` by the
+  rule itself.
 * **The local frame.** ``_build_local_frame`` answers every local question a
   rule could ask — the venue's day, week and month as UTC instants, the local
   weekday, and minutes from local midnight — and hands them over as
@@ -89,8 +90,6 @@ from rules import BookingRecord as EngineBookingRecord
 from rules import BookingRequest as EngineBookingRequest
 from rules import Context as EngineContext
 
-from app.operating_hours import resolve_operating_hours
-
 logger = logging.getLogger(__name__)
 
 ALLOWED_MESSAGE = "Looks good — this slot is available."
@@ -132,8 +131,8 @@ def _canon_rule(rule_type: type):
 #: that booking's own Space's ``space_rules`` rows by ``_build_canon``, not
 #: from these.
 MAX_BOOKING_DURATION: timedelta = _canon_rule(MaxDurationRule).max_duration
-AVAILABILITY_OPEN: time = _canon_rule(AvailabilityHoursRule).opens_at
-AVAILABILITY_CLOSE: time = _canon_rule(AvailabilityHoursRule).closes_at
+AVAILABILITY_OPEN_MINUTES: int = _canon_rule(AvailabilityHoursRule).opens_at_minutes
+AVAILABILITY_CLOSE_MINUTES: int = _canon_rule(AvailabilityHoursRule).closes_at_minutes
 BOOKING_HORIZON_DAYS: int = _canon_rule(BookingHorizonRule).days
 
 
@@ -340,10 +339,10 @@ def _local_midnight_utc(day: date, tz_name: str) -> datetime:
     built from this and nothing else, so a week, a month, or a slot grid all
     start when the *venue's* day starts rather than at UTC midnight. On the
     handful of dates a zone's DST transition falls at or near local midnight,
-    ``zoneinfo`` resolves the nonexistent or repeated instant by PEP 495 — the
-    same treatment ``app.operating_hours`` already gives operating hours, and
-    for the same reason: a second code path for a few hours a year would buy
-    correctness nobody asked for and nobody could verify by reading.
+    ``zoneinfo`` resolves the nonexistent or repeated instant by PEP 495 —
+    accepted rather than special-cased: a second code path for a few hours a
+    year would buy correctness nobody asked for and nobody could verify by
+    reading.
     """
     return datetime.combine(day, time(0, 0), tzinfo=ZoneInfo(tz_name)).astimezone(timezone.utc)
 
@@ -497,16 +496,10 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, tz_name: str) -> dict:
 
     Raises ``KeyError``/``TypeError``/``ValueError`` for a row whose
     ``params`` do not have what this resolution needs (a missing
-    ``opens_at``, an unparseable time string) — ``_build_canon`` treats that
-    identically to a failure inside ``RuleType.build`` itself, since both are
-    "this row's stored params no longer satisfy its type's schema".
+    ``slot_minutes``, a value of the wrong type) — ``_build_canon`` treats
+    that identically to a failure inside ``RuleType.build`` itself, since both
+    are "this row's stored params no longer satisfy its type's schema".
     """
-    if row.rule_type == "availability_hours":
-        opens_at = time.fromisoformat(row.params["opens_at"])
-        closes_at = time.fromisoformat(row.params["closes_at"])
-        utc_open, utc_close = resolve_operating_hours(opens_at, closes_at, tz_name, on_date)
-        return {"opens_at": utc_open, "closes_at": utc_close}
-
     if row.rule_type == "slot_alignment":
         return {"anchor": _local_midnight_utc(on_date, tz_name)}
 
@@ -519,7 +512,7 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, tz_name: str) -> dict:
         return {"window_start": window_start, "window_end": window_end}
 
     # `REGISTRY[row.rule_type].needs_local_resolution` is true for exactly
-    # these four types today (`rules/rules/registry.py`); a fifth arriving
+    # these three types today (`rules/rules/registry.py`); a fourth arriving
     # without this adapter being taught how to resolve it is a genuine
     # adapter bug, not a bad configuration row, so it is left to raise loudly
     # rather than being folded into `_UnbuildableRuleRowError`.
@@ -630,8 +623,18 @@ class DaySchedule:
     coherence_issue: str | None
 
 
-def _minutes_since_midnight(value: time) -> int:
-    return value.hour * 60 + value.minute
+def _minutes_to_wire_time(minutes: int | None) -> time | None:
+    """Render a minutes-from-local-midnight integer as the wire's ``time`` shape.
+
+    ``None`` stays ``None`` — "not configured", not midnight. Otherwise ``minutes % 1440`` folds a
+    value at or past 24 hours back onto an ordinary wall clock: the *only* place in this function
+    that reduces a minute count to a bare ``time``, and deliberately the very last step (see
+    ``resolve_day_schedule``'s docstring for why every computation above this stays in minutes).
+    """
+    if minutes is None:
+        return None
+    minutes = minutes % 1440
+    return time(minutes // 60, minutes % 60)
 
 
 def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
@@ -645,10 +648,10 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
     instant to judge here, only a calendar date to describe. Unlike
     ``_build_canon`` this never
     touches ``REGISTRY`` or ``RuleType.build``: an ``availability_hours``
-    row's local ``opens_at``/``closes_at`` and a ``slot_alignment`` row's
-    local ``slot_minutes`` are read directly off ``params``, with no anchor
-    to resolve — the anchor is always the date's own local midnight, which
-    is irrelevant to what this endpoint reports.
+    row's ``opens_at_minutes``/``closes_at_minutes`` and a ``slot_alignment``
+    row's local ``slot_minutes`` are read directly off ``params``, with no
+    anchor to resolve — the anchor is always the date's own local midnight,
+    which is irrelevant to what this endpoint reports.
 
     **Every matching row of a type must hold simultaneously** — "the engine
     stays a flat AND of deny predicates" (``ops/plans/stream-6-plan.md``,
@@ -656,15 +659,24 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
     never picked from:
 
     * ``availability_hours`` — the **intersection** of every matching row's
-      own window: ``effective_open = max(opens_at)``,
-      ``effective_close = min(closes_at)``. A single row can never itself be
-      inverted (``opens_at < closes_at`` is enforced at write time,
-      ``.claude/rules/identity-and-access.md``), but the intersection of two
+      own window: ``effective_open = max(opens_at_minutes)``,
+      ``effective_close = min(closes_at_minutes)``, computed **entirely in
+      integer minutes** and converted to the wire's ``time`` shape only in
+      the final step (``_minutes_to_wire_time``). A single row can never
+      itself be inverted (``AvailabilityHoursRule.__init__`` enforces
+      ``opens_at_minutes < closes_at_minutes``), but the intersection of two
       or more legitimately can be — "9-12" and "14-18" together permit
       nothing. That is a real flat-AND outcome ("closed all day on this
       date"), not a coherence error, so it is normalised to a **zero-width**
       window (``effective_close = effective_open``) rather than reported as
-      broken.
+      broken. Doing this comparison in minutes rather than converting each
+      row to a bare ``time`` first is load-bearing, not a style choice: a
+      row's own window may now legitimately cross local midnight
+      (``closes_at_minutes > 1440``), and reducing such a row to a ``time``
+      before comparing would make it look "inverted" on its own — the exact
+      state this zero-width normalisation exists to flag for a *genuine*
+      empty intersection — and wrongly report a real 18:00–02:00 window as
+      closed all day even with only one matching row.
     * ``slot_alignment`` — the **LCM** of every matching row's own
       ``slot_minutes``: a date must land on a multiple of *every* matching
       row's own grid simultaneously, and being divisible by the LCM is
@@ -683,21 +695,33 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
     on it — mirroring ``config.ts``'s own ``coherenceIssue`` wording. A
     zero-width "closed all day" window is never flagged: there is no grid to
     misalign with nothing bookable in it.
+
+    **The wire shape is unchanged and a same-day window renders exactly as before** —
+    ``DaySchedule.opens_at``/``closes_at`` are still ``time | None``, and the only kind of window
+    this product has ever configured (``closes_at_minutes <= 1440``) reduces through
+    ``_minutes_to_wire_time`` to the identical wall-clock pair the old ``time``-based
+    implementation produced. A window that crosses local midnight — newly representable in the
+    engine by this task, not by this endpoint — is the one honest limitation left: it reduces to a
+    ``closes_at`` that reads *earlier* than ``opens_at`` as a bare wall-clock value, which the
+    calendar grid does not yet render as a wrapping window
+    (``ops/done/stream-7/passed-midnight.md``'s own "Correction" section). This endpoint still must
+    not crash or misreport coherence for such a Space, and it does not; teaching the grid to draw a
+    wrapping day is separate, larger UI work this task is not asked to do.
     """
     matching = [row for row in config.rules if row.enabled and row_applies(row.applies_to, on_date)]
 
     hours_rows = [row for row in matching if row.rule_type == "availability_hours"]
     if hours_rows:
-        opens_at = max(time.fromisoformat(row.params["opens_at"]) for row in hours_rows)
-        closes_at = min(time.fromisoformat(row.params["closes_at"]) for row in hours_rows)
-        if closes_at <= opens_at:
+        opens_at_minutes = max(int(row.params["opens_at_minutes"]) for row in hours_rows)
+        closes_at_minutes = min(int(row.params["closes_at_minutes"]) for row in hours_rows)
+        if closes_at_minutes <= opens_at_minutes:
             # The intersection of two or more matching windows can
-            # legitimately come out empty or inverted (see docstring above) —
-            # normalise to a zero-width window rather than report it broken.
-            closes_at = opens_at
+            # legitimately come out empty (see docstring above) — normalise
+            # to a zero-width window rather than report it broken.
+            closes_at_minutes = opens_at_minutes
     else:
-        opens_at = None
-        closes_at = None
+        opens_at_minutes = None
+        closes_at_minutes = None
 
     slot_rows = [row for row in matching if row.rule_type == "slot_alignment"]
     slot_minutes = (
@@ -706,20 +730,20 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
 
     coherence_issue: str | None = None
     if (
-        opens_at is not None
-        and closes_at is not None
-        and closes_at != opens_at
+        opens_at_minutes is not None
+        and closes_at_minutes is not None
+        and closes_at_minutes != opens_at_minutes
         and slot_minutes is not None
     ):
-        if _minutes_since_midnight(opens_at) % slot_minutes != 0:
+        if opens_at_minutes % slot_minutes != 0:
             coherence_issue = f"Opening time must land on a {slot_minutes}-minute slot boundary."
-        elif _minutes_since_midnight(closes_at) % slot_minutes != 0:
+        elif closes_at_minutes % slot_minutes != 0:
             coherence_issue = f"Closing time must land on a {slot_minutes}-minute slot boundary."
 
     return DaySchedule(
         slot_minutes=slot_minutes,
-        opens_at=opens_at,
-        closes_at=closes_at,
+        opens_at=_minutes_to_wire_time(opens_at_minutes),
+        closes_at=_minutes_to_wire_time(closes_at_minutes),
         coherence_issue=coherence_issue,
     )
 

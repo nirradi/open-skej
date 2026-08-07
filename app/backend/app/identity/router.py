@@ -88,7 +88,9 @@ INVITATION_RESOLVED_DETAIL = (
 )
 INVITATION_ROLE_TOO_HIGH_DETAIL = "You cannot invite someone at a role above your own."
 RULE_NOT_FOUND_DETAIL = "No such rule instance in this Space."
-INVALID_OPERATING_HOURS_DETAIL = "Opening time must be earlier than closing time."
+INVALID_OPERATING_HOURS_DETAIL = (
+    "Opening time must be within a single day, and earlier than closing time by at most 24 hours."
+)
 
 # `GET /spaces/{public_id}/schedule`'s upper bound on `days` (task 6.9). Two
 # calendar months is comfortably more than the single week the frontend grid

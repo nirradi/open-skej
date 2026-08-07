@@ -39,11 +39,11 @@ from app.sandbox_seed import (
     SPACE_A_NAME,
     SPACE_A_SLOT_MINUTES,
     SPACE_A_TIMEZONE,
-    SPACE_B_CLOSES_AT,
+    SPACE_B_CLOSES_AT_MINUTES,
     SPACE_B_MAX_BOOKINGS_PER_WEEK,
     SPACE_B_MAX_DURATION_MINUTES,
     SPACE_B_NAME,
-    SPACE_B_OPENS_AT,
+    SPACE_B_OPENS_AT_MINUTES,
     SPACE_B_SLOT_MINUTES,
     SPACE_B_TIMEZONE,
     STRANGER_AUTH0_SUB,
@@ -166,8 +166,8 @@ def test_seed_produces_every_interesting_state(session):
         "max_bookings_per_week",
     }
     assert rules_b["availability_hours"] == {
-        "opens_at": SPACE_B_OPENS_AT.isoformat(),
-        "closes_at": SPACE_B_CLOSES_AT.isoformat(),
+        "opens_at_minutes": SPACE_B_OPENS_AT_MINUTES,
+        "closes_at_minutes": SPACE_B_CLOSES_AT_MINUTES,
     }
     assert rules_b["slot_alignment"] == {"slot_minutes": SPACE_B_SLOT_MINUTES}
     assert rules_b["max_duration"] == {"max_duration_minutes": SPACE_B_MAX_DURATION_MINUTES}

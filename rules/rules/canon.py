@@ -11,13 +11,13 @@ configuration then becomes a change to how the canon is built rather than a chan
 ``DEFAULT_CANON`` supplies the literal values in force today.
 
 **Every datetime here is UTC**, per ``interfaces.py``, which rejects a non-zero offset at
-construction. This bears directly on :class:`AvailabilityHoursRule`: ``opens_at`` and ``closes_at``
-are **UTC clock times**, and ``start_at.time()`` is a UTC wall clock. A Space whose doors open at
-06:00 local does not open at ``time(6, 0)`` here unless it happens to sit on UTC. Rendering those
-bounds in a viewer's own timezone is the UI's job — and its denial copy names no bound at all,
-rather than naming one in a zone the engine cannot claim is the viewer's: the engine has no
-timezone to convert from and deliberately gains no DST cases, and a clock time in its copy would be
-UTC wearing no label.
+construction. :class:`AvailabilityHoursRule` is the one exception worth calling out for the
+opposite reason: it takes no datetime at all. ``opens_at_minutes`` / ``closes_at_minutes`` are
+plain integers, minutes from the venue's own **local** midnight, read off ``context.local`` — the
+adapter is the only thing that knows a timezone (``.claude/rules/rule-engine.md``), so by the time
+this rule runs, "local" has already been reduced to two numbers with nothing left to convert. Its
+denial copy still names no bound at all: even a local clock time is a fact about one specific
+Space's configuration, not something worth hardcoding into copy shared by the whole canon.
 
 **``SlotAlignmentRule`` is the fifth rule and the one exception to "four rules, one canon".** Every
 other rule here takes a literal that means the same thing on every date it is asked about — a
@@ -32,7 +32,7 @@ builds the rule fresh, never once at start-up.
 
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 
 from .interfaces import BaseRule, BookingRequest, Context, RuleResult, _require_utc
 
@@ -167,78 +167,69 @@ class SlotAlignmentRule(BaseRule):
 
 
 class AvailabilityHoursRule(BaseRule):
-    """Bookings must sit inside the recurring daily window ``[opens_at, closes_at]``.
+    """Bookings must sit inside the recurring **local** daily window
+    ``[opens_at_minutes, closes_at_minutes)``, both counted from the venue's own local midnight.
 
-    ``opens_at`` and ``closes_at`` are **UTC** clock times — see the module docstring. The closing
-    bound is **inclusive**: ending exactly at closing time is fine.
+    This reads ``context.local`` exclusively — ``frame.start_minutes`` and ``frame.end_minutes`` —
+    and touches no datetime and no clock time at all. There is no UTC calendar day here to cross,
+    and no occurrence to reconstruct from a bare ``time`` with the date stripped off: the adapter
+    has already reduced "local" to two plain integers before this rule ever runs
+    (``.claude/rules/rule-engine.md``).
 
-    **The window may cross a UTC calendar day**, and ``opens_at`` is not required to be before
-    ``closes_at`` — when it isn't, that inversion *is* the window: it opens on one UTC date and
-    closes on the next. This is not the same thing as a venue open past its own *local* midnight
-    (``DEFERRED.md`` item 18, unsupported and unrelated): an entirely ordinary same-local-day window
-    — Sydney 09:00-21:00, Honolulu 08:00-20:00 — resolves to exactly this shape in UTC whenever the
-    zone's offset is large enough that local morning falls on the UTC day before (``app.
-    operating_hours``, which is where such a pair comes from and why it stopped raising rather than
-    returning one). A same-Space, same-UTC-day window (Berlin, or the reference hours below) simply
-    never inverts, so this rule behaves exactly as it always did for the case everyone has been
-    testing against.
+    **``closes_at_minutes`` may exceed 1440**, and that is not an edge case, it is the entire reason
+    this rule no longer speaks UTC: a window open past its own local midnight — 18:00 to 02:00 — is
+    ``closes_at_minutes = 1560``, plainly. The closing bound is **inclusive**: ending exactly at
+    closing time is fine. The constructor enforces ``0 <= opens_at_minutes < 1440`` and
+    ``opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440`` — a window is at most 24
+    hours long and always starts somewhere on the day it is configured for, so a caller cannot typo
+    an inversion into an unboundedly long or backwards window the way a bare pair of clock times
+    once could.
 
-    ``evaluate`` never anchors ``opens_at`` and ``closes_at`` to ``request.start_at.date()``
-    independently of each other — doing that is what silently mislabelled a denial's reason
-    (``DEFERRED.md`` item 16): for a crossing window, "the UTC date ``start_at`` falls on" is not a
-    fact about the window, it's a fact about *which half* of one occurrence the request landed in.
-    ``_occurrence_for`` decides that once, from ``start_at`` alone, and both bounds of what it
-    returns come from that same decision — never one built on an assumption the other contradicts.
+    ``evaluate`` still has to choose between at most two candidate occurrences of the recurring
+    window, exactly as the old UTC-clock-time version did — a request whose local day starts just
+    after local midnight can fall in *today's* occurrence (if it opens at minute 0 or later and the
+    request starts before it closes) or in the **tail of yesterday's** occurrence, shifted back by a
+    full day (``closes_at_minutes - 1440``), when the window crossed midnight. Those two candidate
+    ranges never overlap — the constructor's own bound (``closes_at_minutes <= opens_at_minutes +
+    1440``) guarantees ``closes_at_minutes - 1440 <= opens_at_minutes`` — so at most one of them can
+    ever contain ``frame.start_minutes``, and if neither does, the request sits in the daily gap
+    between one closing and the next opening.
     """
 
-    def __init__(self, opens_at: time, closes_at: time) -> None:
-        if opens_at == closes_at:
+    def __init__(self, opens_at_minutes: int, closes_at_minutes: int) -> None:
+        if not (0 <= opens_at_minutes < 1440):
             raise ValueError(
-                f"AvailabilityHoursRule.opens_at must differ from closes_at; both were {opens_at}"
+                "AvailabilityHoursRule.opens_at_minutes must be within a single local day "
+                f"(0 <= opens_at_minutes < 1440); got {opens_at_minutes!r}"
             )
-        self.opens_at = opens_at
-        self.closes_at = closes_at
-
-    def _occurrence_for(self, start_at: datetime) -> tuple[datetime, datetime] | None:
-        """The one occurrence of the recurring window that could contain ``start_at``.
-
-        ``None`` means ``start_at`` falls in the daily gap between one closing and the next
-        opening — outside every occurrence, whatever ``end_at`` turns out to be.
-        """
-        tzinfo = start_at.tzinfo
-        start_date = start_at.date()
-
-        if self.opens_at < self.closes_at:
-            # Same UTC day: the only occurrence a `start_at` on this date could belong to.
-            return (
-                datetime.combine(start_date, self.opens_at, tzinfo),
-                datetime.combine(start_date, self.closes_at, tzinfo),
+        if not (opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440):
+            raise ValueError(
+                "AvailabilityHoursRule.closes_at_minutes must be after opens_at_minutes and at "
+                f"most 24 hours later; got opens_at_minutes={opens_at_minutes!r}, "
+                f"closes_at_minutes={closes_at_minutes!r}"
             )
-        if start_at.time() >= self.opens_at:
-            # The "opens today" half of an occurrence that closes on the following UTC date.
-            return (
-                datetime.combine(start_date, self.opens_at, tzinfo),
-                datetime.combine(start_date + timedelta(days=1), self.closes_at, tzinfo),
-            )
-        if start_at.time() < self.closes_at:
-            # The "closes today" half of an occurrence that opened on the previous UTC date.
-            return (
-                datetime.combine(start_date - timedelta(days=1), self.opens_at, tzinfo),
-                datetime.combine(start_date, self.closes_at, tzinfo),
-            )
-        return None
+        self.opens_at_minutes = opens_at_minutes
+        self.closes_at_minutes = closes_at_minutes
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
-        occurrence = self._occurrence_for(request.start_at)
+        frame = context.local
+        opens = self.opens_at_minutes
+        closes = self.closes_at_minutes
 
-        if occurrence is None or request.start_at < occurrence[0]:
+        if frame.start_minutes >= opens:
+            # Today's own occurrence — the only one there is when the window doesn't cross local
+            # midnight, and the "opens today" half when it does.
+            closing_bound = closes
+        elif closes > 1440 and frame.start_minutes < closes - 1440:
+            # The tail of the occurrence that opened on the *previous* local day.
+            closing_bound = closes - 1440
+        else:
             return RuleResult.deny(
                 "That's before we open, so this booking starts too early."
                 " Please check this Space's opening hours on the calendar and pick a later time."
             )
 
-        _, closing = occurrence
-        if request.end_at > closing:
+        if frame.end_minutes > closing_bound:
             return RuleResult.deny(
                 "That's after we close, so this booking runs too late."
                 " Please check this Space's opening hours on the calendar and pick an earlier"
@@ -267,7 +258,7 @@ def default_canon() -> tuple[BaseRule, ...]:
         NotInThePastRule(),
         BookingHorizonRule(days=60),
         MaxDurationRule(max_duration=timedelta(hours=2)),
-        AvailabilityHoursRule(opens_at=time(6, 0), closes_at=time(23, 0)),
+        AvailabilityHoursRule(opens_at_minutes=6 * 60, closes_at_minutes=23 * 60),
     )
 
 
