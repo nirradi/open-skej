@@ -74,7 +74,10 @@ __all__ = [
     "build_generate_content_request",
     "interpret_google_result",
     "read_google_api_key",
-    "DEFAULT_MODEL",
+    "DEFAULT_CLI_MODEL",
+    "DEFAULT_OLLAMA_MODEL",
+    "DEFAULT_GOOGLE_MODEL",
+    "DEFAULT_STUB_MODEL",
     "DEFAULT_CLI_EXECUTABLE",
     "DEFAULT_CLI_TIMEOUT_SECONDS",
     "DEFAULT_OLLAMA_BASE_URL",
@@ -84,11 +87,34 @@ __all__ = [
     "GOOGLE_API_KEY_ENV_VAR",
 ]
 
-#: The model every agent in this package uses unless told otherwise. Opus is the default
-#: deliberately: a subtly wrong rule silently mis-enforces real bookings, and every retry costs a
-#: full generate-plus-test cycle, so the cheaper model is not obviously cheaper end to end. The
-#: benchmark settles that with numbers; until it runs, this is the safe side to be wrong on.
-DEFAULT_MODEL = "claude-opus-4-8"
+#: A model id belongs to the backend that can serve it, so each client carries its own default and
+#: there is no package-wide one. There was, and it was wrong in the only way that matters: a single
+#: ``DEFAULT_MODEL`` of ``claude-opus-4-8`` reached ``GoogleAIStudioClient`` unchanged whenever a
+#: caller named no model, and every such call died on a 404 for an Anthropic model id at Google's
+#: endpoint — an error that reads as a credential problem and is not one. A caller that names no
+#: model now gets the default of the client it is actually calling.
+#:
+#: Opus is the CLI's default deliberately: a subtly wrong rule silently mis-enforces real bookings,
+#: and every retry costs a full generate-plus-test cycle, so the cheaper model is not obviously
+#: cheaper end to end. The benchmark cannot measure this client at all (see the module docstring),
+#: so this one remains a judgement rather than a measurement.
+DEFAULT_CLI_MODEL = "claude-opus-4-8"
+
+#: A model small enough to be a reasonable first thing to try on a laptop CPU. Not a claim that it
+#: holds the contract — that is what running the benchmark against it is for, and no local model
+#: tested has held it (``rule-engine.md``).
+DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b"
+
+#: Unlike the ollama default above, this one *is* a claim that the model holds the contract: it
+#: took all five golden examples on the first attempt, in ten calls and 26 seconds
+#: (``rule-engine.md``). It is also the tier a free key can actually finish a run on — the flagship
+#: ``gemini-3.x-flash`` models cap at 20 requests per day per model there, below what a five-example
+#: run costs when anything retries.
+DEFAULT_GOOGLE_MODEL = "gemini-3.1-flash-lite"
+
+#: What the stub reports having used. It calls nothing, so this names no real backend and exists so
+#: that a stub-backed run still records *a* model rather than a null nobody can interpret later.
+DEFAULT_STUB_MODEL = "stub"
 
 DEFAULT_CLI_EXECUTABLE = "claude"
 
@@ -157,8 +183,21 @@ class LLMClient(Protocol):
     and be rejected several layers later as bad rule source, blaming the model for the backend.
     """
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
-        """Return the model's completion for ``prompt`` under ``system``."""
+    #: The model this backend uses when a caller names none. Part of the protocol rather than each
+    #: client's private business because the callers that need it — the retry loop, the benchmark,
+    #: the backend's job runner — all hold an ``LLMClient`` and none of them knows which one. The
+    #: alternative is a client-name-to-model map maintained somewhere else, which is what this
+    #: package had: one copy in ``benchmark.py``, which the backend could not import and therefore
+    #: did not have, so the backend sent every client the CLI's model id.
+    default_model: str
+
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
+        """Return the model's completion for ``prompt`` under ``system``.
+
+        ``None`` means this client's own ``default_model``, resolved by the client. It is never
+        passed on to a backend as a literal, and the returned ``LLMResponse.model`` always names
+        the model actually used, so a recorder at this seam has something concrete to store.
+        """
         ...
 
 
@@ -214,9 +253,24 @@ class RecordingClient:
     on_exchange: Callable[[RecordedExchange], None] | None = None
     exchanges: list[RecordedExchange] = field(default_factory=list)
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    @property
+    def default_model(self) -> str:
+        """The wrapped client's, never one of this wrapper's own.
+
+        Recording a call must not change which model it goes to, and a default declared here would
+        do exactly that for every caller that names none — silently, since both values are strings
+        and nothing downstream could tell they had been swapped.
+        """
+        return self.wrapped.default_model
+
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
         response = self.wrapped.complete(system=system, prompt=prompt, model=model)
-        exchange = RecordedExchange(system=system, prompt=prompt, model=model, response=response)
+        # `response.model`, not the `model` argument: that argument may be None, meaning "whatever
+        # the wrapped client defaults to", and a recorded exchange saying the model was None is
+        # exactly the row someone reads a year later when asking which model wrote a live rule.
+        exchange = RecordedExchange(
+            system=system, prompt=prompt, model=response.model, response=response
+        )
         self.exchanges.append(exchange)
         if self.on_exchange is not None:
             try:
@@ -253,7 +307,10 @@ class ClaudeCliClient:
         self.executable = executable
         self.timeout_seconds = timeout_seconds
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    default_model = DEFAULT_CLI_MODEL
+
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
+        model = model or self.default_model
         command = build_command(prompt, model=model, system=system, executable=self.executable)
         try:
             completed = subprocess.run(
@@ -425,7 +482,10 @@ class OllamaClient:
         # argument existed.
         self.options = dict(options) if options else None
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    default_model = DEFAULT_OLLAMA_MODEL
+
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
+        model = model or self.default_model
         url, body = build_chat_request(
             self.base_url, system=system, prompt=prompt, model=model, options=self.options
         )
@@ -625,7 +685,10 @@ class GoogleAIStudioClient:
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    default_model = DEFAULT_GOOGLE_MODEL
+
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
+        model = model or self.default_model
         if not self.api_key:
             raise LLMCallError(
                 f"No Google AI Studio API key configured. Set {GOOGLE_API_KEY_ENV_VAR} in the "

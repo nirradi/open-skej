@@ -44,10 +44,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from generation import llm
 from generation.errors import LLMCallError
 from generation.llm import (
     DEFAULT_GOOGLE_TIMEOUT_SECONDS,
-    DEFAULT_MODEL,
     DEFAULT_OLLAMA_BASE_URL,
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
     ClaudeCliClient,
@@ -92,17 +92,14 @@ GOLDEN_EXAMPLES: tuple[str, ...] = (
     "at most 2 bookings on the same day",
 )
 
-#: A model small enough to be a reasonable first thing to try on a laptop CPU. Not a claim it
-#: holds the contract — that is what running this benchmark against it is for.
-DEFAULT_OLLAMA_MODEL = "qwen2.5:1.5b"
-
-#: GA rather than a floating ``-latest`` alias — a benchmark whose model id can drift out from
-#: under it cannot compare one run against the next. Unlike the ollama default above, this one
-#: *is* a claim that the model holds the contract: it took all five golden examples on the first
-#: attempt, in ten calls and 26 seconds (``rule-engine.md``). It is also the tier the free key can
-#: actually finish a run on — the flagship ``gemini-3.x-flash`` models cap at 20 requests per day
-#: per model there, below what a five-example run costs when anything retries.
-DEFAULT_GOOGLE_MODEL = "gemini-3.1-flash-lite"
+#: Re-exported, not defined here. These lived in this module and nowhere else, which made a
+#: benchmark run the only caller in the project that could pick a client-appropriate model: this
+#: file sits outside both distributed packages, so the backend's job runner could not import it and
+#: sent Google the CLI's model id instead. They now live beside the clients they describe, and a
+#: model id is a GA one rather than a floating ``-latest`` alias for this module's own reason — a
+#: benchmark whose model can drift out from under it cannot compare one run against the next.
+DEFAULT_OLLAMA_MODEL = llm.DEFAULT_OLLAMA_MODEL
+DEFAULT_GOOGLE_MODEL = llm.DEFAULT_GOOGLE_MODEL
 
 
 class BenchmarkStatus(str, Enum):
@@ -621,15 +618,17 @@ def resolve_examples(filters: Sequence[str] | None) -> list[str]:
     return selected
 
 
-def resolve_models(client_name: str, models: Sequence[str] | None) -> list[str]:
-    """The models to run: what ``--model`` named, or one client-appropriate default."""
+def resolve_models(client: LLMClient, models: Sequence[str] | None) -> list[str]:
+    """The models to run: what ``--model`` named, or the client's own default.
+
+    Takes the built client rather than ``--client``'s name so there is no second client-name-to-
+    model table to keep in step with the clients themselves. The one that used to be here was the
+    project's only copy, and the backend's job runner — which cannot import this module — had no
+    way to consult it and defaulted every client to the CLI's model as a result.
+    """
     if models:
         return list(models)
-    if client_name == "claude-cli":
-        return [DEFAULT_MODEL]
-    if client_name == "google":
-        return [DEFAULT_GOOGLE_MODEL]
-    return [DEFAULT_OLLAMA_MODEL]
+    return [client.default_model]
 
 
 def build_client(
@@ -805,7 +804,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(exc))
         return 2  # pragma: no cover - parser.error always raises SystemExit first
 
-    models = resolve_models(args.client, args.models)
     client = build_client(
         args.client,
         base_url=args.base_url,
@@ -813,6 +811,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         seed=args.seed,
         temperature=args.temperature,
     )
+    models = resolve_models(client, args.models)
     # Each sampling parameter is recorded only for a run that actually applied it — two reports
     # agreeing on a parameter neither of them set is worse than two reports that say nothing
     # about it. The two parameters no longer share one gate: only ollama is ever handed a seed,

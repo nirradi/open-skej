@@ -32,7 +32,7 @@ import ast
 from .errors import SuiteRejectedError
 from .generator import strip_code_fence
 from .harness import ENGINE_MODULE_NAME
-from .llm import DEFAULT_MODEL, LLMClient
+from .llm import LLMClient
 
 __all__ = [
     "generate_tests",
@@ -238,7 +238,7 @@ def generate_tests(
     description: str,
     *,
     client: LLMClient,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> str:
     """Generate a pytest module exercising ``rule_source``, for the constraint ``description``.
 

@@ -138,6 +138,8 @@ HANGING_TESTS = textwrap.dedent("""\
 
 
 class ScriptedClient:
+    default_model = "stub-model"
+
     """An ``LLMClient`` returning the next scripted answer, and recording every prompt it saw.
 
     The loop calls Generator then Tester against the same client, so the script interleaves them:
@@ -277,6 +279,8 @@ def test_a_backend_failure_is_not_retried():
     failures would hide the cause."""
 
     class BrokenClient:
+        default_model = "stub-model"
+
         def __init__(self):
             self.calls = 0
 

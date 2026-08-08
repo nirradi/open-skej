@@ -16,7 +16,11 @@ import pytest
 from generation import llm as llm_module
 from generation.errors import GenerationError, LLMCallError
 from generation.llm import (
-    DEFAULT_MODEL,
+    DEFAULT_CLI_MODEL,
+    DEFAULT_GOOGLE_MODEL,
+    DEFAULT_OLLAMA_MODEL,
+    ClaudeCliClient,
+    GoogleAIStudioClient,
     LLMClient,
     LLMResponse,
     OllamaClient,
@@ -235,8 +239,38 @@ def test_client_rejects_a_non_positive_timeout():
         OllamaClient(timeout_seconds=0)
 
 
-def test_default_model_is_still_opus_this_task_does_not_change_it():
-    assert DEFAULT_MODEL == "claude-opus-4-8"
+def test_each_client_declares_its_own_default_model():
+    """There is no package-wide default any more, and that is the point.
+
+    One shared `DEFAULT_MODEL` of `claude-opus-4-8` was what every agent passed on to whichever
+    client was configured, so a Google-backed deployment asked Google for an Anthropic model and
+    got a 404 that reads exactly like a bad API key. A default belongs to the backend that can
+    serve it.
+    """
+    assert OllamaClient().default_model == DEFAULT_OLLAMA_MODEL
+    assert ClaudeCliClient().default_model == DEFAULT_CLI_MODEL
+    assert GoogleAIStudioClient(api_key="unused").default_model == DEFAULT_GOOGLE_MODEL
+    assert DEFAULT_CLI_MODEL == "claude-opus-4-8"
+    assert len({DEFAULT_OLLAMA_MODEL, DEFAULT_CLI_MODEL, DEFAULT_GOOGLE_MODEL}) == 3
+
+
+def test_complete_with_no_model_sends_this_clients_default_not_another_clients(monkeypatch):
+    """The regression, at the layer it actually bit."""
+    captured = {}
+
+    def fake_send(url, body, *, timeout_seconds, base_url):
+        captured["body"] = body
+        return 200, SUCCESS_BODY
+
+    monkeypatch.setattr(llm_module, "_send_chat_request", fake_send)
+
+    response = OllamaClient().complete(system="s", prompt="p")
+
+    assert captured["body"]["model"] == DEFAULT_OLLAMA_MODEL
+    assert captured["body"]["model"] != DEFAULT_CLI_MODEL
+    # The response names the model actually used, so a recorder at this seam stores a real id
+    # rather than the None the caller passed.
+    assert response.model == DEFAULT_OLLAMA_MODEL
 
 
 def test_complete_sends_the_built_request_and_returns_the_interpreted_response(monkeypatch):

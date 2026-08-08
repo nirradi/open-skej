@@ -52,7 +52,7 @@ from rules.sandbox import (
 from .errors import RuleRejectedError, SuiteRejectedError
 from .generator import generate_rule
 from .harness import run_candidate
-from .llm import DEFAULT_MODEL, LLMClient
+from .llm import LLMClient
 from .tester import generate_tests
 
 __all__ = [
@@ -130,7 +130,11 @@ class LoopResult:
     rule_source: str | None = None
     test_source: str | None = None
     artifact_path: Path | None = None
-    model: str = DEFAULT_MODEL
+    #: The model this run actually used, resolved by ``run_generation_loop`` before the first
+    #: attempt. The default is only for the synthetic results tests assemble by hand; no real run
+    #: leaves it unset, and it is deliberately not any client's default — a wrong model id in a
+    #: report is worse than an obviously absent one.
+    model: str = "unspecified"
 
     @property
     def attempt_count(self) -> int:
@@ -159,7 +163,7 @@ def run_generation_loop(
     description: str,
     *,
     client: LLMClient,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_retries: int = MAX_RETRIES,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     memory_limit_bytes: int = DEFAULT_MEMORY_LIMIT_BYTES,
@@ -177,6 +181,12 @@ def run_generation_loop(
         raise ValueError("description must be a non-empty rule description")
     if max_retries < 0:
         raise ValueError(f"max_retries must not be negative, got {max_retries!r}")
+
+    # Resolved once, here, rather than left to each client call. Every attempt in one run must go
+    # to the same model or the result describes nothing, and `LoopResult.model` is what a benchmark
+    # report and a `rule_generation_jobs` row both name afterwards — so it has to be a model id
+    # rather than the `None` that means "ask the client".
+    model = model or client.default_model
 
     attempts: list[Attempt] = []
     previous_source: str | None = None

@@ -644,8 +644,24 @@ predicted — and the only checks made are that the module parses and defines a 
 with that class's parameters, so a suite carried over from a previous attempt fails against a renamed
 class and reports it as the rule being wrong.
 
-**Model: `claude-opus-4-8` by default for the CLI client, `gemini-3.1-flash-lite` for the Google one
-— settled by the benchmark, not by assumption.**
+**A model id belongs to the client that can serve it, so every client declares its own
+`default_model` and there is no package-wide default.** `LLMClient` carries the attribute as part
+of the protocol, `model=None` means "this client's default" everywhere below it, and
+`run_generation_loop` resolves it once against the client it was handed so the model it records is
+a real id rather than a null. The agents — Generator, Tester, manifest — name no model at all, which
+is the point: none of them knows which backend it is calling.
+
+That is stated as an invariant because its absence was a live defect. One package-wide
+`DEFAULT_MODEL` of `claude-opus-4-8` was passed on to whichever client was configured, so a backend
+running `RULE_GENERATION_CLIENT=google` with no model set asked Google for an Anthropic model id and
+failed **every** generation job on a 404 — an error whose text reads as a bad API key and is not one.
+The per-client mapping that would have prevented it existed only inside `benchmark.py`, which sits
+outside both distributed packages, so the backend could not import it and no test compared the two.
+A default that only one caller can reach is not a default.
+
+**Model: `claude-opus-4-8` for the CLI client, `gemini-3.1-flash-lite` for the Google one,
+`qwen2.5:1.5b` for Ollama — settled by the benchmark, not by assumption, where the benchmark can
+reach them.**
 
 > Do **not** use `claude-3-haiku-20240307` — retired 2026-04-19, now returns 404. Its live successor
 > is `claude-haiku-4-5` ($1/$5 per MTok).
@@ -666,8 +682,9 @@ not bit-reproducible and the report records `seed` as unset):
 | `gemini-3.1-flash-lite` | **5/5, every example on the first attempt** | 10 calls, 16k in / 7.5k out, 26s |
 | `gemini-3.5-flash-lite` | **5/5**, two examples needing retries | 18 calls, 34k in / 20k out, 156s |
 
-`gemini-3.1-flash-lite` is therefore `DEFAULT_GOOGLE_MODEL`. Newer is not better here, and the
-flagship tier is not what settled it — see the quota paragraph below.
+`gemini-3.1-flash-lite` is therefore `GoogleAIStudioClient.default_model`, defined beside that client
+in `generation/llm.py` and re-exported by `benchmark.py` rather than the other way round. Newer is
+not better here, and the flagship tier is not what settled it — see the quota paragraph below.
 
 **Every failure the first run recorded was the Tester's, not the rule's, and that is the finding.**
 Before the prompt fix this run produced, the same two models scored 3/5 and 1/3 — and not one of

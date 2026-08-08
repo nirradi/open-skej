@@ -26,14 +26,13 @@ import re
 from rules.safety import UnsafeRuleError, validate_source
 
 from .errors import RuleRejectedError
-from .llm import DEFAULT_MODEL, LLMClient
+from .llm import LLMClient
 
 __all__ = [
     "generate_rule",
     "build_prompt",
     "strip_code_fence",
     "SYSTEM_PROMPT",
-    "DEFAULT_MODEL",
 ]
 
 
@@ -190,7 +189,7 @@ def generate_rule(
     description: str,
     *,
     client: LLMClient,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     previous_source: str | None = None,
     failure: str | None = None,
 ) -> str:

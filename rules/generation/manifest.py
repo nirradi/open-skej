@@ -37,7 +37,7 @@ from rules.safety import ALLOWED_IMPORTS, SAFE_BUILTINS
 from .errors import ManifestRejectedError
 from .generator import strip_code_fence
 from .harness import ENGINE_NAMES
-from .llm import DEFAULT_MODEL, LLMClient
+from .llm import LLMClient
 
 __all__ = [
     "generate_manifest",
@@ -139,7 +139,7 @@ def generate_manifest(
     description: str,
     *,
     client: LLMClient,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> RuleManifest:
     """Describe verified ``rule_source`` — generated for the constraint ``description`` — as a
     :class:`RuleManifest`.

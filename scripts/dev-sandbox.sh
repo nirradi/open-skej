@@ -54,6 +54,21 @@ COMPOSE_PROJECT="$(basename "$REPO_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cd '
 # The compose service's development-only credentials (docker-compose.yml).
 DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://skej:skej@localhost:5432/skej}"
 
+# Rule generation is off by default in the backend and its routes are registered
+# conditionally, so a sandbox without this switch serves a genuine 404 and the
+# rules page's authoring panel hides itself — absent, not broken, which is right
+# in production and useless here. This stack exists to exercise the product, so
+# it opts in. The client stays `stub` unless asked otherwise: it answers with a
+# canned valid rule, deterministically, with no network call and no money spent.
+# `RULE_GENERATION_CLIENT=google ./scripts/dev-sandbox.sh` drives a real model
+# instead, and finds its key in `rules/.env` without this script handling it.
+RULE_GENERATION_CLIENT="${RULE_GENERATION_CLIENT:-stub}"
+
+# Empty means "whichever model the selected client defaults to", which is the
+# only correct answer here: a model id belongs to one backend, so a value this
+# script picked would be wrong for every client but the one it was chosen for.
+RULE_GENERATION_MODEL="${RULE_GENERATION_MODEL:-}"
+
 KEEP_DATA=false
 FORCE=false
 STOP=false
@@ -256,6 +271,9 @@ set -m
     SANDBOX_AUTH=true \
     AUTH0_DOMAIN= \
     AUTH0_API_AUDIENCE= \
+    RULE_GENERATION_ENABLED=true \
+    RULE_GENERATION_CLIENT="$RULE_GENERATION_CLIENT" \
+    RULE_GENERATION_MODEL="$RULE_GENERATION_MODEL" \
     "$VENV_PY" -m uvicorn app.main:app --reload --port "$BACKEND_PORT"
 ) >"$RUN_DIR/backend.log" 2>&1 &
 echo $! >"$(pid_file backend)"

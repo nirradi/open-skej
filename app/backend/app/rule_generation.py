@@ -308,6 +308,14 @@ def _model_kwargs(settings: Settings) -> dict[str, str]:
     ``rules/benchmark.py``'s optional flags already keep — so an unset ``RULE_GENERATION_MODEL``
     must not become a literal ``model=None`` passed to ``run_generation_loop`` or
     ``generate_manifest``, both of which default the argument themselves.
+
+    That sentence was true of this function and false of what it called. Every agent in
+    ``generation`` defaulted to one package-wide ``DEFAULT_MODEL`` naming an Anthropic model, so
+    omitting the argument here sent ``claude-opus-4-8`` to whichever client was configured, and a
+    ``google`` deployment failed every job on a 404 for a model id Google has never heard of — an
+    error that reads as a bad API key and is not one. Each client now declares its own
+    ``default_model`` and the loop resolves against the client it was handed, which is what makes
+    omitting the argument mean what this docstring always said it meant.
     """
     return {"model": settings.rule_generation_model} if settings.rule_generation_model else {}
 

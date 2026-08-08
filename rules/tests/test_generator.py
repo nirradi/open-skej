@@ -26,7 +26,6 @@ from generation.generator import (
     strip_code_fence,
 )
 from generation.llm import (
-    DEFAULT_MODEL,
     ClaudeCliClient,
     LLMResponse,
     build_command,
@@ -70,7 +69,7 @@ class FakeClient:
         self.text = text
         self.calls: list[dict[str, str]] = []
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
         self.calls.append({"system": system, "prompt": prompt, "model": model})
         return LLMResponse(text=self.text, model=model)
 
@@ -78,7 +77,7 @@ class FakeClient:
 class ExplodingClient:
     """An ``LLMClient`` whose backend is unreachable — the CLI missing, the session unauthed."""
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
         raise LLMCallError("claude is not on PATH", exit_code=127, stderr="command not found")
 
 
@@ -145,10 +144,16 @@ def test_system_prompt_is_sent():
     assert client.calls[0]["system"] == SYSTEM_PROMPT
 
 
-def test_default_model_is_opus():
+def test_naming_no_model_defers_to_the_client_rather_than_picking_one():
+    """An agent must not name a model, because it does not know which backend it is calling.
+
+    This test asserted `claude-opus-4-8` when there was one package-wide default, which is exactly
+    how a Google-backed deployment ended up asking Google for an Anthropic model. `None` reaches
+    the client and the client substitutes its own default.
+    """
     client = FakeClient()
     generate_rule("max 1 hour", client=client)
-    assert client.calls[0]["model"] == "claude-opus-4-8"
+    assert client.calls[0]["model"] is None
 
 
 def test_model_is_threaded_through_to_the_client():
@@ -475,7 +480,7 @@ def test_a_captured_success_can_drive_generate_rule_end_to_end():
     """The two halves meet: a CLI payload carrying fenced source becomes validated rule source."""
 
     class ReplayClient:
-        def complete(self, *, system, prompt, model=DEFAULT_MODEL):
+        def complete(self, *, system, prompt, model=None):
             payload = json.dumps(
                 {"is_error": False, "result": f"```python\n{GOOD_RULE}```", "duration_ms": 4200}
             )

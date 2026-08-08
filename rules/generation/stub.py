@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 
 from . import generator, manifest, tester
 from .errors import LLMCallError
-from .llm import DEFAULT_MODEL, LLMResponse
+from .llm import DEFAULT_STUB_MODEL, LLMResponse
 
 __all__ = ["StubLLMClient"]
 
@@ -277,7 +277,10 @@ class StubLLMClient:
     #: configures this client, only of what it remembers having done).
     _generator_calls: int = field(default=0, init=False, repr=False)
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    default_model = DEFAULT_STUB_MODEL
+
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
+        model = model or self.default_model
         if system == generator.SYSTEM_PROMPT:
             self._generator_calls += 1
             unsafe = self.always_unsafe or self._generator_calls <= self.fail_first_attempts

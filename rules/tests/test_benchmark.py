@@ -29,8 +29,8 @@ from benchmark import (
 from generation.errors import LLMCallError
 from generation.llm import (
     DEFAULT_GOOGLE_TIMEOUT_SECONDS,
-    DEFAULT_MODEL,
     DEFAULT_OLLAMA_TIMEOUT_SECONDS,
+    ClaudeCliClient,
     GoogleAIStudioClient,
     LLMResponse,
     OllamaClient,
@@ -215,11 +215,13 @@ def test_model_report_totals_use_the_same_optional_summing_rule():
 
 
 class _FakeClient:
+    default_model = "fake-model"
+
     def __init__(self, responses):
         self._responses = list(responses)
         self.calls = []
 
-    def complete(self, *, system, prompt, model=DEFAULT_MODEL):
+    def complete(self, *, system, prompt, model=None):
         self.calls.append({"system": system, "prompt": prompt, "model": model})
         return self._responses.pop(0)
 
@@ -258,9 +260,11 @@ def test_recording_client_records_every_response_it_saw():
 
 
 class _AlwaysBrokenClient:
+    default_model = "fake-model"
+
     """An LLMClient whose every call raises LLMCallError, like an unreachable daemon."""
 
-    def complete(self, *, system, prompt, model=DEFAULT_MODEL):
+    def complete(self, *, system, prompt, model=None):
         raise LLMCallError("Ollama's daemon is not answering", exit_code=None)
 
 
@@ -324,12 +328,12 @@ def test_an_unmatched_filter_names_the_available_descriptions():
 
 
 def test_resolve_models_uses_the_explicit_list_when_given():
-    assert resolve_models("ollama", ["a", "b"]) == ["a", "b"]
+    assert resolve_models(OllamaClient(), ["a", "b"]) == ["a", "b"]
 
 
 def test_resolve_models_defaults_differ_by_client():
-    ollama_default = resolve_models("ollama", None)
-    cli_default = resolve_models("claude-cli", None)
+    ollama_default = resolve_models(OllamaClient(), None)
+    cli_default = resolve_models(ClaudeCliClient(), None)
     assert ollama_default != cli_default
     assert len(ollama_default) == 1
     assert len(cli_default) == 1
@@ -340,8 +344,27 @@ def test_resolve_models_google_default_is_the_measured_model():
     # the model that took all five golden examples on the first attempt. A default that drifts
     # silently is a default nobody measured. Not a floating `-latest` alias either — a benchmark
     # whose model id changes under it cannot compare one run against the next.
-    assert resolve_models("google", None) == [benchmark.DEFAULT_GOOGLE_MODEL]
+    client = GoogleAIStudioClient(api_key="unused")
+    assert resolve_models(client, None) == [benchmark.DEFAULT_GOOGLE_MODEL]
     assert benchmark.DEFAULT_GOOGLE_MODEL == "gemini-3.1-flash-lite"
+
+
+def test_resolve_models_reads_the_client_not_a_table_of_client_names():
+    """The regression this whole seam exists for.
+
+    A name-to-model table here was the project's only copy, so a caller that could not import this
+    module — the backend's job runner — had no way to ask, and defaulted every client to the CLI's
+    Anthropic model id. Asking the client itself is what makes that impossible to reintroduce: a
+    new client arrives carrying its own default and nothing here has to learn about it.
+    """
+
+    class NewBackendClient:
+        default_model = "some-model-nobody-here-knows-about"
+
+        def complete(self, *, system, prompt, model=None):  # pragma: no cover - never called
+            raise AssertionError("resolve_models must not call the client")
+
+    assert resolve_models(NewBackendClient(), None) == ["some-model-nobody-here-knows-about"]
 
 
 # --------------------------------------------------------------------------------------------

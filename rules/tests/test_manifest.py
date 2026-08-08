@@ -15,7 +15,7 @@ import textwrap
 import pytest
 
 from generation.errors import GenerationError, LLMCallError, ManifestRejectedError
-from generation.llm import DEFAULT_MODEL, LLMResponse
+from generation.llm import LLMResponse
 from generation.manifest import (
     SYSTEM_PROMPT,
     RuleManifest,
@@ -99,13 +99,13 @@ class FakeClient:
         self.text = text
         self.calls: list[dict[str, str]] = []
 
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
         self.calls.append({"system": system, "prompt": prompt, "model": model})
         return LLMResponse(text=self.text, model=model)
 
 
 class ExplodingClient:
-    def complete(self, *, system: str, prompt: str, model: str = DEFAULT_MODEL) -> LLMResponse:
+    def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
         raise LLMCallError("the CLI is not on PATH", exit_code=127)
 
 
