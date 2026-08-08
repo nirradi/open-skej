@@ -30,7 +30,10 @@
 # ## Processes, not a foreground babysitter
 #
 # The servers are detached and their pids recorded under `.dev-sandbox/`, so the terminal is free
-# once the script prints its summary. Logs stream to `.dev-sandbox/{backend,frontend}.log`.
+# once the script prints its summary. Logs stream to `.dev-sandbox/{backend,frontend}.log`, and
+# both get `</dev/null` for stdin: vite opens an interactive readline on a TTY stdin ("press h +
+# enter"), which throws an unhandled `EIO` and kills the dev server the moment the terminal that
+# launched it goes away — minutes later, looking like the app crashed on its own.
 
 set -euo pipefail
 
@@ -275,7 +278,7 @@ set -m
     RULE_GENERATION_CLIENT="$RULE_GENERATION_CLIENT" \
     RULE_GENERATION_MODEL="$RULE_GENERATION_MODEL" \
     "$VENV_PY" -m uvicorn app.main:app --reload --port "$BACKEND_PORT"
-) >"$RUN_DIR/backend.log" 2>&1 &
+) >"$RUN_DIR/backend.log" 2>&1 </dev/null &
 echo $! >"$(pid_file backend)"
 
 (
@@ -286,7 +289,7 @@ echo $! >"$(pid_file backend)"
     VITE_AUTH0_CLIENT_ID= \
     VITE_AUTH0_AUDIENCE= \
     npm run dev -- --port "$FRONTEND_PORT" --strictPort
-) >"$RUN_DIR/frontend.log" 2>&1 &
+) >"$RUN_DIR/frontend.log" 2>&1 </dev/null &
 echo $! >"$(pid_file frontend)"
 
 set +m

@@ -86,8 +86,12 @@ from app.db.bootstrap import ensure_booking_defaults
 from app.db.models import Booking, BookingStatus
 from app.identity import service
 from app.identity.models import (
+    GeneratedRuleType,
     MembershipRole,
+    PromptVersion,
     Resource,
+    RuleGenerationExchange,
+    RuleGenerationJob,
     Space,
     SpaceAccessRequest,
     SpaceInvitation,
@@ -208,12 +212,28 @@ def _reset(session: Session) -> None:
     never observes a half-wiped database. This is a disposable sandbox, not
     the production schema this repository otherwise never deletes from — see
     the module docstring.
+
+    **The generation tables are wiped too, and they are not optional.** A
+    generated rule type carries ``created_by_space_id`` NOT NULL onto the very
+    Spaces this function deletes, so a sandbox in which anyone has ever
+    generated a rule cannot be re-seeded while those rows stand: the ``Space``
+    delete raises ``ForeignKeyViolation``, and since ``dev-sandbox.sh`` seeds
+    before it starts the servers, that turns "I tried the generation feature"
+    into "the stack no longer comes up" — the one failure mode a disposable
+    sandbox must not have. Exchanges before jobs, jobs before the rule types
+    they produced, and ``prompt_versions`` last: it references nothing, but
+    leaving it would strand rows nothing points at and break this function's
+    promise that a second run yields the same counts as the first.
     """
     session.execute(delete(Booking))
     session.execute(delete(SpaceAccessRequest))
     session.execute(delete(SpaceInvitation))
     session.execute(delete(SpaceMembership))
     session.execute(delete(SpaceRule))
+    session.execute(delete(RuleGenerationExchange))
+    session.execute(delete(RuleGenerationJob))
+    session.execute(delete(GeneratedRuleType))
+    session.execute(delete(PromptVersion))
     session.execute(delete(Resource))
     session.execute(delete(Space))
     session.execute(delete(User))
