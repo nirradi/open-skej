@@ -59,6 +59,22 @@ def _sandbox_settings(**env: str) -> Iterator[None]:
     Any of ``SANDBOX_AUTH`` / ``AUTH0_DOMAIN`` / ``AUTH0_API_AUDIENCE`` not
     passed is unset for the duration, so a test asserts against a known
     combination rather than whatever a developer's ``.env`` happens to hold.
+
+    "Unset" means **empty string**, not a removed key, for ``AUTH0_DOMAIN`` /
+    ``AUTH0_API_AUDIENCE``: ``Settings`` reads ``env_file=".env"``, and
+    pydantic-settings falls back to that file for any key genuinely absent
+    from ``os.environ`` — so on a machine whose ``app/backend/.env`` holds a
+    real tenant (exactly the case this suite most needs to isolate against),
+    popping the key would leave the real domain and audience in effect
+    instead of clearing them. An empty string is present in ``os.environ``,
+    so it wins over the file, and ``get_token_verifier``'s own
+    ``real_auth0_configured = bool(settings.auth0_domain) and ...`` already
+    treats an empty string exactly like ``None`` — the same convention
+    ``scripts/dev-sandbox.sh`` uses to override the same two keys for its
+    child processes. ``SANDBOX_AUTH`` is a bool field with no entry in
+    ``.env``, and an empty string fails pydantic's bool parsing outright, so
+    it alone is still popped.
+
     Both settings' and the verifier's ``lru_cache`` are cleared going in —
     otherwise a cached ``Settings`` or ``TokenVerifier`` from an earlier test
     would silently outlive the environment change — and again on the way out,
@@ -69,8 +85,10 @@ def _sandbox_settings(**env: str) -> Iterator[None]:
         for key in _ENV_KEYS:
             if key in env:
                 os.environ[key] = env[key]
-            else:
+            elif key == "SANDBOX_AUTH":
                 os.environ.pop(key, None)
+            else:
+                os.environ[key] = ""
         get_settings.cache_clear()
         get_token_verifier.cache_clear()
         yield
