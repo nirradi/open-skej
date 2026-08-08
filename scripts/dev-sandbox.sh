@@ -303,6 +303,20 @@ from app.db.bootstrap import DEFAULT_SPACE_PUBLIC_ID
 from app.db.session import get_session_factory
 from app.identity.models import Resource, Space, SpaceRule
 
+
+def clock(minutes):
+    """Render minutes-from-local-midnight as a local wall clock.
+
+    Both availability bounds are minutes from the Space's own local midnight, so
+    a venue closing after midnight is an ordinary value above 1440 rather than an
+    inverted pair. That gets a day marker rather than wrapping silently, which
+    would print a venue open 09:00-01:30 as if it shut before it opened.
+    """
+    return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}" + (
+        "+1d" if minutes >= 1440 else ""
+    )
+
+
 with get_session_factory()() as session:
     spaces = (
         session.query(Space)
@@ -334,7 +348,8 @@ with get_session_factory()() as session:
         }
         availability = rules.get("availability_hours")
         hours = (
-            f"{availability['opens_at'][:5]}-{availability['closes_at'][:5]} local"
+            f"{clock(availability['opens_at_minutes'])}-"
+            f"{clock(availability['closes_at_minutes'])} local"
             if availability
             else "no availability window"
         )
