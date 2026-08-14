@@ -338,7 +338,7 @@ class GeneratedRuleType(Base):
     """One rule type produced by the AI generation loop, available to every Space.
 
     Global rather than Space-scoped — a generated type joins the catalog every Space can pick
-    an instance from, exactly like the seven hand-written types in ``rules.REGISTRY``
+    an instance from, exactly like the eight hand-written types in ``rules.REGISTRY``
     (``ops/plans/stream-7/OVERVIEW.md``, "Generated rules are global, with provenance
     recorded"). ``created_by_space_id`` (NOT NULL) and ``created_by_user_id`` record who made it
     so a later migration can scope generated types down to their creating Space without an
@@ -392,7 +392,7 @@ class GeneratedRuleType(Base):
     # generated type's schema-less starting point.
     param_schema: Mapped[list[Any]] = mapped_column(JSONB, default=list)
     reads_history: Mapped[bool] = mapped_column(Boolean)
-    # 100 for every generated type — sorts after all seven hand-written types, so a
+    # 100 for every generated type — sorts after all eight hand-written types, so a
     # deliberately-worded hand-written denial always wins a fail-fast tie
     # (``.claude/rules/rule-engine.md``, "Generated types sort after every hand-written type").
     priority: Mapped[int] = mapped_column(Integer, default=100, server_default=text("100"))

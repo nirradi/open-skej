@@ -226,7 +226,7 @@ via `archived_at`, matching the Space's own end-state.
 
 The rule types the AI generation loop has authored are rows in `generated_rule_types`, part of this
 production schema. A generated type is **not scoped to a Space**: it joins the catalog every Space
-can pick an instance from, exactly as the seven hand-written types in `rules.REGISTRY` do. Being
+can pick an instance from, exactly as the eight hand-written types in `rules.REGISTRY` do. Being
 available to a Space is not the same as being enforced on it — nothing is enforced until an admin
 adds a `space_rules` instance through the rules API above, and *that* act, not the generation, is the
 human gate.
@@ -492,7 +492,7 @@ never renders an attempt's own failure text — that is pytest output written fo
 not for an admin — and leaves the prompt in the box, editable and resubmittable. The "Add a rule"
 picker itself renders the selected type's description underneath the `<select>` rather than
 growing into a combobox: a list of labels alone stops being enough to choose from once generated
-types sit beside the seven hand-written ones, and a description is enough to fix that at any list
+types sit beside the eight hand-written ones, and a description is enough to fix that at any list
 length this product expects.
 
 `/s/{public_id}` serves both sides of the door. A non-member sees the cold-link preview and the

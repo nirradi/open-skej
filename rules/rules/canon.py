@@ -1,4 +1,4 @@
-"""The hand-written canon: five rules, four of which form ``DEFAULT_CANON``.
+"""The hand-written canon: six rules, four of which form ``DEFAULT_CANON``.
 
 These are hand-written, not generated. They are the reference the AI generation loop is measured
 against, so they are also the worked example of what a rule looks like: parameters on the instance,
@@ -19,15 +19,21 @@ this rule runs, "local" has already been reduced to two numbers with nothing lef
 denial copy still names no bound at all: even a local clock time is a fact about one specific
 Space's configuration, not something worth hardcoding into copy shared by the whole canon.
 
-**``SlotAlignmentRule`` is the fifth rule and the one exception to "four rules, one canon".** Every
-other rule here takes a literal that means the same thing on every date it is asked about — a
-duration, a day count, a clock time. ``SlotAlignmentRule`` takes an ``anchor`` **instant**, which is
-inherently date-bound (the Space's own local midnight on the booking's date, converted to UTC), so a
-literal baked into ``DEFAULT_CANON`` at import time would be correct for the day it was written and
-silently wrong every day after — precisely the cached-offset bug ``CLAUDE.md`` warns against. It is
-therefore never part of ``DEFAULT_CANON``, the same way the frequency rules in ``frequency.py`` are
+**``SlotAlignmentRule`` and ``MinDurationRule`` are the two rules missing from ``DEFAULT_CANON``,
+and they are missing for two unrelated reasons.** Every other rule here takes a literal that means
+the same thing on every date it is asked about — a duration, a day count, a clock time.
+``SlotAlignmentRule`` takes an ``anchor`` **instant**, which is inherently date-bound (the Space's
+own local midnight on the booking's date, converted to UTC), so a literal baked into
+``DEFAULT_CANON`` at import time would be correct for the day it was written and silently wrong
+every day after — precisely the cached-offset bug ``CLAUDE.md`` warns against. It is therefore
+never part of ``DEFAULT_CANON``, the same way the frequency rules in ``frequency.py`` are
 registered and importable but kept out of it: an adapter resolves ``anchor`` per booking date and
-builds the rule fresh, never once at start-up.
+builds the rule fresh, never once at start-up. ``MinDurationRule`` has no such problem — a minimum
+duration is exactly as date-independent as a maximum one — and stays out for the opposite reason:
+``DEFAULT_CANON`` is the fixed reference the generation loop is measured against and
+``app/e2e/tests/03-sad-path.spec.ts`` asserts against, and adding a floor to it would change
+behaviour those tests depend on. It is fully registered and constructible like every other type;
+it simply is not one of the four the reference assembly happens to hold today.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ __all__ = [
     "NotInThePastRule",
     "BookingHorizonRule",
     "MaxDurationRule",
+    "MinDurationRule",
     "SlotAlignmentRule",
     "AvailabilityHoursRule",
     "DEFAULT_CANON",
@@ -121,6 +128,37 @@ class MaxDurationRule(BaseRule):
                 f"Bookings can be at most {_format_duration(self.max_duration)} long,"
                 f" and this one is {_format_duration(request.duration)}."
                 " Please shorten it and try again."
+            )
+        return RuleResult.allow()
+
+
+class MinDurationRule(BaseRule):
+    """Bookings may not run shorter than ``min_duration``.
+
+    The bound is inclusive: a booking of exactly ``min_duration`` passes — the same convention
+    ``MaxDurationRule`` states for its own bound, just facing the opposite direction.
+
+    This judges **the request's own span**, ``request.duration``, and nothing else. It says
+    nothing about a *run* of adjoining bookings the same user holds — a member who books three
+    consecutive 30-minute slots back to back, composing a 90-minute run, passes this rule three
+    separate times against a 30-minute minimum and is never judged against the run's own length,
+    because each individual request is evaluated on its own. A rule that needs to judge the run
+    rather than the request reads ``context.run.duration`` instead, a later addition to the
+    contract (`.claude/rules/rule-engine.md`); nothing here fills that gap, deliberately, since
+    the two questions have different remedies and this rule's only remedy is "book longer".
+    """
+
+    def __init__(self, min_duration: timedelta) -> None:
+        if min_duration <= timedelta(0):
+            raise ValueError(f"MinDurationRule.min_duration must be positive; got {min_duration!r}")
+        self.min_duration = min_duration
+
+    def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
+        if request.duration < self.min_duration:
+            return RuleResult.deny(
+                f"Bookings must be at least {_format_duration(self.min_duration)} long,"
+                f" and this one is {_format_duration(request.duration)}."
+                " Please lengthen it and try again."
             )
         return RuleResult.allow()
 

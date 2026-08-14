@@ -761,7 +761,7 @@ def get_space_schedule(
 
 @rule_types_router.get("", response_model=list[RuleTypeRead])
 def list_rule_types(user: CurrentUser) -> list[RuleTypeRead]:
-    """Every rule type this process knows — the seven hand-written types in
+    """Every rule type this process knows — the eight hand-written types in
     ``rules.REGISTRY`` plus every generated type ``app.rule_catalog.catalog``
     has hoisted — in the order an assembled canon runs them: declared
     priority, not registration order, with a generated type's shared

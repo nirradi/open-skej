@@ -75,6 +75,9 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
     if rule_kwargs.get("slot_minutes") is not None:
         add("slot_alignment", {"slot_minutes": rule_kwargs["slot_minutes"]})
 
+    if rule_kwargs.get("min_duration_minutes") is not None:
+        add("min_duration", {"min_duration_minutes": rule_kwargs["min_duration_minutes"]})
+
     if rule_kwargs.get("max_duration_minutes") is not None:
         add("max_duration", {"max_duration_minutes": rule_kwargs["max_duration_minutes"]})
 
@@ -169,6 +172,38 @@ def test_max_duration_unset_allows_a_booking_the_default_would_deny():
     over_the_reference_default = request(at(10), at(10) + MAX_BOOKING_DURATION + timedelta(hours=1))
 
     result = evaluate(over_the_reference_default, NULL_CONFIG)
+
+    assert result.allowed
+
+
+def test_booking_shorter_than_min_duration_is_denied():
+    """``min_duration`` has no reference constant in ``rules_stub`` — unlike ``max_duration`` it is
+    never part of ``DEFAULT_CANON`` (``rules/rules/canon.py``), so there is nothing for a module-
+    level constant here to mirror. The literal below is this test's own configuration, not a
+    reference default."""
+    floor = _config(min_duration_minutes=30)
+
+    result = evaluate(request(at(10), at(10, 10)), floor)
+
+    assert not result.allowed
+    assert "30 minutes" in result.message
+
+
+def test_booking_of_exactly_min_duration_is_allowed():
+    """The floor is inclusive: exactly 30 minutes is fine, one second under is not."""
+    floor = _config(min_duration_minutes=30)
+    start = at(10)
+
+    assert evaluate(request(start, start + timedelta(minutes=30)), floor).allowed
+    assert not evaluate(
+        request(start, start + timedelta(minutes=30) - timedelta(seconds=1)), floor
+    ).allowed
+
+
+def test_min_duration_unset_allows_a_booking_a_configured_floor_would_deny():
+    """A Space with no ``min_duration`` row enforces no floor at all — mirroring
+    ``test_max_duration_unset_allows_a_booking_the_default_would_deny`` for the opposite bound."""
+    result = evaluate(request(at(10), at(10, 1)), NULL_CONFIG)
 
     assert result.allowed
 

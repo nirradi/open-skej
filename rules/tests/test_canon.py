@@ -23,6 +23,7 @@ from rules.canon import (
     AvailabilityHoursRule,
     BookingHorizonRule,
     MaxDurationRule,
+    MinDurationRule,
     NotInThePastRule,
     SlotAlignmentRule,
     default_canon,
@@ -192,6 +193,55 @@ def test_durations_are_rendered_the_way_a_person_says_them(duration, rendered):
 def test_a_non_positive_max_duration_is_rejected_at_construction():
     with pytest.raises(ValueError):
         MaxDurationRule(max_duration=timedelta(0))
+
+
+# --- MinDurationRule ------------------------------------------------------------------
+
+
+def test_exactly_min_duration_is_allowed():
+    """The bound is inclusive: exactly the minimum passes, the same convention `MaxDurationRule`
+    states for its own bound."""
+    rule = MinDurationRule(min_duration=timedelta(minutes=30))
+    assert rule.evaluate(hours_from(NOW, hours=0.5), context()) == RuleResult.allow()
+
+
+def test_one_second_under_min_duration_is_denied():
+    rule = MinDurationRule(min_duration=timedelta(minutes=30))
+    result = rule.evaluate(
+        request(NOW, NOW + timedelta(minutes=30) - timedelta(seconds=1)), context()
+    )
+    assert not result.passed
+
+
+def test_the_min_duration_denial_copy_is_exact():
+    """Pinned the same way ``test_the_max_duration_denial_copy_is_exact`` is: the exact text is
+    contract even though nothing outside this package currently asserts it verbatim, because
+    rewording it later is exactly as easy to do by accident."""
+    rule = MinDurationRule(min_duration=timedelta(minutes=30))
+    result = rule.evaluate(request(NOW, NOW + timedelta(minutes=10)), context())
+    assert result.fail_reason == (
+        "Bookings must be at least 30 minutes long, and this one is 10 minutes."
+        " Please lengthen it and try again."
+    )
+
+
+@pytest.mark.parametrize(
+    "duration, rendered",
+    [
+        (timedelta(hours=1), "1 hour"),
+        (timedelta(minutes=45), "45 minutes"),
+        (timedelta(hours=1, minutes=30), "1 hour and 30 minutes"),
+    ],
+)
+def test_min_duration_durations_are_rendered_the_way_a_person_says_them(duration, rendered):
+    rule = MinDurationRule(min_duration=duration)
+    under = rule.evaluate(request(NOW, NOW + duration - timedelta(minutes=1)), context())
+    assert f"at least {rendered} long" in (under.fail_reason or "")
+
+
+def test_a_non_positive_min_duration_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        MinDurationRule(min_duration=timedelta(0))
 
 
 # --- SlotAlignmentRule ----------------------------------------------------------------

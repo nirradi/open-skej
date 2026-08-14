@@ -14,7 +14,7 @@ hand-coding a third of it.
   by must not silently orphan every row that named it.
 * a **label** and a **description** — the description is prose for an admin choosing a rule, "what
   it refuses", written for someone who will never read the Python. Hand-written for each of the
-  seven types below; for a generated type it is authored by the model in a manifest call made after
+  eight types below; for a generated type it is authored by the model in a manifest call made after
   the generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
   prompt.
 * an **ordered parameter schema** (``RuleParam``) — rich enough to render a form field and to
@@ -67,6 +67,7 @@ from .canon import (
     AvailabilityHoursRule,
     BookingHorizonRule,
     MaxDurationRule,
+    MinDurationRule,
     NotInThePastRule,
     SlotAlignmentRule,
 )
@@ -85,7 +86,7 @@ __all__ = [
 class ParamKind(str, Enum):
     """The shape of one declared parameter.
 
-    Only two values, because only two are needed by the seven types registered below: a plain
+    Only two values, because only two are needed by the eight types registered below: a plain
     positive integer (a day count, a minute count, a booking count) and a local time of day
     presented as a clock but **stored as an integer** — minutes from local midnight (an opening or
     closing hour). ``LOCAL_TIME`` describes *presentation*, not storage: the value underneath it is
@@ -109,7 +110,7 @@ class RuleParam:
     those exists. One schema serves both, because two independently written ones would drift, and
     the drift would show up as a form whose own submission gets refused.
 
-    ``minimum`` is the only bound these seven types need: every integer parameter registered below
+    ``minimum`` is the only bound these eight types need: every integer parameter registered below
     must be positive (a zero-day horizon, a zero-minute duration or a zero-minute slot means
     nothing), and a ``LOCAL_TIME`` parameter's own ``minimum`` bounds only the single value it names
     in isolation (``opens_at_minutes >= 0``, ``closes_at_minutes >= 1``) — the pairwise relationship
@@ -151,7 +152,7 @@ class RuleType:
     """Everything a registered rule type declares about itself. See the module docstring.
 
     ``description`` is prose for an admin choosing a rule, never for a developer reading the
-    source — "what it refuses", in a sentence or two. Hand-written for each of the seven types
+    source — "what it refuses", in a sentence or two. Hand-written for each of the eight types
     below; for a generated type it is authored by the model in a manifest call made after the
     generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
     prompt, and validated non-empty the same way ``label`` and ``rule_type`` already are: a picker
@@ -212,6 +213,14 @@ def _build_max_duration(
     return MaxDurationRule(max_duration=timedelta(minutes=params["max_duration_minutes"]))
 
 
+def _build_min_duration(
+    params: Mapping[str, Any], resolved: Mapping[str, Any] | None = None
+) -> BaseRule:
+    # Mirrors `_build_max_duration` exactly, minutes rather than a raw `timedelta` for the same
+    # JSON-serialisability reason.
+    return MinDurationRule(min_duration=timedelta(minutes=params["min_duration_minutes"]))
+
+
 def _build_slot_alignment(
     params: Mapping[str, Any], resolved: Mapping[str, Any] | None
 ) -> BaseRule:
@@ -259,13 +268,17 @@ def _build_max_bookings_per_month(
 
 # --- the starter registry --------------------------------------------------------------------
 #
-# The seven predicates in force today (`rule-engine.md`, "The canon"). Priority reproduces that
-# section's documented assembled order exactly, spaced in multiples of 10 rather than consecutive
-# integers: `slot_alignment` sits at 35, strictly between `max_duration` (30) and
-# `availability_hours` (40) — beside `max_duration` rather than with the date rules or the counting
-# rules, because it is a remedy the user can apply within an otherwise-bookable date and time, the
-# same class of denial as duration and hours. The gap either side is what let it land here without
-# renumbering anything else.
+# The eight predicates in force today (`rule-engine.md`, "The canon"). Priority reproduces that
+# section's documented assembled order exactly, spaced in multiples of 10 (plus one deliberate
+# multiple-of-5 insertion) rather than consecutive integers: `slot_alignment` sits at 35, strictly
+# between `max_duration` (30) and `availability_hours` (40) — beside `max_duration` rather than
+# with the date rules or the counting rules, because it is a remedy the user can apply within an
+# otherwise-bookable date and time, the same class of denial as duration and hours. `min_duration`
+# sits at 25, strictly between `booking_horizon` (20) and `max_duration` (30): the two duration
+# rules bound opposite directions and can never both deny the same request, so their relative
+# order never arbitrates copy, and 25 reads in the same "remedy within an otherwise bookable date"
+# band as `max_duration` and `slot_alignment` while leaving 26-29 free. The gaps either side of
+# both insertions are what let them land without renumbering anything else.
 
 _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
@@ -299,6 +312,28 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         needs_local_resolution=False,
         is_single=True,
         build=_build_booking_horizon,
+    ),
+    RuleType(
+        rule_type="min_duration",
+        label="Minimum duration",
+        description="Refuses a booking shorter than the configured minimum duration — the floor "
+        "that pairs with maximum duration's ceiling; an admin configuring one naturally reaches "
+        "for the other.",
+        priority=25,
+        params=(
+            RuleParam(
+                name="min_duration_minutes",
+                kind=ParamKind.INTEGER,
+                label="Minimum duration",
+                unit="minutes",
+                required=True,
+                minimum=1,
+            ),
+        ),
+        reads_history=False,
+        needs_local_resolution=False,
+        is_single=False,
+        build=_build_min_duration,
     ),
     RuleType(
         rule_type="max_duration",
