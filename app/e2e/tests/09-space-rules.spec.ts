@@ -24,11 +24,31 @@
  * subsequent step scopes to that one row, and the spec deletes it as its
  * last action so Space A's configuration is unchanged for whatever runs
  * after this file.
+ *
+ * ## Task 8.9 added two more `describe` blocks below
+ *
+ * Neither is about this page — both book directly against the API and
+ * assert on the rule engine's own verdict — but they live in this file
+ * rather than a new one because a fresh Playwright file costs a whole setup
+ * for one assertion and this one already has Space A's discovery machinery
+ * in scope. See each block's own docstring.
  */
 
 import type { Page } from '@playwright/test'
 
-import { discoverSpaceAResource, expect, SANDBOX_ADMIN_SUB, signInAsSandbox, test } from './fixtures'
+import {
+  BACKEND_URL,
+  berlinWeekdayMondayFirst,
+  createBookingViaApi,
+  discoverSpaceAResource,
+  expect,
+  listAllBookings,
+  localInstantDaysFromNow,
+  mintSandboxToken,
+  SANDBOX_ADMIN_SUB,
+  signInAsSandbox,
+  test,
+} from './fixtures'
 
 /** Every rendered `max_duration` row's `data-testid` (`rule-{id}`), in DOM order. */
 async function maxDurationRowTestIds(page: Page): Promise<string[]> {
@@ -111,5 +131,190 @@ test.describe('the Space rules page', () => {
     await page.reload()
     await expect.poll(async () => maxDurationRowTestIds(page)).toEqual([...idsBeforeCreate])
     expect(await page.getByTestId(newRowTestId!).count()).toBe(0)
+  })
+})
+
+/**
+ * Task 8.9 — the cross-Resource guard the testing note in
+ * `ops/pending/bugs/max-duration-cannon.md` asked for: "a space with two
+ * resources needs to be verified in tests - a user who has a max 2 hour
+ * consecutive can't use 2 different courts to circumvent".
+ *
+ * **This confirms an invariant; it does not close a gap.** `HistoryContext`
+ * is filtered to the **user**, never to one Resource
+ * (`rules/rules/interfaces.py`), and `rules_stub.py`'s router loads history
+ * across every Resource in the Space — so a member could never have dodged
+ * a cross-booking cap by switching courts, before this stream or after it.
+ * A green tick here is not a bug found and fixed; it is a regression guard
+ * on two separate pieces of code — the engine's contract and the router's
+ * own query — continuing to agree with each other. Nothing today fails if
+ * that query narrows to one Resource; this is the test that would catch it.
+ *
+ * Space A already carries two Resources (`RESOURCE_A1_NAME` / `_A2_NAME`)
+ * and, as of this task, an unscoped `max_consecutive_duration` row at
+ * `SPACE_A_MAX_CONSECUTIVE_MINUTES` (2 hours, `app/backend/app/
+ * sandbox_seed.py`) — deliberately the same bound `SPACE_A_MAX_DURATION_
+ * MINUTES` already uses, so a booking that would trip this rule was already
+ * going to trip `max_duration` if it were a single request, and no other
+ * spec in this suite books two abutting or overlapping slots on Space A
+ * whose combined run exceeds two hours.
+ *
+ * Every booking below goes straight through the API, never the calendar
+ * grid: `dragAcrossSlots` has a documented intermittent failure
+ * (`ops/deferred/pointer-drag-e2e-flakiness.md`, three specs hit it this
+ * stream alone) and nothing about this test's subject — a history query
+ * spanning Resources — needs a rendered grid or a real pointer at all.
+ */
+test.describe('the cross-Resource consecutive-duration guard', () => {
+  test('max_consecutive_duration cannot be dodged by switching courts', async ({ api }) => {
+    const { publicId, resourceIds, headers } = await discoverSpaceAResource(api)
+    expect(
+      resourceIds.length,
+      'Space A needs at least two Resources for this guard to mean anything',
+    ).toBeGreaterThanOrEqual(2)
+    const [court1, court2] = resourceIds
+
+    // A day comfortably future and well inside `SPACE_A_BOOKING_HORIZON_DAYS`.
+    const start1 = localInstantDaysFromNow(10, 17, 0)
+    const end1 = localInstantDaysFromNow(10, 18, 0)
+    const end2 = localInstantDaysFromNow(10, 19, 0)
+    const end3 = localInstantDaysFromNow(10, 20, 0)
+
+    // 17:00-18:00 on Court 1 — the opening booking of the run.
+    await createBookingViaApi(api, start1, end1, court1)
+
+    // 18:00-19:00 on Court 2 — a *different* court, but the same contiguous
+    // run: the exact circumvention the testing note worried about, and it
+    // is admitted, because the run is resolved from this user's history
+    // across the whole Space, not from one Resource's own bookings.
+    await createBookingViaApi(api, end1, end2, court2)
+
+    // 19:00-20:00 back on Court 1 completes three hours of contiguous play
+    // against a two-hour cap.
+    const response = await api.post(
+      `${BACKEND_URL}/spaces/${publicId}/resources/${court1}/bookings`,
+      { headers, data: { start_at: end2.toISOString(), end_at: end3.toISOString() } },
+    )
+    expect(response.status(), await response.text()).toBe(422)
+    const body = (await response.json()) as { error: string; message: string }
+    expect(body.error).toBe('rule_denied')
+    // Not a full-string match: `rule-engine.md` records that
+    // `03-sad-path.spec.ts`'s full-string match on `max_duration`'s own copy
+    // makes rewording that message a breaking change in another package,
+    // and this test does not create a second such coupling. "consecutive
+    // play" is `MaxConsecutiveDurationRule`'s own wording
+    // (`rules/rules/canon.py`) and is what tells this denial apart from
+    // `max_duration`'s unrelated copy — proving it is the run-aware rule
+    // that refused, not a coincidence of the request's own length.
+    expect(body.message).toContain('consecutive play')
+
+    // Exactly the two admitted bookings were written; the third never was.
+    expect(await listAllBookings(api)).toHaveLength(2)
+  })
+})
+
+/**
+ * Task 8.9's second case — the counterpart to task 8.6's own behaviour
+ * change, which shipped with no end-to-end coverage until now: a member
+ * holding two abutting bookings against a weekly cap of two can still book
+ * a third on another day, because the abutting pair is one session, not two
+ * rows.
+ *
+ * A naive `existing + 1 > max_bookings` count would refuse the third
+ * booking below — two existing rows plus a new one is three, over a cap of
+ * two — which is exactly the miscount task 8.6 fixed
+ * (`rules/rules/frequency.py`'s `_sessions`): the merged-session count for
+ * the week is *two* (the abutting pair, and the new booking), so the third
+ * is admitted, and a fourth, unrelated session is what actually trips the
+ * cap — asserted here too, so a pass above cannot be mistaken for the cap
+ * silently not applying at all.
+ *
+ * `max_bookings_per_week` is not part of Space A's seeded canon —
+ * `sandbox_seed.py`'s own module docstring explains why: a frequency cap
+ * would eventually deny a booking some other spec in this suite expects to
+ * succeed. So this test adds its own scoped instance as the admin and
+ * removes it in a `finally`, the same discipline `10-rule-authoring.spec.ts`
+ * follows for the generated row it adds to this same Space. Booked via the
+ * API for the identical reason the guard above is: nothing here is about
+ * the calendar grid, and setup has no reason to go through the pointer.
+ */
+test.describe('the weekly cap counts sessions, not rows', () => {
+  test('an abutting pair still leaves room for a session on another day', async ({ api }) => {
+    const { publicId, resourceIds, headers: memberHeaders } = await discoverSpaceAResource(api)
+    const [court1] = resourceIds
+
+    const adminToken = await mintSandboxToken(api, SANDBOX_ADMIN_SUB)
+    const adminHeaders = { Authorization: `Bearer ${adminToken}` }
+
+    const createResponse = await api.post(`${BACKEND_URL}/spaces/${publicId}/rules`, {
+      headers: adminHeaders,
+      data: { rule_type: 'max_bookings_per_week', params: { max_bookings: 2 } },
+    })
+    expect(createResponse.status(), await createResponse.text()).toBe(201)
+    const { id: ruleId } = (await createResponse.json()) as { id: number }
+
+    try {
+      // Anchor on a Monday comfortably in the future — the local week
+      // `MaxBookingsPerWeekRule` counts against is Monday-Sunday
+      // (`WEEK_STARTS_ON` in `rules_stub.py`, fixed rather than
+      // per-Space configuration).
+      const anchor = localInstantDaysFromNow(30, 12, 0)
+      const mondayOffset = 30 - berlinWeekdayMondayFirst(anchor)
+
+      // Two abutting bookings on Monday compose one two-hour session —
+      // exactly at `max_consecutive_duration`'s own cap (inclusive, so this
+      // still passes) — followed by a third, unrelated session on
+      // Wednesday, the same week.
+      await createBookingViaApi(
+        api,
+        localInstantDaysFromNow(mondayOffset, 9, 0),
+        localInstantDaysFromNow(mondayOffset, 10, 0),
+        court1,
+      )
+      await createBookingViaApi(
+        api,
+        localInstantDaysFromNow(mondayOffset, 10, 0),
+        localInstantDaysFromNow(mondayOffset, 11, 0),
+        court1,
+      )
+      await createBookingViaApi(
+        api,
+        localInstantDaysFromNow(mondayOffset + 2, 9, 0),
+        localInstantDaysFromNow(mondayOffset + 2, 10, 0),
+        court1,
+      )
+      expect(await listAllBookings(api)).toHaveLength(3)
+
+      // A fourth session the same week is what actually trips the cap.
+      const fourthStart = localInstantDaysFromNow(mondayOffset + 4, 9, 0)
+      const fourthEnd = localInstantDaysFromNow(mondayOffset + 4, 10, 0)
+      const deniedResponse = await api.post(
+        `${BACKEND_URL}/spaces/${publicId}/resources/${court1}/bookings`,
+        {
+          headers: memberHeaders,
+          data: { start_at: fourthStart.toISOString(), end_at: fourthEnd.toISOString() },
+        },
+      )
+      expect(deniedResponse.status(), await deniedResponse.text()).toBe(422)
+      const deniedBody = (await deniedResponse.json()) as { error: string; message: string }
+      expect(deniedBody.error).toBe('rule_denied')
+      // Not a full-string match, for the identical reason the guard above
+      // gives — "sessions" is `_format_sessions`'s own word
+      // (`rules/rules/frequency.py`) and distinguishes this denial from
+      // every other rule's copy without pinning the whole sentence.
+      expect(deniedBody.message).toContain('sessions')
+    } finally {
+      // Space A's configuration must be unchanged for whatever runs after
+      // this file — the same discipline the rest of this spec follows for
+      // the row it creates and deletes above.
+      const deleteResponse = await api.delete(
+        `${BACKEND_URL}/spaces/${publicId}/rules/${ruleId}`,
+        { headers: adminHeaders },
+      )
+      expect(
+        deleteResponse.ok(),
+        `DELETE .../rules/${ruleId} failed: ${deleteResponse.status()}`,
+      ).toBeTruthy()
+    }
   })
 })

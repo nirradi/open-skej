@@ -34,7 +34,7 @@ import { test as base, expect, type APIRequestContext, type Page } from '@playwr
 
 import { slotStartMinutes, slotsPerDay } from '../../frontend/src/config'
 import { dateFromKey, slotTestId } from '../../frontend/src/calendar/week'
-import { zonedTimeToInstant } from '../../frontend/src/timezone'
+import { zonedParts, zonedTimeToInstant } from '../../frontend/src/timezone'
 
 export const BACKEND_URL = 'http://localhost:8000'
 
@@ -92,11 +92,19 @@ export interface Booking {
 interface SpaceAResource {
   publicId: string
   resourceId: number
+  /**
+   * Every Resource id Space A holds, in the same fixed seeded order as
+   * `resourceId` (`resourceIds[0] === resourceId`) — Court 1 then Court 2.
+   * Most fixtures only ever need `resourceId`; this is for the rarer test
+   * whose subject is the cross-Resource behaviour itself (task 8.9), where
+   * booking against a single Resource would not exercise anything.
+   */
+  resourceIds: number[]
   headers: { Authorization: string }
 }
 
 /**
- * Discovers Space A's `public_id` and one of its Resources, the way a member
+ * Discovers Space A's `public_id` and its Resources, the way a member
  * would after signing in and picking a Resource from the picker on
  * `/s/{public_id}` — read through the API at runtime rather than hardcoded,
  * since `public_id` is an opaque token generated on each fresh seed run.
@@ -138,30 +146,39 @@ export function discoverSpaceAResource(api: APIRequestContext): Promise<SpaceARe
       const resources = (await resourcesResponse.json()) as { id: number }[]
       expect(resources.length, `${SANDBOX_SPACE_A_NAME} has no Resources`).toBeGreaterThan(0)
 
-      return { publicId: spaceA!.public_id, resourceId: resources[0].id, headers }
+      return {
+        publicId: spaceA!.public_id,
+        resourceId: resources[0].id,
+        resourceIds: resources.map((resource) => resource.id),
+        headers,
+      }
     })()
     discoveryCache.set(api, cached)
   }
   return cached
 }
 
-/** Every confirmed booking the backend currently holds on Space A's discovered Resource. */
+/** Every confirmed booking the backend currently holds on Space A, across every Resource. */
 export async function listAllBookings(api: APIRequestContext): Promise<Booking[]> {
-  const { publicId, resourceId, headers } = await discoverSpaceAResource(api)
+  const { publicId, resourceIds, headers } = await discoverSpaceAResource(api)
   const now = Date.now()
   const year = SWEEP_YEARS * 365 * 24 * 60 * 60 * 1000
-  const response = await api.get(
-    `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings`,
-    {
-      headers,
-      params: {
-        from: new Date(now - year).toISOString(),
-        to: new Date(now + year).toISOString(),
+  const bookings: Booking[] = []
+  for (const resourceId of resourceIds) {
+    const response = await api.get(
+      `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings`,
+      {
+        headers,
+        params: {
+          from: new Date(now - year).toISOString(),
+          to: new Date(now + year).toISOString(),
+        },
       },
-    },
-  )
-  expect(response.ok(), `GET .../bookings failed: ${response.status()}`).toBeTruthy()
-  return (await response.json()) as Booking[]
+    )
+    expect(response.ok(), `GET .../bookings failed: ${response.status()}`).toBeTruthy()
+    bookings.push(...((await response.json()) as Booking[]))
+  }
+  return bookings
 }
 
 /**
@@ -170,15 +187,22 @@ export async function listAllBookings(api: APIRequestContext): Promise<Booking[]
  * For tests whose subject is what happens *given* an existing booking. Driving
  * the booking flow to set those up would make them fail for reasons that belong
  * to test 2, and make the failure message point at the wrong thing.
+ *
+ * Books against `resourceId` if given, else Space A's first Resource — the
+ * same default `discoverSpaceAResource`'s own `resourceId` names, so every
+ * existing call site (always on the one Resource) is unaffected.
  */
 export async function createBookingViaApi(
   api: APIRequestContext,
   startAt: Date,
   endAt: Date,
+  resourceId?: number,
 ): Promise<Booking> {
-  const { publicId, resourceId, headers } = await discoverSpaceAResource(api)
+  const discovered = await discoverSpaceAResource(api)
+  const { publicId, headers } = discovered
+  const targetResourceId = resourceId ?? discovered.resourceId
   const response = await api.post(
-    `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings`,
+    `${BACKEND_URL}/spaces/${publicId}/resources/${targetResourceId}/bookings`,
     { headers, data: { start_at: startAt.toISOString(), end_at: endAt.toISOString() } },
   )
   expect(
@@ -188,12 +212,12 @@ export async function createBookingViaApi(
   return (await response.json()) as Booking
 }
 
-/** Cancels every confirmed booking, returning the calendar to "nothing booked". */
+/** Cancels every confirmed booking on every Resource, returning the calendar to "nothing booked". */
 async function resetBookings(api: APIRequestContext): Promise<void> {
-  const { publicId, resourceId, headers } = await discoverSpaceAResource(api)
+  const { publicId, headers } = await discoverSpaceAResource(api)
   for (const booking of await listAllBookings(api)) {
     const response = await api.delete(
-      `${BACKEND_URL}/spaces/${publicId}/resources/${resourceId}/bookings/${booking.id}`,
+      `${BACKEND_URL}/spaces/${publicId}/resources/${booking.resource_id}/bookings/${booking.id}`,
       { headers },
     )
     expect(
@@ -351,6 +375,51 @@ export function slotInstant(key: string, index: number): Date {
     minutes % 60,
     SANDBOX_SPACE_A_TIMEZONE,
   )
+}
+
+/**
+ * The instant at which Space A's own local wall clock reads `hour`:`minute`
+ * on the date `daysAhead` days from now — the API-only counterpart of
+ * `slotInstant` above, for a test that books directly against the backend
+ * and never renders a week to read a date key from.
+ *
+ * `zonedParts` resolves "today" through Space A's own zone rather than
+ * trusting the Node process's own local time, for the identical reason
+ * `slotInstant`'s own docstring gives for not trusting the browser's.
+ */
+export function localInstantDaysFromNow(daysAhead: number, hour: number, minute: number): Date {
+  const { year, month, day } = zonedParts(
+    new Date(Date.now() + daysAhead * 24 * 60 * 60 * 1000),
+    SANDBOX_SPACE_A_TIMEZONE,
+  )
+  return zonedTimeToInstant(year, month, day, hour, minute, SANDBOX_SPACE_A_TIMEZONE)
+}
+
+/**
+ * `berlinWeekdayMondayFirst(instant)` — 0 (Monday) .. 6 (Sunday), matching
+ * `WEEK_STARTS_ON = Weekday.MONDAY` in `app/backend/app/rules_stub.py`
+ * (fixed, not per-Space configuration — there is no Space-level
+ * `week_starts_on` column).  For a test that needs two dates guaranteed to
+ * fall in the same local week without walking the grid week by week.
+ */
+const WEEKDAY_SHORT_TO_MONDAY_FIRST: Record<string, number> = {
+  Mon: 0,
+  Tue: 1,
+  Wed: 2,
+  Thu: 3,
+  Fri: 4,
+  Sat: 5,
+  Sun: 6,
+}
+
+export function berlinWeekdayMondayFirst(instant: Date): number {
+  const short = new Intl.DateTimeFormat('en-US', {
+    timeZone: SANDBOX_SPACE_A_TIMEZONE,
+    weekday: 'short',
+  }).format(instant)
+  const weekday = WEEKDAY_SHORT_TO_MONDAY_FIRST[short]
+  expect(weekday, `unrecognised weekday abbreviation: ${short}`).not.toBeUndefined()
+  return weekday
 }
 
 /**

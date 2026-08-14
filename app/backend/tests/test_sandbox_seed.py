@@ -35,6 +35,7 @@ from app.sandbox_seed import (
     OWNER_EMAIL,
     PENDING_INVITEE_EMAIL,
     SPACE_A_BOOKING_HORIZON_DAYS,
+    SPACE_A_MAX_CONSECUTIVE_MINUTES,
     SPACE_A_MAX_DURATION_MINUTES,
     SPACE_A_NAME,
     SPACE_A_SLOT_MINUTES,
@@ -113,14 +114,25 @@ def test_seed_produces_every_interesting_state(session):
     # exercises (see the module docstring).
     space_a = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
     assert space_a.timezone == SPACE_A_TIMEZONE
-    # Exactly three rules, and the set is asserted rather than each member:
+    # Exactly four rules, and the set is asserted rather than each member:
     # `availability_hours` being absent is the fixture property `03-sad-path.
     # spec.ts` depends on, and `create_space` seeds one by default, so a seed
-    # that forgot to delete it must fail here.
+    # that forgot to delete it must fail here. `max_consecutive_duration` is
+    # task 8.9's own addition — the cross-Resource guard needs it configured,
+    # and it is deliberately not a frequency cap in the sense the comment
+    # above means (see `sandbox_seed.py`'s own comment on the constant).
     rules_a = _rules(session, space_a)
-    assert set(rules_a) == {"slot_alignment", "max_duration", "booking_horizon"}
+    assert set(rules_a) == {
+        "slot_alignment",
+        "max_duration",
+        "max_consecutive_duration",
+        "booking_horizon",
+    }
     assert rules_a["slot_alignment"] == {"slot_minutes": SPACE_A_SLOT_MINUTES}
     assert rules_a["max_duration"] == {"max_duration_minutes": SPACE_A_MAX_DURATION_MINUTES}
+    assert rules_a["max_consecutive_duration"] == {
+        "max_consecutive_minutes": SPACE_A_MAX_CONSECUTIVE_MINUTES
+    }
     assert rules_a["booking_horizon"] == {"days": SPACE_A_BOOKING_HORIZON_DAYS}
     assert space_a.archived_at is None
 

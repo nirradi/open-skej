@@ -155,10 +155,20 @@ SPACE_A_SLOT_MINUTES = 30
 # Mirrors `MAX_BOOKING_MINUTES` in `03-sad-path.spec.ts` — a copy-contract
 # constant on both sides, not a coincidence.
 SPACE_A_MAX_DURATION_MINUTES = 120
+# task 8.9's own cap, deliberately equal to `SPACE_A_MAX_DURATION_MINUTES`
+# rather than a value chosen to be distinctive: a run this rule denies would
+# already have been denied by `max_duration` alone if it were a single
+# booking, so setting the two bounds equal is what keeps this row from ever
+# arbitrating a denial `09-space-rules.spec.ts`'s other tests are not
+# expecting. No existing spec books two abutting or overlapping slots whose
+# combined run exceeds two hours on this Space, so this row is silent for
+# every test but `09-space-rules.spec.ts`'s own cross-resource-guard case.
+SPACE_A_MAX_CONSECUTIVE_MINUTES = 120
 SPACE_A_BOOKING_HORIZON_DAYS = 60
 # Deliberately no frequency cap: the suite books repeatedly against this
 # Space and a weekly/monthly limit would eventually deny a booking the suite
-# expects to succeed, for a reason it never asserts on.
+# expects to succeed, for a reason it never asserts on. (A consecutive-
+# duration cap is not a frequency cap in that sense — see above.)
 
 RESOURCE_A1_NAME = "Court 1"
 RESOURCE_A2_NAME = "Court 2"
@@ -412,6 +422,12 @@ def run(session: Session) -> None:
         space_a,
         "max_duration",
         {"max_duration_minutes": SPACE_A_MAX_DURATION_MINUTES},
+    )
+    _set_rule(
+        session,
+        space_a,
+        "max_consecutive_duration",
+        {"max_consecutive_minutes": SPACE_A_MAX_CONSECUTIVE_MINUTES},
     )
     _set_rule(session, space_a, "booking_horizon", {"days": SPACE_A_BOOKING_HORIZON_DAYS})
 
