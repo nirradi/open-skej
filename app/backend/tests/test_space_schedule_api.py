@@ -130,6 +130,32 @@ def test_member_reads_the_seeded_default_schedule(api: Api, alice: User, space_a
         assert entry["closes_at"] == "17:00:00"
         assert entry["slot_minutes"] == 60
         assert entry["coherence_issue"] is None
+        # The seeded Space holds no `min_duration` row (only `availability_hours` and
+        # `slot_alignment`, `identity-and-access.md`), so this field resolves to `None` too.
+        assert entry["min_duration_minutes"] is None
+
+
+def test_min_duration_reaches_the_wire(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    session.add(
+        SpaceRule(
+            space_id=space_a.id,
+            rule_type="min_duration",
+            params={"min_duration_minutes": 45},
+            applies_to=None,
+            enabled=True,
+        )
+    )
+    session.commit()
+
+    response = api.as_user(alice).get(
+        f"/spaces/{space_a.public_id}/schedule", params={"from": "2026-07-20", "days": 1}
+    )
+
+    assert response.status_code == 200
+    entry = response.json()[0]
+    assert entry["min_duration_minutes"] == 45
 
 
 def test_a_space_with_no_rules_at_all_resolves_to_fully_unconfigured(
@@ -151,6 +177,7 @@ def test_a_space_with_no_rules_at_all_resolves_to_fully_unconfigured(
     assert entry["closes_at"] is None
     assert entry["slot_minutes"] is None
     assert entry["coherence_issue"] is None
+    assert entry["min_duration_minutes"] is None
 
 
 # --- from/days validation --------------------------------------------------

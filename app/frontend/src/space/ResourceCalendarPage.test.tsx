@@ -87,6 +87,7 @@ function uniformScheduleEntries(
     opens_at: null,
     closes_at: null,
     coherence_issue: null,
+    min_duration_minutes: null,
     ...overrides,
   }))
 }

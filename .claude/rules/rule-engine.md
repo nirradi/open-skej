@@ -268,9 +268,11 @@ long, so a gap shorter than it is indistinguishable from no gap at all, and a Sp
 `resolve_day_schedule(config, on_date).min_duration_minutes` rather than re-derived here, including
 its "two matching rows AND to the stricter" combining rule (the larger minimum wins) — a second
 implementation of "what minimum duration governs this date" would be exactly the drift this document
-keeps warning about. That field's own wire exposure and its coherence case against the operating
-window are task 8.2's; task 8.4 added the resolution to `resolve_day_schedule` because it needed it
-first, and 8.2 builds on it rather than re-deriving it.
+keeps warning about. That same field is also reported over the wire by `GET
+/spaces/{public_id}/schedule` (`identity-and-access.md`), which is where its own coherence case
+against the operating window lives: a resolved minimum duration longer than the resolved operating
+window means nothing on that date is bookable at all, checked only once the window and the slot grid
+are themselves coherent.
 
 `rules_stub.py` also holds one thing that is not a fifth translation onto `evaluate_request` — it
 never calls it. `resolve_day_schedule`, called by `GET /spaces/{public_id}/schedule`
