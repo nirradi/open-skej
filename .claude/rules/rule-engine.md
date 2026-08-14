@@ -393,6 +393,8 @@ derivation of the flag (`generation/manifest.py`, `_mentions_history`) checks fo
 the source as well as `context.history`, for the identical reason: a generated rule that reads only
 the run never spells "history" anywhere in its own text, and checking for that word alone would
 under-report `True` for it exactly as it would have for a hand-written `max_consecutive_duration`.
+That check can only ever raise the model's own declared claim, never lower it (the manifest call's
+own "AI generation loop" paragraph below has the mechanics).
 **`needs_local_resolution`**, true for `slot_alignment` and the four history-reading
 rules from `frequency.py` — the five whose constructor needs values resolved against the Space's
 own zone and the booking's own date rather than the raw stored params, which is what keeps every
@@ -988,6 +990,18 @@ two errors are not symmetric: a false positive costs one history query the rule 
 false negative hands the rule an empty history and makes it silently *permissive* — a "no more than
 three a week" rule counting zero existing bookings and allowing one it should have refused. When the
 cheap check errs in the safe direction, take the cheap check.
+
+**The source check can only elevate the model's own declared claim, never suppress it.**
+`generate_manifest` computes `declared_reads_history or _mentions_history(rule_source)` — an `or`,
+not an `and` — because the asymmetry above cuts both ways on the model's own account of itself: a
+model that under-claims `false` for a rule reading `context.run` (a real reading, not a hallucinated
+one — the source genuinely never spells "history") must still be corrected *up* by the source check,
+or the false negative the check exists to catch survives the one place it does the most damage. A
+model that claims `true` is trusted outright and never marked down against a substring miss, because
+downgrading an honest `true` would reintroduce that identical false negative through the opposite
+door. Correcting only ever in the permissive-to-restrictive direction is what "deliberately
+over-inclusive" means for a *derived* value combined with a *declared* one, not merely for the
+substring check in isolation.
 
 **The generation client is chosen by `RULE_GENERATION_CLIENT`, and `stub` is the default.**
 `generation.stub.StubLLMClient` answers with a canned, valid rule and a canned suite, deterministically
