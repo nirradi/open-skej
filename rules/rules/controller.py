@@ -3,9 +3,10 @@
 ``evaluate_request`` is the single entry point the backend calls. It has three jobs, in order:
 
 1. **Cross-check the request against the context.** ``Context`` cannot do this itself — the request
-   is not visible when a context is built — so this is the first place both are in scope. Two
-   things are checked: that the history belongs to the requesting user, and that
-   ``context.local`` was resolved for the day the request actually starts in.
+   is not visible when a context is built — so this is the first place both are in scope. Three
+   things are checked: that the history belongs to the requesting user, that ``context.local`` was
+   resolved for the day the request actually starts in, and that ``context.run`` actually contains
+   the request it was built for.
 2. **Run the canon in order, fail-fast.** The first rule that denies wins and nothing after it runs.
 3. **Contain a buggy rule.** A rule that raises becomes a denial with generic copy, logged with the
    real exception. A bug in one rule must never 500 the booking endpoint, and must never leak a
@@ -60,6 +61,14 @@ def _check_context_matches_request(request: BookingRequest, context: Context) ->
     ``end_at`` may legitimately fall past the local day, which is exactly what an ``end_minutes``
     above 1440 means.
 
+    ``context.run`` is checked the same way too: a run that does not contain its own request
+    describes a different stretch of the calendar than the booking sits in, so a rule reading
+    ``run.duration`` or ``run.booking_count`` would silently judge someone else's session — the
+    adapter resolved a run for the wrong booking, or resolved it for a request it was never handed
+    at all. Both bounds are required: ``run.start_at`` may run earlier than the request (a run this
+    booking extends) and ``run.end_at`` may run later (a run this booking is merely part of), but
+    the request's own span must fall entirely inside it either way.
+
     A future ``Context`` may carry the Space itself, so a rule can decide its own scope rather than
     relying on how the caller pre-filtered history; that is not this check's job today.
     """
@@ -75,6 +84,14 @@ def _check_context_matches_request(request: BookingRequest, context: Context) ->
             f"Context.local describes the local day [{local.day_start}, {local.day_end}), but the "
             f"request starts at {request.start_at}. The caller resolved the frame for the wrong "
             "date, so every local bound in it belongs to another day."
+        )
+
+    run = context.run
+    if not (run.start_at <= request.start_at and request.end_at <= run.end_at):
+        raise ContextMismatchError(
+            f"Context.run describes the span [{run.start_at}, {run.end_at}], but the request spans "
+            f"[{request.start_at}, {request.end_at}). The caller resolved a run that does not "
+            "contain its own request, so a rule reading it would judge someone else's session."
         )
 
     for index, booking in enumerate(context.history.bookings):

@@ -17,9 +17,9 @@ from __future__ import annotations
 import math
 from datetime import date, datetime, time, timedelta, timezone
 
-from rules import LocalFrame, Weekday
+from rules import BookingRequest, LocalFrame, RunContext, Weekday
 
-__all__ = ["utc_frame"]
+__all__ = ["utc_frame", "solo_run"]
 
 
 def _midnight(day: date) -> datetime:
@@ -64,3 +64,16 @@ def utc_frame(
         start_minutes=math.floor((start_at - day_start).total_seconds() / 60),
         end_minutes=math.ceil((end_at - day_start).total_seconds() / 60),
     )
+
+
+def solo_run(request: BookingRequest) -> RunContext:
+    """The run a caller with no history would resolve for ``request``: itself, alone.
+
+    ``Context.run`` is required with no default for the identical reason ``Context.local`` is
+    (``interfaces.Context``) — every test in this package needs one, not just the ones actually
+    about run resolution (``app/backend/tests/test_rules_stub.py`` is where that logic is tested).
+    This is the honest fixture for the common case: no adjoining bookings, so the run is exactly the
+    request under test, matching what ``app.rules_stub._resolve_run`` itself returns when history is
+    empty.
+    """
+    return RunContext(start_at=request.start_at, end_at=request.end_at, booking_count=1)

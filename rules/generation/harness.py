@@ -16,7 +16,7 @@ This module closes that gap. ``rules/rules/interfaces.py`` imports only the stan
 copied into the sandbox directory as ``engine.py`` and imported there like any other local module.
 ``PRELUDE`` is then prepended to the candidate so its free names resolve.
 
-**The prelude binds exactly the seven names the generator's system prompt promises, and no more.**
+**The prelude binds exactly the eight names the generator's system prompt promises, and no more.**
 It is the executable statement of that promise. Binding one more than the prompt promises would let
 a candidate that used it pass in the sandbox and then fail wherever it is really loaded, which is
 the one failure this whole arrangement exists to prevent. The test module, which is a different kind
@@ -66,6 +66,7 @@ ENGINE_NAMES = (
     "Context",
     "LocalFrame",
     "RuleResult",
+    "RunContext",
     "Weekday",
 )
 

@@ -62,7 +62,7 @@ module called `{_ENGINE_MODULE}`. Import what you need:
     from candidate_rule import TheRuleClass
     from {_ENGINE_MODULE} import (
         BaseRule, BookingRecord, BookingRequest, CalendarContext,
-        Context, HistoryContext, LocalFrame, RuleResult, UserContext, Weekday,
+        Context, HistoryContext, LocalFrame, RuleResult, RunContext, UserContext, Weekday,
     )
 
 NOTHING IS A FREE NAME IN YOUR MODULE. Unlike the rule you are testing, your file is loaded as \
@@ -85,15 +85,17 @@ rule — you are testing the code as written, and a test that repairs it in pass
     HistoryContext(bookings)                                 a tuple of BookingRecord
     LocalFrame(day_start, day_end, week_start, week_end, month_start, month_end,
                weekday, start_minutes, end_minutes)
-    Context(user, calendar, local, history)
+    RunContext(start_at, end_at, booking_count)              .duration is end_at - start_at
+    Context(user, calendar, local, run, history)
     RuleResult has .passed (bool) and .fail_reason (str or None)
 
-EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on` and \
-`local` are the two this costs a whole run on: `CalendarContext(now=...)` or `Context(user=..., \
-calendar=...)` without them is a `TypeError` at the first line of every test, so the whole module \
-fails before the rule is called once and the report blames the rule for a constructor call the \
-rule does not make. This is the same lesson as the free-name rule above — a name or an argument \
-you assumed was supplied for you is a run spent finding out it was not.
+EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on`, `local` \
+and `run` are the three this costs a whole run on: `CalendarContext(now=...)`, `Context(user=..., \
+calendar=..., local=...)`, or any `Context(...)` missing `run` is a `TypeError` at the first line \
+of every test, so the whole module fails before the rule is called once and the report blames the \
+rule for a constructor call the rule does not make. This is the same lesson as the free-name rule \
+above — a name or an argument you assumed was supplied for you is a run spent finding out it was \
+not.
 
 `LocalFrame` is the booking's local calendar, already resolved by the caller: the three \
 `[start, end)` pairs are UTC instants bounding the venue's local day, week and calendar month; \
@@ -123,17 +125,21 @@ or the Context itself raises before the rule is ever called.
 Every test needs a whole `Context`, so write ONE helper and call it from each of them, changing \
 only what that case is about. Copy this and do not drop an argument from it:
 
-    def make_context(local, now, bookings=()):
+    def make_context(local, now, bookings=(), run=None):
         return Context(
             user=UserContext("user-1"),
             calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
             local=local,
+            run=run or RunContext(local.day_start, local.day_start + timedelta(hours=1), 1),
             history=HistoryContext(bookings=tuple(bookings)),
         )
 
 `Weekday.MONDAY` and `UserContext("user-1")` there are values you are supplying, not defaults you \
-are restating: `CalendarContext(now=...)` and `Context(user=None, ...)` are the two ways this \
-module dies on its own first line.
+are restating: `CalendarContext(now=...)` and `Context(user=None, ...)` are two ways this module \
+dies on its own first line. `run`'s own default inside the helper is a real `RunContext`, not a \
+placeholder — `Context.run` still has no default of its own, so a helper that passed `run=None` \
+straight through would die exactly the same way. Pass your own `run=RunContext(...)` from a test \
+that is actually about it; every other test can leave the helper's default alone.
 
 ## What the module must contain
 

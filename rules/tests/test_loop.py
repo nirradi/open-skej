@@ -69,6 +69,7 @@ TESTS = textwrap.dedent("""\
         Context,
         LocalFrame,
         RuleResult,
+        RunContext,
         UserContext,
         Weekday,
     )
@@ -101,6 +102,7 @@ TESTS = textwrap.dedent("""\
             user=UserContext("user-1"),
             calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
             local=frame(),
+            run=RunContext(start_at=NOW, end_at=NOW + timedelta(hours=1), booking_count=1),
         )
 
 

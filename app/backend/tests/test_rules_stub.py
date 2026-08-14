@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from rules import RULE_ERROR_MESSAGE
+from rules import BookingRecord as EngineBookingRecord
+from rules import BookingRequest as EngineBookingRequest
 
 from app.rules_stub import (
     ALLOWED_MESSAGE,
@@ -31,7 +33,7 @@ from app.rules_stub import (
     SpaceRuleRow,
     resolve_day_schedule,
 )
-from app.rules_stub import _build_local_frame, _engine_request, _local_date
+from app.rules_stub import _build_local_frame, _engine_request, _local_date, _resolve_run
 from app.rules_stub import evaluate as _evaluate
 
 DAY = datetime(2026, 7, 20, tzinfo=timezone.utc)
@@ -992,13 +994,26 @@ def _slot_row(row_id: int, minutes: int, applies_to: dict | None = None) -> Spac
     )
 
 
+def _min_duration_row(row_id: int, minutes: int, applies_to: dict | None = None) -> SpaceRuleRow:
+    return SpaceRuleRow(
+        id=row_id,
+        rule_type="min_duration",
+        params={"min_duration_minutes": minutes},
+        applies_to=applies_to,
+    )
+
+
 def test_resolve_day_schedule_with_no_rows_is_fully_unconfigured():
     config = SpaceRuleConfig(timezone="UTC", rules=())
 
     schedule = resolve_day_schedule(config, MONDAY)
 
     assert schedule == DaySchedule(
-        slot_minutes=None, opens_at=None, closes_at=None, coherence_issue=None
+        slot_minutes=None,
+        opens_at=None,
+        closes_at=None,
+        coherence_issue=None,
+        min_duration_minutes=None,
     )
 
 
@@ -1059,6 +1074,41 @@ def test_two_slot_alignment_rows_resolve_to_their_lcm_not_their_minimum():
     schedule = resolve_day_schedule(config, MONDAY)
 
     assert schedule.slot_minutes == 60
+
+
+def test_no_min_duration_row_resolves_to_none():
+    """The "not configured" convention every other field on `DaySchedule` uses — and, since task
+    8.4, the tolerance `app.rules_stub._resolve_run` reads for its gap tolerance: `None` here
+    becomes `0` there."""
+    config = SpaceRuleConfig(timezone="UTC", rules=(_hours_row(1, time(9, 0), time(17, 0)),))
+
+    assert resolve_day_schedule(config, MONDAY).min_duration_minutes is None
+
+
+def test_one_min_duration_row_resolves_to_its_own_value():
+    config = SpaceRuleConfig(timezone="UTC", rules=(_min_duration_row(1, 30),))
+
+    assert resolve_day_schedule(config, MONDAY).min_duration_minutes == 30
+
+
+def test_two_min_duration_rows_resolve_to_the_larger_not_the_smaller():
+    """Satisfying two floors at once means clearing the higher one — the mirror image of the
+    availability intersection above (there, satisfying both means the narrower overlap)."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_min_duration_row(1, 30), _min_duration_row(2, 45)),
+    )
+
+    assert resolve_day_schedule(config, MONDAY).min_duration_minutes == 45
+
+
+def test_a_min_duration_row_scoped_away_does_not_apply():
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_min_duration_row(1, 60, applies_to={"weekdays": [1, 3]}),),  # Tue/Thu, not Monday
+    )
+
+    assert resolve_day_schedule(config, MONDAY).min_duration_minutes is None
 
 
 def test_a_row_scoped_to_a_non_matching_weekday_is_excluded():
@@ -1133,3 +1183,129 @@ def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_slot_rule():
 
     assert schedule.opens_at == schedule.closes_at
     assert schedule.coherence_issue is None
+
+
+# --- _resolve_run (task 8.4) -----------------------------------------------------------
+#
+# The real risk in this task, per `ops/plans/stream-8/8.4-context-run.md`: this is where the
+# gap-tolerance arithmetic and the transitive merge actually live, so these cases build engine
+# types directly and call `_resolve_run` itself rather than going through `evaluate`, which would
+# only tell us whether a booking passed or failed, not what run it was judged against.
+
+RUN_USER = "u1"
+
+
+def _erecord(start: datetime, end: datetime, resource_id: str = "court-1") -> EngineBookingRecord:
+    return EngineBookingRecord(
+        user_id=RUN_USER, resource_id=resource_id, start_at=start, end_at=end
+    )
+
+
+def _erequest(start: datetime, end: datetime, resource_id: str = "court-1") -> EngineBookingRequest:
+    return EngineBookingRequest(
+        user_id=RUN_USER, resource_id=resource_id, start_at=start, end_at=end
+    )
+
+
+def test_no_history_resolves_the_request_alone():
+    req = _erequest(at(10), at(11))
+
+    run = _resolve_run(req, (), timedelta(0))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(11)
+    assert run.booking_count == 1
+
+
+def test_a_booking_abutting_before_and_after_merges_transitively():
+    """17-18 and 19-20 already held, requesting 18-19, merges into one 17-20 run — a user can be
+    denied by a booking two hops away, and this is that case at the resolver level."""
+    req = _erequest(at(18), at(19))
+    history = (_erecord(at(17), at(18)), _erecord(at(19), at(20)))
+
+    run = _resolve_run(req, history, timedelta(0))
+
+    assert run.start_at == at(17)
+    assert run.end_at == at(20)
+    assert run.booking_count == 3
+
+
+def test_a_booking_neither_abutting_nor_within_tolerance_is_excluded():
+    req = _erequest(at(10), at(11))
+    far = _erecord(at(13), at(14))  # a 2-hour gap, nowhere near any plausible tolerance
+
+    run = _resolve_run(req, (far,), timedelta(minutes=30))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(11)
+    assert run.booking_count == 1
+
+
+def test_a_five_minute_gap_joins_when_the_tolerance_covers_it():
+    """The clause `max-duration-cannon.md`'s decision 3 attaches: a gap shorter than a Space's own
+    configured minimum duration is dead space nobody could ever book, so it must not fracture the
+    run and hand every run-based rule a free escape hatch."""
+    req = _erequest(at(10), at(11))
+    adjoining = _erecord(at(11, 5), at(12, 5))
+
+    run = _resolve_run(req, (adjoining,), timedelta(minutes=60))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(12, 5)
+    assert run.booking_count == 2
+
+
+def test_the_same_five_minute_gap_does_not_join_with_no_tolerance():
+    """A Space configuring no `min_duration` gets `tolerance == timedelta(0)` — exact abutment,
+    `max-duration-cannon.md`'s original decision 3, unchanged for a Space that never opted into a
+    floor at all."""
+    req = _erequest(at(10), at(11))
+    adjoining = _erecord(at(11, 5), at(12, 5))
+
+    run = _resolve_run(req, (adjoining,), timedelta(0))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(11)
+    assert run.booking_count == 1
+
+
+def test_two_resources_abutting_still_merge_into_one_run():
+    """The cross-court circumvention case, at the resolver level: `history` is already filtered to
+    the user and never to one resource (`interfaces.HistoryContext`), so a booking on a *different*
+    court still joins the run — a member cannot dodge a run-aware cap by switching courts. 8.9 is
+    this same property's E2E guard."""
+    req = _erequest(at(10), at(11), resource_id="court-1")
+    other_court = _erecord(at(11), at(12), resource_id="court-2")
+
+    run = _resolve_run(req, (other_court,), timedelta(0))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(12)
+    assert run.booking_count == 2
+
+
+def test_exact_abutment_joins_with_zero_tolerance():
+    """The bound case `max-duration-cannon.md`'s decision 3 names directly: zero gap always joins,
+    tolerance or none."""
+    req = _erequest(at(11), at(12))
+    before = _erecord(at(10), at(11))
+
+    run = _resolve_run(req, (before,), timedelta(0))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(12)
+    assert run.booking_count == 2
+
+
+def test_an_overlap_across_two_resources_joins_even_with_zero_tolerance():
+    """A negative gap (an overlap) joins unconditionally — reachable once history is drawn from
+    more than one Resource, since two Resources' bookings are never mutually exclusive in time the
+    way two bookings on one Resource are."""
+    req = _erequest(at(10), at(12), resource_id="court-1")
+    overlapping = _erecord(at(11), at(13), resource_id="court-2")
+
+    run = _resolve_run(req, (overlapping,), timedelta(0))
+
+    assert run.start_at == at(10)
+    assert run.end_at == at(13)
+    assert run.booking_count == 2

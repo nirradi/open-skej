@@ -34,6 +34,7 @@ from rules.interfaces import (
     CalendarContext,
     Context,
     HistoryContext,
+    RunContext,
     UserContext,
     Weekday,
 )
@@ -79,10 +80,15 @@ def context(
     frame_end: datetime | None = None,
     history=(),
 ) -> Context:
+    # No rule reached through this module's `.evaluate(req, ctx)` calls reads `context.run` — see
+    # `_assert_denies_with_no_absolute_time`, which never goes through `evaluate_request`'s
+    # cross-check — so a fixed, inert span is enough here; there is nothing to keep it aligned with.
+    start = frame_for if frame_for is not None else now
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
-        local=utc_frame(frame_for if frame_for is not None else now, frame_end),
+        local=utc_frame(start, frame_end),
+        run=RunContext(start_at=start, end_at=start + timedelta(hours=1), booking_count=1),
         history=HistoryContext(bookings=tuple(history)),
     )
 

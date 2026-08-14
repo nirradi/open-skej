@@ -42,6 +42,13 @@ Translations that happen here and nowhere else:
   day only through this. It is why the engine still carries no timezone
   anywhere (``.claude/rules/rule-engine.md``): this module remains the only
   thing in the system that knows one.
+* **The run.** ``_resolve_run`` answers the one question ``LocalFrame`` does
+  not: not "when is this", but "how much of this user's own history does this
+  booking belong to". It resolves the contiguous, cross-Resource span of
+  bookings ``request`` sits in — transitively, and closing a gap up to that
+  date's own resolved minimum duration — and hands it over as ``Context.run``.
+  A rule that wants to judge the whole run rather than the one request reads
+  it there; every rule that does not is unaffected by its existence.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
@@ -82,6 +89,7 @@ from rules import (
     MaxDurationRule,
     NotInThePastRule,
     RuleType,
+    RunContext,
     UserContext,
     Weekday,
     evaluate_request,
@@ -608,19 +616,30 @@ class DaySchedule:
     implementation of "what hours/slot size govern this date" in TypeScript
     is exactly the duplication ``DEFERRED.md`` item 13 warns against.
 
-    ``slot_minutes`` / ``opens_at`` / ``closes_at`` are ``None`` when no
+    ``slot_minutes`` / ``opens_at`` / ``closes_at`` / ``min_duration_minutes`` are ``None`` when no
     enabled, date-matching row of that type governs this date at all — the
     same "not enforced" convention ``SpaceRuleConfig`` and the frontend's
     ``CalendarConfig`` already use. ``coherence_issue`` is set only when a
     *real* (non-zero-width) resolved window's bounds do not land on the
     resolved slot grid; see ``resolve_day_schedule`` for why a zero-width
     window is not one of these cases.
+
+    ``min_duration_minutes`` is not yet reported over the wire — that is task
+    8.2's job (``ops/plans/stream-8/8.2-schedule-reports-min-duration.md``),
+    exposing it on ``DayScheduleRead`` and the frontend's ``CalendarConfig``
+    for the calendar UI to read. It is resolved here, ahead of that task,
+    because ``app.rules_stub._resolve_run`` (task 8.4) needs the identical
+    resolution to size its own gap tolerance and a second implementation of
+    "what minimum duration governs this date" here would be exactly the
+    drift this codebase's docs keep warning about. 8.2 exposes this field on
+    the wire; it does not re-derive it.
     """
 
     slot_minutes: int | None
     opens_at: time | None
     closes_at: time | None
     coherence_issue: str | None
+    min_duration_minutes: int | None
 
 
 def _minutes_to_wire_time(minutes: int | None) -> time | None:
@@ -685,6 +704,15 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
       divides 1440 (``SlotAlignmentRule.__init__``), so the LCM of any two
       such divisors also divides 1440 — this can never itself produce an
       incoherent day length.
+    * ``min_duration`` — the **maximum** of every matching row's own
+      ``min_duration_minutes``: satisfying two floors at once means clearing
+      the higher one, the mirror image of the availability intersection
+      above (there, satisfying two windows at once means the narrower
+      overlap; here, it means the larger floor). Unlike the other two types
+      this is read directly off ``params`` with no coherence check against
+      the slot grid performed here — see ``DaySchedule``'s own docstring for
+      why the combining rule lives here now while the wire-facing exposure
+      and its own coherence case remain task 8.2's.
 
     No matching row of a type at all resolves to ``None`` for it, matching
     ``SpaceRuleConfig``'s and the frontend's ``CalendarConfig``'s "not
@@ -728,6 +756,13 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
         math.lcm(*(int(row.params["slot_minutes"]) for row in slot_rows)) if slot_rows else None
     )
 
+    duration_rows = [row for row in matching if row.rule_type == "min_duration"]
+    min_duration_minutes = (
+        max(int(row.params["min_duration_minutes"]) for row in duration_rows)
+        if duration_rows
+        else None
+    )
+
     coherence_issue: str | None = None
     if (
         opens_at_minutes is not None
@@ -745,7 +780,112 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
         opens_at=_minutes_to_wire_time(opens_at_minutes),
         closes_at=_minutes_to_wire_time(closes_at_minutes),
         coherence_issue=coherence_issue,
+        min_duration_minutes=min_duration_minutes,
     )
+
+
+@dataclass(frozen=True)
+class _MergedSpan:
+    """One contiguous run out of ``_merge_adjoining_spans``' closure. Not exported — a caller
+    outside this module wants ``RunContext``, which ``_resolve_run`` builds from exactly one of
+    these."""
+
+    start_at: datetime
+    end_at: datetime
+    booking_count: int
+
+
+def _merge_adjoining_spans(
+    spans: list[tuple[datetime, datetime]], tolerance: timedelta
+) -> list[_MergedSpan]:
+    """Merge ``spans`` into every contiguous run they form, closing a gap up to ``tolerance``.
+
+    Returns **all** merged runs, not only the one a particular request falls into — this is what
+    lets ``_resolve_run`` (one run) and a later frequency-cap rewrite (task 8.6, every run in a
+    window) share one sweep rather than each computing its own closure. ``_resolve_run`` is the
+    only caller today; it picks its own request's span back out of this list.
+
+    Two spans join when the gap between their sorted order is **zero** (exact abutment),
+    **negative** (an overlap — reachable once the input is drawn from more than one Resource,
+    since two Resources' bookings are never mutually exclusive in time the way two bookings on one
+    Resource are), or **smaller than ``tolerance``**. The join is **transitive**: three spans each
+    within tolerance of the next merge into one run even if the first and third are not within
+    tolerance of each other, because merging is a single left-to-right sweep over the sorted spans
+    rather than a pairwise comparison — 17-18 and 18-19 held, a request for 19-20, is one 17-20
+    run.
+
+    Why a tolerance at all, when ``max-duration-cannon.md``'s decision 3 chose exact abutment:
+    that decision rests on every booking landing on a slot grid, which makes a sub-slot gap
+    unconstructable. ``slot_alignment`` is a per-Space row, not a property of the engine, so a
+    Space configuring ``min_duration`` without it has arbitrary start times — a 5-minute gap
+    between 17:00-18:00 and 18:05-19:05 would break the run, nobody could ever construct a booking
+    to fill exactly that gap, and every run-based rule below gets a free escape hatch. A tolerance
+    equal to the date's minimum duration closes it: any gap a legal booking could actually occupy
+    is at least that long, so a gap shorter than it is not "two sessions with a short break
+    between them", it is dead space nothing could ever book — which is indistinguishable from no
+    gap at all. A Space with no ``min_duration`` row gets ``tolerance == timedelta(0)``, which is
+    exactly decision 3's original exact-abutment rule, so this is a strict generalisation of it
+    rather than a loosening.
+    """
+    if not spans:
+        return []
+
+    ordered = sorted(spans, key=lambda span: span[0])
+    merged: list[_MergedSpan] = []
+    run_start, run_end = ordered[0]
+    run_count = 1
+
+    for start_at, end_at in ordered[1:]:
+        gap = start_at - run_end
+        if gap <= timedelta(0) or gap < tolerance:
+            run_end = max(run_end, end_at)
+            run_count += 1
+        else:
+            merged.append(_MergedSpan(run_start, run_end, run_count))
+            run_start, run_end, run_count = start_at, end_at, 1
+
+    merged.append(_MergedSpan(run_start, run_end, run_count))
+    return merged
+
+
+def _resolve_run(
+    request: EngineBookingRequest,
+    history: tuple[EngineBookingRecord, ...],
+    tolerance: timedelta,
+) -> RunContext:
+    """Resolve the contiguous run ``request`` belongs to, per ``max-duration-cannon.md``'s
+    decisions.
+
+    ``history`` is already the Space-wide, user-filtered set ``evaluate`` builds
+    ``HistoryContext`` from — cross-resource falls out of that input rather than needing to be
+    built here, since a run is not a real booking on any one court in the first place
+    (``RunContext``'s own docstring).
+
+    The request's own span is folded into the same sweep as every history entry rather than
+    merged against the result afterwards — a two-pass version (merge history, then check whether
+    the request touches one end of the result) would silently miss a request that lands between
+    two *history* entries close enough to bridge them, which is exactly the case a run-aware rule
+    most needs to see. Folding it in up front means the closure the request changes is the one
+    this function returns.
+
+    When ``history`` is empty — every Space whose canon reads no history at all — the only span
+    in the sweep is the request's own, so the run returned is the request alone with
+    ``booking_count=1``. That is the correct answer, not a degraded one: nothing else exists for
+    this booking to have joined.
+    """
+    spans = [(request.start_at, request.end_at)] + [
+        (booking.start_at, booking.end_at) for booking in history
+    ]
+    for run in _merge_adjoining_spans(spans, tolerance):
+        if run.start_at <= request.start_at and request.end_at <= run.end_at:
+            return RunContext(
+                start_at=run.start_at, end_at=run.end_at, booking_count=run.booking_count
+            )
+
+    # Unreachable: `request`'s own span is always one of `spans`, so it is always inside exactly
+    # one of `_merge_adjoining_spans`' returned runs. An `AssertionError` here would mean the sweep
+    # itself is broken, not that this booking is unusual.
+    raise AssertionError("the request's own span was not found in its own merge closure")
 
 
 def evaluate(
@@ -765,6 +905,13 @@ def evaluate(
 
     ``now`` defaults to the live UTC clock; tests pin it explicitly instead of
     racing the wall clock.
+
+    ``context.run`` is resolved from ``history`` and ``booking`` together by
+    ``_resolve_run``, with a gap tolerance equal to this date's own resolved
+    minimum duration (``resolve_day_schedule``, zero when no ``min_duration``
+    row governs the date) — see that function's docstring for why a
+    tolerance is needed at all. This runs whether or not the canon reads
+    history: an empty ``history`` still resolves a run, the request alone.
 
     A ``space_rules`` row that cannot be built into a rule — an unregistered
     ``rule_type``, or ``params`` that no longer satisfy that type's schema —
@@ -797,11 +944,16 @@ def evaluate(
         )
         return RuleResult(allowed=False, message=RULE_ERROR_MESSAGE)
 
+    history_records = tuple(_engine_record(entry) for entry in history)
+    tolerance_minutes = resolve_day_schedule(config, on_date).min_duration_minutes or 0
+    run = _resolve_run(engine_request, history_records, timedelta(minutes=tolerance_minutes))
+
     engine_context = EngineContext(
         user=UserContext(user_id=booking.user_id),
         calendar=CalendarContext(week_starts_on=WEEK_STARTS_ON, now=utc_now),
         local=_build_local_frame(engine_request, config.timezone, on_date),
-        history=HistoryContext(bookings=tuple(_engine_record(entry) for entry in history)),
+        run=run,
+        history=HistoryContext(bookings=history_records),
     )
 
     result = evaluate_request(engine_request, engine_context, canon)

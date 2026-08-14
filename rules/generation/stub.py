@@ -103,6 +103,7 @@ from engine import (
     Context,
     HistoryContext,
     LocalFrame,
+    RunContext,
     UserContext,
     Weekday,
 )
@@ -122,11 +123,20 @@ def make_local_frame():
     )
 
 
+def make_run():
+    return RunContext(
+        start_at=datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc),
+        end_at=datetime(2026, 7, 21, 13, 0, tzinfo=timezone.utc),
+        booking_count=1,
+    )
+
+
 def make_context(now, bookings=()):
     return Context(
         user=UserContext("user-1"),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
         local=make_local_frame(),
+        run=make_run(),
         history=HistoryContext(bookings=tuple(bookings)),
     )
 
