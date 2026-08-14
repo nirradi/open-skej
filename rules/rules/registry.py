@@ -391,8 +391,7 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         rule_type="min_duration",
         label="Minimum duration",
         description="Refuses a booking shorter than the configured minimum duration — the floor "
-        "that pairs with maximum duration's ceiling; an admin configuring one naturally reaches "
-        "for the other.",
+        "that pairs with maximum duration's ceiling.",
         priority=25,
         params=(
             RuleParam(
@@ -458,10 +457,11 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     ),
     RuleType(
         rule_type="slot_alignment",
-        label="Slot alignment",
-        description="Refuses a booking whose start or end time does not land on the Space's own "
-        "time grid — for example, on a 30-minute grid a booking may start and end on the hour or "
-        "the half hour, but not at ten past.",
+        label="Booking start times",
+        description="Bookings must start and end on the venue's own time grid — for example, on a "
+        "30-minute grid a booking may start on the hour or the half hour, never at ten past. Both "
+        "ends are checked: a booking that starts on the grid but finishes at an off-grid time is "
+        "refused for its end time, not its start.",
         priority=35,
         params=(
             RuleParam(

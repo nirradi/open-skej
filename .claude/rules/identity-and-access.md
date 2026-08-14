@@ -385,10 +385,14 @@ redirect above replaces, and the two differing is what stops Back walking into t
 
 **The grid's layout is resolved by the server, per date, and the frontend only renders it.**
 `GET /spaces/{public_id}/schedule?from=&days=` (`app.rules_stub.resolve_day_schedule`) reports, for
-every date in the requested range, the slot size and operating window a booking on that date would
-actually be judged against — the flat-AND of that date's own matching `space_rules` rows (every
-matching row of a type combines rather than one being picked, exactly as the engine itself combines
-rules), in the Space's own local wall clock. This exists because a rule's `applies_to`
+every date in the requested range, the slot size, the operating window, and the minimum booking
+duration a booking on that date would actually be judged against — the flat-AND of that date's own
+matching `space_rules` rows (every matching row of a type combines rather than one being picked,
+exactly as the engine itself combines rules), in the Space's own local wall clock.
+`DayScheduleRead.min_duration_minutes` is a plain minute count, not a wall-clock `time`: it names a
+duration, not a point on the clock, so it is the one field on this response the server never folds
+through the minutes-to-wire-time conversion the other three go through. This exists because a rule's
+`applies_to`
 (`rule-engine.md`) can narrow it to particular weekdays or dates, so a Space no longer has one slot
 size or one operating window good for the whole week — a single `CalendarConfig` covering the whole
 week cannot express "Tuesdays are different". The frontend never re-derives this resolution
@@ -437,6 +441,15 @@ level up: a `/schedule` request that fails outright (the server unreachable, not
 issue) is the one case left that still degrades to a notice replacing the *whole* calendar — with no
 resolved schedule at all there is nothing honest to render as a grid — and even then it is scoped to
 that Space's own calendar, never a page that takes the rest of the app down with it.
+
+**A resolved minimum duration longer than the resolved operating window is the same kind of advisory
+note, for the same reason.** A real (non-zero-width) window paired with a minimum duration that
+exceeds its own length means nothing on that date could ever be booked at all, which
+`resolve_day_schedule` reports as `coherence_issue` exactly as it does the slot-grid case, and checks
+only once that case has cleared — the two never fire together. A minimum duration that is merely not
+a multiple of the slot size is deliberately **not** this case: the calendar's click unit rounds up to
+the smallest whole number of slots that reaches the minimum, so that mismatch costs nothing and is
+never flagged as broken.
 
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of

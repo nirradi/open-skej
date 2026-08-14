@@ -1409,6 +1409,95 @@ def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_slot_rule():
     assert schedule.coherence_issue is None
 
 
+def test_coherence_issue_when_min_duration_exceeds_the_operating_window():
+    """A 90-minute floor against a one-hour window means nothing on the date is bookable."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, time(9, 0), time(10, 0)), _min_duration_row(2, 90)),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.coherence_issue is not None
+    assert "Minimum duration" in schedule.coherence_issue
+
+
+def test_min_duration_equal_to_the_window_is_not_a_coherence_issue():
+    """The bound is inclusive, the same convention every duration rule in the canon shares."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, time(9, 0), time(10, 0)), _min_duration_row(2, 60)),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.coherence_issue is None
+
+
+def test_min_duration_shorter_than_the_window_sets_no_issue():
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(_hours_row(1, time(9, 0), time(17, 0)), _min_duration_row(2, 30)),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.coherence_issue is None
+
+
+def test_min_duration_not_a_multiple_of_the_slot_size_is_not_a_coherence_issue():
+    """8.3 rounds the click up to cover it; this is not an error, unlike the two grid-alignment
+    cases above."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            _hours_row(1, time(9, 0), time(17, 0)),
+            _slot_row(2, 30),
+            _min_duration_row(3, 45),
+        ),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.coherence_issue is None
+
+
+def test_a_zero_width_window_is_never_a_min_duration_coherence_issue():
+    """ "Closed all day" plus a minimum duration must not report incoherence either — there is no
+    real window for the minimum to exceed."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            _hours_row(1, time(9, 0), time(12, 0)),
+            _hours_row(2, time(14, 0), time(18, 0)),
+            _min_duration_row(3, 90),
+        ),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.opens_at == schedule.closes_at
+    assert schedule.coherence_issue is None
+
+
+def test_a_slot_grid_issue_takes_precedence_over_a_min_duration_window_issue():
+    """Both conditions can hold at once; the two are mutually exclusive in what fires, and the
+    existing grid-alignment case is checked first (`resolve_day_schedule`'s own docstring)."""
+    config = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            _hours_row(1, time(9, 15), time(10, 0)),
+            _slot_row(2, 30),
+            _min_duration_row(3, 90),
+        ),
+    )
+
+    schedule = resolve_day_schedule(config, MONDAY)
+
+    assert schedule.coherence_issue is not None
+    assert "slot boundary" in schedule.coherence_issue
+
+
 # --- _resolve_run (task 8.4) -----------------------------------------------------------
 #
 # The real risk in this task, per `ops/plans/stream-8/8.4-context-run.md`: this is where the

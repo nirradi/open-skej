@@ -599,8 +599,14 @@ class DayScheduleRead(BaseModel):
     path, never converts to UTC (see that function's docstring). ``None``
     means the corresponding rule type is not enforced on this date at all;
     ``coherence_issue`` is ``None`` unless the resolved window and slot size
-    genuinely conflict (a zero-width "closed all day" window is not a
-    conflict — see ``resolve_day_schedule``).
+    genuinely conflict, or the resolved minimum duration exceeds the window
+    itself (a zero-width "closed all day" window is not a conflict — see
+    ``resolve_day_schedule``).
+
+    ``min_duration_minutes`` is a plain minute count, never converted to a
+    wire ``time`` — it is a duration, not a clock time, so
+    ``_minutes_to_wire_time`` (which folds a minutes-past-midnight value onto
+    a wall clock) has no business touching it.
     """
 
     date: date
@@ -608,6 +614,7 @@ class DayScheduleRead(BaseModel):
     opens_at: Optional[time]
     closes_at: Optional[time]
     coherence_issue: Optional[str]
+    min_duration_minutes: Optional[int]
 
     @classmethod
     def build(cls, on_date: date, schedule: DaySchedule) -> "DayScheduleRead":
@@ -617,6 +624,7 @@ class DayScheduleRead(BaseModel):
             opens_at=schedule.opens_at,
             closes_at=schedule.closes_at,
             coherence_issue=schedule.coherence_issue,
+            min_duration_minutes=schedule.min_duration_minutes,
         )
 
 

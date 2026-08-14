@@ -465,9 +465,17 @@ export interface SpaceRuleCreateInput {
  * `coherence_issue` is resolved server-side and never recomputed by the
  * client: the resolved window and slot size for *this one date*
  * genuinely conflict (an opening or closing time that does not land on the
- * resolved slot grid). `null` unless that is true — a "closed all day"
+ * resolved slot grid), or the resolved minimum duration exceeds the window
+ * itself. `null` unless one of those is true — a "closed all day"
  * zero-width window is never a conflict, since there is no grid to misalign
- * with nothing bookable in it.
+ * with nothing bookable in it, and a minimum duration that is merely not a
+ * multiple of the slot size is not a conflict either (the calendar's click
+ * unit rounds up to cover it).
+ *
+ * `min_duration_minutes` is a plain minute count, not a wall-clock string
+ * like `opens_at` / `closes_at` — it is a duration, so there is no clock
+ * time to render it as. `null` means no `min_duration` rule governs this
+ * date at all.
  */
 export interface DayScheduleRead {
   date: string
@@ -475,6 +483,7 @@ export interface DayScheduleRead {
   opens_at: string | null
   closes_at: string | null
   coherence_issue: string | null
+  min_duration_minutes: number | null
 }
 
 /**

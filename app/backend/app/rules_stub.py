@@ -664,15 +664,15 @@ class DaySchedule:
     resolved slot grid; see ``resolve_day_schedule`` for why a zero-width
     window is not one of these cases.
 
-    ``min_duration_minutes`` is not yet reported over the wire — that is task
-    8.2's job (``ops/plans/stream-8/8.2-schedule-reports-min-duration.md``),
-    exposing it on ``DayScheduleRead`` and the frontend's ``CalendarConfig``
-    for the calendar UI to read. It is resolved here, ahead of that task,
-    because ``app.rules_stub._resolve_run`` (task 8.4) needs the identical
-    resolution to size its own gap tolerance and a second implementation of
-    "what minimum duration governs this date" here would be exactly the
-    drift this codebase's docs keep warning about. 8.2 exposes this field on
-    the wire; it does not re-derive it.
+    ``min_duration_minutes`` is resolved here rather than beside the one
+    other reader that needs it: ``app.rules_stub._resolve_run`` sizes its own
+    gap tolerance from the identical resolution, and a second implementation
+    of "what minimum duration governs this date" here would be exactly the
+    drift this codebase's docs keep warning about. It is reported on the wire
+    by ``DayScheduleRead``, alongside its own coherence case against the
+    operating window (below) — the frontend's own ``CalendarConfig`` does not
+    read it yet, since rendering a click unit that honours it is separate,
+    larger UI work.
     """
 
     slot_minutes: int | None
@@ -749,20 +749,30 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
       the higher one, the mirror image of the availability intersection
       above (there, satisfying two windows at once means the narrower
       overlap; here, it means the larger floor). Unlike the other two types
-      this is read directly off ``params`` with no coherence check against
-      the slot grid performed here — see ``DaySchedule``'s own docstring for
-      why the combining rule lives here now while the wire-facing exposure
-      and its own coherence case remain task 8.2's.
+      this is read directly off ``params`` with no comparison against the
+      slot grid — it has its own coherence case against the operating window
+      instead, below.
 
     No matching row of a type at all resolves to ``None`` for it, matching
     ``SpaceRuleConfig``'s and the frontend's ``CalendarConfig``'s "not
     configured" shape.
 
-    ``coherence_issue`` fires only when there is a **real** (non-zero-width)
-    resolved window *and* a resolved slot size whose boundaries do not land
-    on it — mirroring ``config.ts``'s own ``coherenceIssue`` wording. A
-    zero-width "closed all day" window is never flagged: there is no grid to
-    misalign with nothing bookable in it.
+    ``coherence_issue`` fires in either of two, mutually exclusive cases, the
+    second checked only once the first has cleared:
+
+    1. A **real** (non-zero-width) resolved window *and* a resolved slot size
+       whose boundaries do not land on it — mirroring ``config.ts``'s own
+       ``coherenceIssue`` wording. A zero-width "closed all day" window is
+       never flagged: there is no grid to misalign with nothing bookable in
+       it.
+    2. A real resolved window *and* a resolved minimum duration longer than
+       the window itself — nothing on that date could ever clear the
+       minimum, so the window is bookable in name only. This is checked only
+       when case 1 did not already fire, and only against the window's own
+       length, never against the slot grid: a minimum duration that is
+       merely not a multiple of the slot size is not an error here at all —
+       the calendar's click unit rounds up to cover it (task 8.3) — so this
+       case fires on *length*, never on divisibility.
 
     **The wire shape is unchanged and a same-day window renders exactly as before** —
     ``DaySchedule.opens_at``/``closes_at`` are still ``time | None``, and the only kind of window
@@ -814,6 +824,16 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
             coherence_issue = f"Opening time must land on a {slot_minutes}-minute slot boundary."
         elif closes_at_minutes % slot_minutes != 0:
             coherence_issue = f"Closing time must land on a {slot_minutes}-minute slot boundary."
+
+    if (
+        coherence_issue is None
+        and opens_at_minutes is not None
+        and closes_at_minutes is not None
+        and closes_at_minutes != opens_at_minutes
+        and min_duration_minutes is not None
+        and min_duration_minutes > closes_at_minutes - opens_at_minutes
+    ):
+        coherence_issue = "Minimum duration must not exceed the length of the operating window."
 
     return DaySchedule(
         slot_minutes=slot_minutes,
