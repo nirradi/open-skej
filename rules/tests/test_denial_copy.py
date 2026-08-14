@@ -161,6 +161,11 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
             context(frame_for=NOW + timedelta(days=8)),
         ),
     },
+    "min_duration": {
+        "params": {"min_duration_minutes": 30},
+        "resolved": None,
+        "case": lambda: (request(NOW, NOW + timedelta(minutes=10)), context()),
+    },
     "max_duration": {
         "params": {"max_duration_minutes": 60},
         "resolved": None,

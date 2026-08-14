@@ -2,7 +2,7 @@
 
 Four things are pinned here, for different reasons.
 
-**The schema itself** — the seven stable ids, each with the exact param names its underlying rule
+**The schema itself** — the eight stable ids, each with the exact param names its underlying rule
 class's constructor needs (read against ``canon.py`` / ``frequency.py`` directly, not against this
 module's own memory of them), the documented priority order, and which flags are set on which type.
 A registry that silently drifted from any of these would still import cleanly and would still look
@@ -29,6 +29,7 @@ from rules.canon import (
     AvailabilityHoursRule,
     BookingHorizonRule,
     MaxDurationRule,
+    MinDurationRule,
     NotInThePastRule,
     SlotAlignmentRule,
 )
@@ -82,11 +83,12 @@ def existing_booking(start_at: datetime) -> BookingRecord:
     )
 
 
-# --- the seven stable ids, and their declared params ------------------------------------------
+# --- the eight stable ids, and their declared params -------------------------------------------
 
 EXPECTED_IDS = {
     "not_in_the_past",
     "booking_horizon",
+    "min_duration",
     "max_duration",
     "slot_alignment",
     "availability_hours",
@@ -95,7 +97,7 @@ EXPECTED_IDS = {
 }
 
 
-def test_all_seven_stable_ids_are_registered():
+def test_all_eight_stable_ids_are_registered():
     assert set(REGISTRY) == EXPECTED_IDS
 
 
@@ -104,6 +106,7 @@ def test_all_seven_stable_ids_are_registered():
     [
         ("not_in_the_past", ()),
         ("booking_horizon", ("days",)),
+        ("min_duration", ("min_duration_minutes",)),
         ("max_duration", ("max_duration_minutes",)),
         ("slot_alignment", ("slot_minutes",)),
         ("availability_hours", ("opens_at_minutes", "closes_at_minutes")),
@@ -130,10 +133,11 @@ def test_stable_ids_are_never_the_python_class_name():
 
 
 def test_priorities_sort_into_the_documented_canon_order():
-    """`rule-engine.md`'s seven-element assembled order, now read off declared priority."""
+    """`rule-engine.md`'s eight-element assembled order, now read off declared priority."""
     assert [declared.rule_type for declared in rule_types()] == [
         "not_in_the_past",
         "booking_horizon",
+        "min_duration",
         "max_duration",
         "slot_alignment",
         "availability_hours",
@@ -152,10 +156,23 @@ def test_slot_alignment_sits_strictly_between_max_duration_and_availability_hour
     )
 
 
+def test_min_duration_sits_strictly_between_booking_horizon_and_max_duration():
+    """`min_duration`'s priority (25) is between `booking_horizon` (20) and `max_duration` (30) —
+    task 8.1's own reasoning: the two duration rules bound opposite directions and can never both
+    deny the same request, so their relative order never arbitrates copy, and 25 leaves 26-29 free
+    for a later insertion."""
+    assert (
+        REGISTRY["booking_horizon"].priority
+        < REGISTRY["min_duration"].priority
+        < REGISTRY["max_duration"].priority
+    )
+
+
 def test_priorities_are_unique_and_spaced_for_a_later_insertion():
     """Priorities are spaced in multiples of ten rather than consecutive integers, so a later type
     can still be inserted between two existing ones without renumbering the rest — exactly what
-    let `slot_alignment` land at 35 without moving `availability_hours` off 40."""
+    let `slot_alignment` land at 35 without moving `availability_hours` off 40, and `min_duration`
+    land at 25 without moving anything either side of it."""
     priorities = [declared.priority for declared in rule_types()]
     assert priorities == sorted(priorities)
     assert len(set(priorities)) == len(priorities)
@@ -187,9 +204,11 @@ def test_needs_local_resolution_is_true_for_slot_alignment_and_the_two_counting_
 
 
 def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
-    """`availability_hours`, `max_duration` and `slot_alignment` are meant to vary by day via
-    `applies_to` (e.g. "Mon/Wed/Fri 10-15" plus "Tue/Thu 8-12" as two `availability_hours` rows), so
-    a second instance of any of them is the intended pattern, not a mistake worth warning about."""
+    """`availability_hours`, `max_duration`, `min_duration` and `slot_alignment` are meant to vary
+    by day via `applies_to` (e.g. "Mon/Wed/Fri 10-15" plus "Tue/Thu 8-12" as two
+    `availability_hours` rows), so a second instance of any of them is the intended pattern, not a
+    mistake worth warning about — `min_duration` for the identical reason `max_duration` already
+    gives."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.is_single} == {
         "not_in_the_past",
         "booking_horizon",
@@ -197,6 +216,7 @@ def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
         "max_bookings_per_month",
     }
     assert {rt.rule_type for rt in REGISTRY.values() if not rt.is_single} == {
+        "min_duration",
         "max_duration",
         "slot_alignment",
         "availability_hours",
@@ -246,6 +266,14 @@ def test_build_booking_horizon_behaves_like_the_class():
     beyond = request(NOW + timedelta(days=61), NOW + timedelta(days=61, hours=1))
     assert built.evaluate(beyond, context()) == direct.evaluate(beyond, context())
     assert not built.evaluate(beyond, context()).passed
+
+
+def test_build_min_duration_behaves_like_the_class():
+    built = REGISTRY["min_duration"].build({"min_duration_minutes": 30})
+    direct = MinDurationRule(min_duration=timedelta(minutes=30))
+    under = request(NOW, NOW + timedelta(minutes=10))
+    assert built.evaluate(under, context()) == direct.evaluate(under, context())
+    assert not built.evaluate(under, context()).passed
 
 
 def test_build_max_duration_behaves_like_the_class():

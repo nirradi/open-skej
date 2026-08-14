@@ -92,7 +92,7 @@ class InvalidOperatingHoursError(Exception):
 
 class UnknownRuleTypeError(Exception):
     """A ``rule_type`` was submitted that ``app.rule_catalog.catalog`` does not know —
-    neither one of the seven hand-written types in ``rules.REGISTRY`` nor a
+    neither one of the eight hand-written types in ``rules.REGISTRY`` nor a
     generated type this process has hoisted.
 
     Raised by ``POST``/``PATCH`` on ``/spaces/{public_id}/rules``, the only
@@ -421,7 +421,7 @@ def space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
     ``lookup=catalog.lookup`` is passed explicitly rather than left at
     ``SpaceRuleConfig``'s own ``REGISTRY.get`` default (task 7.6): this is
     the caller building a config for a real booking, so it should see every
-    generated type this process has hoisted, not only the seven hand-written
+    generated type this process has hoisted, not only the eight hand-written
     ones.
     """
     return SpaceRuleConfig(
@@ -451,7 +451,7 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
     ``rules.REGISTRY`` directly, so this write boundary and the booking-time
     read boundary answer "what rule types exist" identically — a generated
     type this process has hoisted is exactly as configurable here as one of
-    the seven hand-written ones, and an id neither knows behaves the same
+    the eight hand-written ones, and an id neither knows behaves the same
     way in both places too.
 
     Four checks, in order: an unregistered ``rule_type`` raises

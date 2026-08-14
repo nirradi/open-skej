@@ -9,7 +9,7 @@ whether a request to it succeeds.
 **The job is Space-scoped; the rule type it produces is global.** Every route here goes through
 ``require_space_role`` at admin+, because spending a Space's model calls and writing to the shared
 catalog is an administrative act. What comes out the other end is *not* scoped to that Space — a
-generated type joins the catalog every Space can pick from, exactly like the seven hand-written
+generated type joins the catalog every Space can pick from, exactly like the eight hand-written
 ones (``ops/plans/stream-7/OVERVIEW.md``, "Generated rules are global, with provenance recorded").
 The two statements are deliberately different, and reading the ``space_id`` on a job as scoping
 its artifact would be wrong; ``created_by_space_id`` on the type is what a later migration would

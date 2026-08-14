@@ -1,6 +1,6 @@
 """The backend-owned catalog of rule types: `rules.REGISTRY` plus generated types, hoisted.
 
-`rules.REGISTRY` holds the seven hand-written types and is a **module-level constant in a package
+`rules.REGISTRY` holds the eight hand-written types and is a **module-level constant in a package
 the backend installs**. Writing a generated type into it would invert that relationship — the
 engine's behaviour would then depend on which HTTP requests a process happened to have served,
 rather than on what was installed. This module is the alternative: it reads `REGISTRY` and never
