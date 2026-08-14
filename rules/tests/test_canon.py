@@ -22,6 +22,7 @@ from rules.canon import (
     DEFAULT_CANON,
     AvailabilityHoursRule,
     BookingHorizonRule,
+    MaxConsecutiveDurationRule,
     MaxDurationRule,
     MinDurationRule,
     NotInThePastRule,
@@ -203,6 +204,89 @@ def test_durations_are_rendered_the_way_a_person_says_them(duration, rendered):
 def test_a_non_positive_max_duration_is_rejected_at_construction():
     with pytest.raises(ValueError):
         MaxDurationRule(max_duration=timedelta(0))
+
+
+# --- MaxConsecutiveDurationRule ---------------------------------------------------------
+#
+# The bug report itself (`ops/pending/bugs/max-duration-cannon.md`): a Space configures "max 2
+# hours" meaning a session, a member books 17:00-18:00 and then, separately, 18:00-19:00, and
+# `MaxDurationRule` passes both because each request's own span is one hour. This rule reads
+# `context.run` instead of `request.duration`, so the case that matters is a *short* request that
+# joins a run already over the cap — every case below builds its own `context.run` rather than
+# relying on `context()`'s inert one-hour default, since that default would make this rule
+# indistinguishable from `MaxDurationRule` in every test.
+
+
+def joined_context(run_start: datetime, run_end: datetime, booking_count: int = 2) -> Context:
+    return context(run=RunContext(start_at=run_start, end_at=run_end, booking_count=booking_count))
+
+
+def test_a_request_that_joins_a_run_of_exactly_max_duration_is_allowed():
+    """The bound is inclusive, the same convention every duration rule in this canon shares."""
+    rule = MaxConsecutiveDurationRule(max_duration=timedelta(hours=2))
+    one_hour_request = request(NOW, NOW + timedelta(hours=1))
+    ctx = joined_context(NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    assert rule.evaluate(one_hour_request, ctx) == RuleResult.allow()
+
+
+def test_a_one_hour_request_that_joins_a_held_one_hour_booking_is_denied_by_a_two_hour_cap():
+    """The bug report, as a test. Neither booking is itself over 2 hours — `MaxDurationRule` would
+    pass both — but the run the second one joins comes to 2 hours and 1 minute, which this rule
+    catches and `MaxDurationRule` structurally cannot."""
+    rule = MaxConsecutiveDurationRule(max_duration=timedelta(hours=2))
+    held = request(NOW, NOW + timedelta(hours=1))
+    second = request(NOW + timedelta(hours=1), NOW + timedelta(hours=1, minutes=1))
+
+    # The held booking alone: nothing to join, well under the cap.
+    assert (
+        rule.evaluate(held, joined_context(NOW, NOW + timedelta(hours=1), 1)) == RuleResult.allow()
+    )
+
+    # The second booking, joined to the first into one run one minute over the cap.
+    result = rule.evaluate(second, joined_context(NOW, NOW + timedelta(hours=2, minutes=1)))
+    assert not result.passed
+
+
+def test_the_same_one_hour_request_with_no_neighbour_is_allowed():
+    """The other half of the bug-report pair: the identical one-hour request, alone, passes — the
+    rule denies what the run comes to, never the request's own length."""
+    rule = MaxConsecutiveDurationRule(max_duration=timedelta(hours=2))
+    solo_request = request(NOW, NOW + timedelta(hours=1))
+    assert rule.evaluate(solo_request, context()) == RuleResult.allow()
+
+
+def test_a_short_request_still_denies_when_it_pushes_the_run_over_the_cap():
+    """A five-minute request is nowhere near 2 hours on its own — the property that makes this rule
+    genuinely different from `MaxDurationRule`, which would allow this request outright."""
+    rule = MaxConsecutiveDurationRule(max_duration=timedelta(hours=2))
+    five_minutes = request(NOW, NOW + timedelta(minutes=5))
+    ctx = joined_context(NOW - timedelta(hours=2), NOW + timedelta(minutes=5))
+    assert not rule.evaluate(five_minutes, ctx).passed
+
+
+def test_the_denial_copy_is_about_the_run_not_the_request():
+    """A user submitting a one-hour booking must not be told "bookings can be at most 2 hours" —
+    that reads as false, since one hour is under the cap. The copy has to make clear the refusal is
+    about what the booking joins."""
+    rule = MaxConsecutiveDurationRule(max_duration=timedelta(hours=2))
+    one_hour_request = request(NOW, NOW + timedelta(hours=1))
+    ctx = joined_context(NOW - timedelta(hours=1, minutes=30), NOW + timedelta(hours=1))
+    result = rule.evaluate(one_hour_request, ctx)
+
+    assert not result.passed
+    assert result.fail_reason == (
+        "Bookings can't add up to more than 2 hours of consecutive play back-to-back,"
+        " and joining this one to what you already have booked next to it would come to"
+        " 2 hours and 30 minutes."
+        " Please leave a gap before or after it, or shorten it, and try again."
+    )
+    assert "at most 2 hours long" not in result.fail_reason
+    assert "consecutive" in result.fail_reason
+
+
+def test_a_non_positive_max_consecutive_duration_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        MaxConsecutiveDurationRule(max_duration=timedelta(0))
 
 
 # --- MinDurationRule ------------------------------------------------------------------

@@ -79,16 +79,18 @@ def context(
     frame_for: datetime | None = None,
     frame_end: datetime | None = None,
     history=(),
+    run: RunContext | None = None,
 ) -> Context:
     # No rule reached through this module's `.evaluate(req, ctx)` calls reads `context.run` — see
     # `_assert_denies_with_no_absolute_time`, which never goes through `evaluate_request`'s
-    # cross-check — so a fixed, inert span is enough here; there is nothing to keep it aligned with.
+    # cross-check — so a fixed, inert span is enough here, with one exception:
+    # `max_consecutive_duration` reads it directly, so its own scenario passes `run` explicitly.
     start = frame_for if frame_for is not None else now
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
         local=utc_frame(start, frame_end),
-        run=RunContext(start_at=start, end_at=start + timedelta(hours=1), booking_count=1),
+        run=run or RunContext(start_at=start, end_at=start + timedelta(hours=1), booking_count=1),
         history=HistoryContext(bookings=tuple(history)),
     )
 
@@ -176,6 +178,20 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
         "params": {"max_duration_minutes": 60},
         "resolved": None,
         "case": lambda: (request(NOW, NOW + timedelta(hours=2)), context()),
+    },
+    "max_consecutive_duration": {
+        "params": {"max_consecutive_minutes": 60},
+        "resolved": None,
+        "case": lambda: (
+            request(NOW, NOW + timedelta(minutes=30)),
+            context(
+                run=RunContext(
+                    start_at=NOW - timedelta(minutes=40),
+                    end_at=NOW + timedelta(minutes=30),
+                    booking_count=2,
+                )
+            ),
+        ),
     },
     "slot_alignment": {
         "params": {"slot_minutes": 30},

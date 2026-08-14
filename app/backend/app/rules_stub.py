@@ -231,7 +231,7 @@ class SpaceRuleConfig:
     knows generated types) is nothing but ORM (module docstring). Defaulted
     to ``REGISTRY.get`` so every existing caller that builds a
     ``SpaceRuleConfig`` by hand — every test in this suite among them — keeps
-    seeing only the eight hand-written types unless it opts in; the one
+    seeing only the nine hand-written types unless it opts in; the one
     caller that wants generated types too (``app.identity.service.space_rule_config``)
     passes ``app.rule_catalog.catalog.lookup`` explicitly. ``compare=False``
     and ``repr=False`` keep a bound method off this frozen dataclass's

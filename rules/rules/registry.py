@@ -14,7 +14,7 @@ hand-coding a third of it.
   by must not silently orphan every row that named it.
 * a **label** and a **description** — the description is prose for an admin choosing a rule, "what
   it refuses", written for someone who will never read the Python. Hand-written for each of the
-  eight types below; for a generated type it is authored by the model in a manifest call made after
+  nine types below; for a generated type it is authored by the model in a manifest call made after
   the generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
   prompt.
 * an **ordered parameter schema** (``RuleParam``) — rich enough to render a form field and to
@@ -28,8 +28,17 @@ hand-coding a third of it.
   admin-authored, because the order arbitrates which denial message a user sees (see "The canon"
   below), and that is a product decision made once per rule *type*, not a drag handle handed to
   whichever admin configures a Space last.
-* **``reads_history``** — whether the constructed rule consults ``context.history`` at all, so a
-  caller can skip loading a Space's booking history when nothing configured would read it.
+* **``reads_history``** — whether this rule type's **verdict** depends on history, so a caller can
+  skip loading a Space's booking history when nothing configured would read it. This is *not* the
+  same test as "does ``evaluate``'s own source mention ``context.history``" —
+  ``max_consecutive_duration`` is the type that pulls the two apart: its ``evaluate`` reads only
+  ``context.run``, but the run itself is resolved from history by the adapter before the rule ever
+  sees it (``RunContext``, ``.claude/rules/rule-engine.md``), so a Space configuring this rule and
+  nothing else that reads history *does* need the Space-wide history query run — without it the
+  run the rule receives is always the request alone and it silently never denies, the exact
+  silently-permissive failure this codebase refuses. ``reads_history`` is declared with that
+  meaning in mind for every type below, hand-written or generated: "a caller must supply history
+  for this rule's verdict to be correct," not "grep the source for the word history."
 * **``needs_local_resolution``** — whether the constructor needs values resolved against the Space's
   own timezone and the booking's own date, rather than the raw stored params. This is what keeps
   every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to convert
@@ -45,6 +54,9 @@ hand-coding a third of it.
   rows), so a second instance of either warrants no warning at all. ``slot_alignment`` is the same
   shape — a club running a finer grid on weekday evenings than on a lazy Sunday morning is scoping
   slot size by day exactly the way it already scopes hours — so it is ``is_single=False`` too.
+  ``max_consecutive_duration`` is ``is_single=False`` for the identical reason ``max_duration``
+  already is: a Space is free to cap consecutive play tighter on a busy evening than on a quiet
+  Sunday morning via two day-scoped rows, and that is the intended pattern for it too.
 * a **build function** from validated params (and, for a type with ``needs_local_resolution``, a
   second mapping of resolved values) to a constructed instance of the rule it names.
 
@@ -66,6 +78,7 @@ from typing import Any
 from .canon import (
     AvailabilityHoursRule,
     BookingHorizonRule,
+    MaxConsecutiveDurationRule,
     MaxDurationRule,
     MinDurationRule,
     NotInThePastRule,
@@ -86,7 +99,7 @@ __all__ = [
 class ParamKind(str, Enum):
     """The shape of one declared parameter.
 
-    Only two values, because only two are needed by the eight types registered below: a plain
+    Only two values, because only two are needed by the nine types registered below: a plain
     positive integer (a day count, a minute count, a booking count) and a local time of day
     presented as a clock but **stored as an integer** — minutes from local midnight (an opening or
     closing hour). ``LOCAL_TIME`` describes *presentation*, not storage: the value underneath it is
@@ -110,7 +123,7 @@ class RuleParam:
     those exists. One schema serves both, because two independently written ones would drift, and
     the drift would show up as a form whose own submission gets refused.
 
-    ``minimum`` is the only bound these eight types need: every integer parameter registered below
+    ``minimum`` is the only bound these nine types need: every integer parameter registered below
     must be positive (a zero-day horizon, a zero-minute duration or a zero-minute slot means
     nothing), and a ``LOCAL_TIME`` parameter's own ``minimum`` bounds only the single value it names
     in isolation (``opens_at_minutes >= 0``, ``closes_at_minutes >= 1``) — the pairwise relationship
@@ -152,7 +165,7 @@ class RuleType:
     """Everything a registered rule type declares about itself. See the module docstring.
 
     ``description`` is prose for an admin choosing a rule, never for a developer reading the
-    source — "what it refuses", in a sentence or two. Hand-written for each of the eight types
+    source — "what it refuses", in a sentence or two. Hand-written for each of the nine types
     below; for a generated type it is authored by the model in a manifest call made after the
     generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
     prompt, and validated non-empty the same way ``label`` and ``rule_type`` already are: a picker
@@ -213,6 +226,16 @@ def _build_max_duration(
     return MaxDurationRule(max_duration=timedelta(minutes=params["max_duration_minutes"]))
 
 
+def _build_max_consecutive_duration(
+    params: Mapping[str, Any], resolved: Mapping[str, Any] | None = None
+) -> BaseRule:
+    # Mirrors `_build_max_duration` exactly, bar the param name: the run's minutes, not the
+    # request's own.
+    return MaxConsecutiveDurationRule(
+        max_duration=timedelta(minutes=params["max_consecutive_minutes"])
+    )
+
+
 def _build_min_duration(
     params: Mapping[str, Any], resolved: Mapping[str, Any] | None = None
 ) -> BaseRule:
@@ -268,17 +291,21 @@ def _build_max_bookings_per_month(
 
 # --- the starter registry --------------------------------------------------------------------
 #
-# The eight predicates in force today (`rule-engine.md`, "The canon"). Priority reproduces that
-# section's documented assembled order exactly, spaced in multiples of 10 (plus one deliberate
-# multiple-of-5 insertion) rather than consecutive integers: `slot_alignment` sits at 35, strictly
+# The nine predicates in force today (`rule-engine.md`, "The canon"). Priority reproduces that
+# section's documented assembled order exactly, spaced in multiples of 10 (plus deliberate
+# multiple-of-5 insertions) rather than consecutive integers: `slot_alignment` sits at 35, strictly
 # between `max_duration` (30) and `availability_hours` (40) — beside `max_duration` rather than
 # with the date rules or the counting rules, because it is a remedy the user can apply within an
 # otherwise-bookable date and time, the same class of denial as duration and hours. `min_duration`
 # sits at 25, strictly between `booking_horizon` (20) and `max_duration` (30): the two duration
 # rules bound opposite directions and can never both deny the same request, so their relative
 # order never arbitrates copy, and 25 reads in the same "remedy within an otherwise bookable date"
-# band as `max_duration` and `slot_alignment` while leaving 26-29 free. The gaps either side of
-# both insertions are what let them land without renumbering anything else.
+# band as `max_duration` and `slot_alignment` while leaving 26-29 free. `max_consecutive_duration`
+# sits at 32, strictly between `max_duration` (30) and `slot_alignment` (35): a booking that breaks
+# both duration rules at once is more usefully told to shorten itself (fixable by editing only this
+# request) than to stop abutting a neighbour (fixable only by touching a booking that already
+# exists), so `max_duration` keeps first refusal. The gaps either side of every insertion are what
+# let it land without renumbering anything else.
 
 _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
@@ -338,7 +365,10 @@ _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
         rule_type="max_duration",
         label="Maximum duration",
-        description="Refuses a booking longer than the configured maximum duration.",
+        description="Refuses a single booking that is itself longer than the configured maximum "
+        "— its own start-to-end span, checked on its own, however far apart the member's other "
+        "bookings are. For a cap on back-to-back play across more than one booking, use Maximum "
+        "consecutive duration instead.",
         priority=30,
         params=(
             RuleParam(
@@ -354,6 +384,30 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         needs_local_resolution=False,
         is_single=False,
         build=_build_max_duration,
+    ),
+    RuleType(
+        rule_type="max_consecutive_duration",
+        label="Maximum consecutive duration",
+        description="Refuses a booking that would push a run of back-to-back bookings by the same "
+        "member — this one plus every booking it directly abuts, on any Resource in the Space — "
+        "past the configured maximum. Two one-hour bookings held one after another count as one "
+        "two-hour run; a gap between them keeps the two separate. For a cap on a single booking's "
+        "own length regardless of what it joins, use Maximum duration instead.",
+        priority=32,
+        params=(
+            RuleParam(
+                name="max_consecutive_minutes",
+                kind=ParamKind.INTEGER,
+                label="Maximum consecutive duration",
+                unit="minutes",
+                required=True,
+                minimum=1,
+            ),
+        ),
+        reads_history=True,
+        needs_local_resolution=False,
+        is_single=False,
+        build=_build_max_consecutive_duration,
     ),
     RuleType(
         rule_type="slot_alignment",

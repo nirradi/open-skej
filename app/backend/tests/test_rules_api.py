@@ -142,6 +142,7 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
         "booking_horizon",
         "min_duration",
         "max_duration",
+        "max_consecutive_duration",
         "slot_alignment",
         "availability_hours",
         "max_bookings_per_week",
@@ -165,6 +166,24 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
     assert max_duration_entry["is_single"] is False
     assert max_duration_entry["reads_history"] is False
 
+    max_consecutive_duration_entry = next(
+        entry for entry in body if entry["rule_type"] == "max_consecutive_duration"
+    )
+    assert max_consecutive_duration_entry["params"] == [
+        {
+            "name": "max_consecutive_minutes",
+            "kind": "integer",
+            "label": "Maximum consecutive duration",
+            "unit": "minutes",
+            "required": True,
+            "minimum": 1,
+        }
+    ]
+    assert max_consecutive_duration_entry["is_single"] is False
+    # This is the property the whole task turns on: `evaluate` never names `context.history`, but
+    # the run it reads is resolved from history, so the router must still be told to load it.
+    assert max_consecutive_duration_entry["reads_history"] is True
+
     min_duration_entry = next(entry for entry in body if entry["rule_type"] == "min_duration")
     assert min_duration_entry["params"] == [
         {
@@ -183,14 +202,14 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
     assert not_in_the_past_entry["params"] == []
 
 
-def test_rule_types_serve_a_description_for_all_eight_hand_written_types(
+def test_rule_types_serve_a_description_for_all_nine_hand_written_types(
     api: Api, alice: User
 ) -> None:
     """A picker where some entries explain themselves and others do not is worse than one where
     none do — every hand-written type carries a non-empty description over the wire."""
     body = api.as_user(alice).get("/rule-types").json()
 
-    assert len(body) == 8
+    assert len(body) == 9
     for entry in body:
         assert isinstance(entry["description"], str)
         assert entry["description"].strip()
@@ -206,7 +225,7 @@ def test_rule_types_is_reachable_by_any_authenticated_caller_with_no_space_at_al
     response = api.as_user(alice).get("/rule-types")
 
     assert response.status_code == 200
-    assert len(response.json()) == 8
+    assert len(response.json()) == 9
 
 
 # --- GET /spaces/{public_id}/rules --------------------------------------------

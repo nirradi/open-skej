@@ -281,29 +281,34 @@ tracker, not be served as a polite refusal.
 
 ## The canon
 
-`canon.py` holds six hand-written request-local rules: `NotInThePastRule()`,
+`canon.py` holds seven hand-written request-local rules: `NotInThePastRule()`,
 `BookingHorizonRule(days)`, `MinDurationRule(min_duration)`, `MaxDurationRule(max_duration)`,
-`SlotAlignmentRule(slot_minutes, anchor)`, `AvailabilityHoursRule(opens_at_minutes,
-closes_at_minutes)`. They are written by hand rather than generated — they are the reference the
-generation loop is measured against, and the worked example of the rule shape.
+`MaxConsecutiveDurationRule(max_duration)`, `SlotAlignmentRule(slot_minutes, anchor)`,
+`AvailabilityHoursRule(opens_at_minutes, closes_at_minutes)`. They are written by hand rather than
+generated — they are the reference the generation loop is measured against, and the worked example
+of the rule shape.
 
 **Parameters live on the instance, never as module constants.** A Space allowing 45-minute bookings
 and one allowing two hours are the same rule with different arguments, so per-Space configuration is
 a change to how the canon is built rather than a change to any rule. `DEFAULT_CANON` is the reference
-assembly of four of these six at their default values — `SlotAlignmentRule` and `MinDurationRule` are
-the two missing, for two unrelated reasons. `SlotAlignmentRule`'s `anchor` is a UTC *instant* tied to
-a specific date rather than a literal that means the same thing on every date it is asked about; a
-value baked into a module-level constant at import time would be correct for the day it was written
-and silently wrong every day after, the same cached-offset mistake `CLAUDE.md` warns against
-elsewhere. `MinDurationRule` has no such problem — a minimum duration is exactly as date-independent
-as a maximum one — and is excluded instead because `DEFAULT_CANON` is the fixed reference the
-generation loop is measured against and `app/e2e/tests/03-sad-path.spec.ts` asserts against, and
-adding a floor to it would change behaviour those tests depend on; it is fully registered and
-constructible like every other type, simply not one of the four the reference assembly happens to
-hold today. The canon the API actually runs is built per Space (see Backend integration), where a
-type with no matching row is absent from the canon entirely and `SlotAlignmentRule` is constructed
-fresh, with a freshly resolved `anchor`, for every booking. `NotInThePastRule` is the only one always
-present — you can never book the past, whatever a Space configures.
+assembly of four of these seven at their default values — `SlotAlignmentRule`, `MinDurationRule` and
+`MaxConsecutiveDurationRule` are the three missing, for as many different reasons.
+`SlotAlignmentRule`'s `anchor` is a UTC *instant* tied to a specific date rather than a literal that
+means the same thing on every date it is asked about; a value baked into a module-level constant at
+import time would be correct for the day it was written and silently wrong every day after, the same
+cached-offset mistake `CLAUDE.md` warns against elsewhere. `MinDurationRule` has no such problem — a
+minimum duration is exactly as date-independent as a maximum one — and is excluded instead because
+`DEFAULT_CANON` is the fixed reference the generation loop is measured against and
+`app/e2e/tests/03-sad-path.spec.ts` asserts against, and adding a floor to it would change behaviour
+those tests depend on; it is fully registered and constructible like every other type, simply not
+one of the four the reference assembly happens to hold today. `MaxConsecutiveDurationRule` is
+excluded for the same reason every rule type added since Stream 6 has stayed out of it: `DEFAULT_CANON`
+is frozen at the four types it already asserts against, and adding a fifth would change what those
+assertions cover without anyone asking them to. The canon the API actually runs is built per Space
+(see Backend integration), where a type with no matching row is absent from the canon entirely and
+`SlotAlignmentRule` is constructed fresh, with a freshly resolved `anchor`, for every booking.
+`NotInThePastRule` is the only one always present — you can never book the past, whatever a Space
+configures.
 
 **`MinDurationRule` denies a booking whose own `request.duration` is shorter than `min_duration`**,
 the bound inclusive exactly as `MaxDurationRule`'s is. It judges the request's own span only, never a
@@ -313,6 +318,31 @@ minimum and is never judged against the run's own length. A rule that needs to j
 than the request reads `context.run.duration`, a later addition to this contract; nothing in this
 rule fills that gap, because the two questions have different remedies and this one's only remedy is
 "book longer".
+
+**`MaxConsecutiveDurationRule` denies when `context.run.duration` exceeds `max_duration`** —
+the contiguous, cross-Resource span of back-to-back bookings the request joins (`RunContext`, "It
+resolves the run" below), never `request.duration`. This is the rule that closes
+`ops/pending/bugs/max-duration-cannon.md`: a Space configuring "max 2 hours" meaning *one session*
+was already served by `MaxDurationRule`, which reads the request's own span and has no way to see
+anything either side of it; a member booking 17:00-18:00 and then, separately, 18:00-19:00 passed
+that rule twice and walked away with four hours of court time under a rule meant to cap two. **A
+rule type declares which span it judges** — `request.duration` is one booking, `context.run.duration`
+is the contiguous session it sits in — and that is the whole axis this rule opts into: a Space
+configures `max_duration`, `max_consecutive_duration`, both, or neither, and configuring the new one
+never silently changes what the old one already enforces, since a run always contains its own
+request and an inclusive bound on the run can never pass what the identical bound on the request
+alone would already have denied. The bound is inclusive, the same convention every duration rule in
+this canon shares. Priority 32, between `max_duration` (30) and `slot_alignment` (35): a booking
+that breaks both duration rules at once is more usefully told to shorten itself — fixable by editing
+only this request — than to stop abutting a neighbour, which is fixable only by touching a booking
+that already exists, so `max_duration` keeps first refusal. **`reads_history=True`, though
+`evaluate` never names `context.history`** — see "It resolves the run" and the registry paragraph
+below for why that is still the correct flag, not an inconsistency. Its denial copy states two
+durations, the configured cap and what the run would come to, and is worded around *consecutive
+play* rather than the booking's own length precisely because a one-hour request that gets denied for
+joining an existing run must never read as "your one-hour booking is too long" — that would be false,
+and this codebase's denial copy is contract (`rules/tests/test_denial_copy.py`, "Denial copy is
+contract" below).
 
 **`SlotAlignmentRule` denies a booking whose `start_at` or `end_at` is not on the grid** defined by
 `slot_minutes` and an `anchor` UTC instant — both bounds are checked, so an aligned start with an
@@ -328,18 +358,31 @@ this document warns about elsewhere (the grid is advisory, the engine is the onl
 counts).
 
 **A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the
-eight classes above a runtime identity separate from being importable Python. A registered type
-declares: a **stable string id** (`not_in_the_past`, `min_duration`, `max_duration`, `slot_alignment`,
-`availability_hours`, …) that a future `space_rules.rule_type` column stores — never the Python class
+nine classes above a runtime identity separate from being importable Python. A registered type
+declares: a **stable string id** (`not_in_the_past`, `min_duration`, `max_duration`,
+`max_consecutive_duration`, `slot_alignment`, `availability_hours`, …) that a future
+`space_rules.rule_type` column stores — never the Python class
 name, since renaming the class must not silently orphan every row that named it; a **label** and a
 **description** — the description is prose for an admin choosing between rule types, "what it
 refuses", never a restatement of the code; an **ordered parameter schema**, one `RuleParam` per
 constructor argument (name, kind, label, unit, required, a minimum), rich enough to render an admin
 form field and to validate a request body's params against — one schema for both jobs, because two
 independently written ones would drift, and the drift would show up as a form whose own submission
-gets refused; a declared **priority**; **`reads_history`**,
-true only for the two counting rules, so a caller can skip the Space-wide history query when nothing
-configured would read it; **`needs_local_resolution`**, true for `slot_alignment`
+gets refused; a declared **priority**; **`reads_history`**, true for the two counting rules and
+`max_consecutive_duration`, so a caller can skip the Space-wide history query when nothing
+configured would read it. The flag means "this rule type's **verdict** depends on history", not "its
+`evaluate` names `context.history`" — `max_consecutive_duration` is the type that pulls the two
+apart, since its own `evaluate` reads only `context.run`, and it is `True` anyway because the run
+itself is resolved from history before the rule ever runs ("It resolves the run" below); a Space
+configuring that rule and nothing else that reads history must still make the router run the
+Space-wide history query, or the run the rule receives is always the request alone and it silently
+never denies — the exact silently-permissive failure this codebase refuses. This widens what 7.7's
+derivation of the flag checks for a *generated* type (`generation/manifest.py`,
+`_mentions_history`): that check still only looks for `context.history` in the source and will
+under-report `True` for a generated rule that reads `context.run` the way this one does — a real
+gap, left open deliberately, because teaching the Generator and its manifest call about the run is
+task 8.8's job, not this one's; this paragraph only names the gap so it is not rediscovered as a
+surprise. **`needs_local_resolution`**, true for `slot_alignment`
 and both counting rules — the three whose constructor needs values resolved
 against the Space's own zone and the booking's own date rather than the raw stored params, which is
 what keeps every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to
@@ -351,7 +394,8 @@ handed a `LocalFrame`. **`is_single`**, advisory only and never a uniqueness con
 engine's flat AND makes two instances of one type coherent — they AND to the stricter, which is true
 for every type whether or not it is flagged. For a type like `max_bookings_per_week` a second
 instance is almost certainly not what an admin meant, so it is `is_single`; `availability_hours`,
-`max_duration`, `min_duration` and `slot_alignment` are deliberately **not**, because scoping each
+`max_duration`, `min_duration`, `max_consecutive_duration` and `slot_alignment` are deliberately
+**not**, because scoping each
 instance to a different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as
 two `availability_hours` rows, or a finer grid on weekday evenings than on a Sunday morning — is the
 intended way to use them, not a mistake to warn about. And a **build function** from validated params
@@ -384,30 +428,38 @@ against a history nobody queried, silently permissive in exactly the way this co
 
 **Rule order comes from a type's declared priority, never from row order, insertion order, or an
 admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of
-the same type. Priorities are spaced in multiples of ten rather than assigned consecutively (`25` is
-the one deliberate exception, `min_duration`'s own — see below), so a later type can be inserted
-between two existing ones without renumbering the rest of the registry.
+the same type. Priorities are spaced in multiples of ten rather than assigned consecutively (`25`
+and `32` are the two deliberate exceptions, `min_duration`'s own and `max_consecutive_duration`'s —
+see below), so a later type can be inserted between two existing ones without renumbering the rest
+of the registry.
 
 **The order a canon assembled this way runs in reproduces `(NotInThePast, BookingHorizon,
-MinDuration, MaxDuration, SlotAlignment, AvailabilityHours, MaxBookingsPerWeek, MaxBookingsPerMonth)`
-because that is what each type's declared priority sorts to, and it arbitrates user-facing copy.**
-The controller is fail-fast, so the first rule to deny decides the single message shown when a
-request breaks several rules at once. The date rules run first because they reject a booking on
-*when* it is, which no shortening or shifting within the day can fix; telling someone to trim a
-three-hour booking that sits 90 days out sends them to fix the one thing that is not the problem.
-Duration (both directions), slot alignment and availability hours are all remedies the user can apply
-to an otherwise bookable date and time — lengthen it or shorten it, line it up with the grid, pick
-another time — so they follow, in that order: `min_duration` sits beside `max_duration` rather than
-with the date rules above it, at priority 25 between `booking_horizon` (20) and `max_duration` (30),
-because the two duration rules bound opposite directions and can never both deny the same request —
-their relative order never arbitrates copy — and 25 leaves 26–29 free for a later insertion, the same
-spacing discipline that let `slot_alignment` land at 35 without moving `availability_hours` off 40.
-Slot alignment itself sits beside duration rather than with the date rules above it or the counting
-rules below, because "line up with the grid" is exactly as fixable-within-the-date as "shorten it" or
-"pick another time" is. Past and horizon are mutually exclusive and never arbitrate against each
-other. **The counting rules come last** because a frequency cap is the one denial no change to *this*
-request can fix — no shorter, earlier or later booking clears it — so every rule naming a fixable
-problem gets first refusal.
+MinDuration, MaxDuration, MaxConsecutiveDuration, SlotAlignment, AvailabilityHours,
+MaxBookingsPerWeek, MaxBookingsPerMonth)` because that is what each type's declared priority sorts
+to, and it arbitrates user-facing copy.** The controller is fail-fast, so the first rule to deny
+decides the single message shown when a request breaks several rules at once. The date rules run
+first because they reject a booking on *when* it is, which no shortening or shifting within the day
+can fix; telling someone to trim a three-hour booking that sits 90 days out sends them to fix the one
+thing that is not the problem. Duration (all three flavours), slot alignment and availability hours
+are all remedies the user can apply to an otherwise bookable date and time — lengthen it or shorten
+it, stop abutting a neighbour, line it up with the grid, pick another time — so they follow, in that
+order: `min_duration` sits beside `max_duration` rather than with the date rules above it, at
+priority 25 between `booking_horizon` (20) and `max_duration` (30), because the two duration rules
+bound opposite directions and can never both deny the same request — their relative order never
+arbitrates copy — and 25 leaves 26–29 free for a later insertion, the same spacing discipline that
+let `max_consecutive_duration` land at 32 between `max_duration` and `slot_alignment` without moving
+either, and `slot_alignment` land at 35 without moving `availability_hours` off 40.
+`max_consecutive_duration` sits **after** `max_duration` rather than before it, unlike `min_duration`,
+because the two do not bound opposite directions the way `min_duration`/`max_duration` do — a
+booking can break both at once, and shortening the request is a remedy `max_duration`'s copy can
+name that `max_consecutive_duration`'s cannot, so the rule naming the fixable-by-editing-this-request
+problem gets first refusal over the one whose fix means touching a booking that already exists.
+Slot alignment itself sits beside the duration rules rather than with the date rules above it or the
+counting rules below, because "line up with the grid" is exactly as fixable-within-the-date as
+"shorten it" or "pick another time" is. Past and horizon are mutually exclusive and never arbitrate
+against each other. **The counting rules come last** because a frequency cap is the one denial no
+change to *this* request can fix — no shorter, earlier or later booking clears it — so every rule
+naming a fixable problem gets first refusal.
 
 **Denial copy is contract, not wording.** `app/e2e/tests/03-sad-path.spec.ts` asserts the
 max-duration message as a full-string match and reproduces the singular/plural and `" and "` join of
