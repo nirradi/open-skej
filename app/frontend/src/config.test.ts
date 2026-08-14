@@ -23,6 +23,7 @@ import {
   isSlotOutOfHours,
   slotStart,
   slotStartMinutes,
+  slotsPerClick,
   slotsPerDay,
   slotsPerDayFor,
   uniformWeekSchedule,
@@ -228,6 +229,34 @@ describe('isSlotOutOfHours', () => {
     const config = { ...DEFAULT, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }
     expect(isSlotOutOfHours(18, config)).toBe(true)
     expect(isSlotOutOfHours(19, config)).toBe(false)
+  })
+
+  it('greys a slot whose row alone is in hours but whose widened click unit would cross closing', () => {
+    // 16:30-17:00 (slot 33) is bookable on its own — this is the same row
+    // "greys everything from closing onward" above proves is *not*
+    // out-of-hours at slotMinutes width. With a 60-minute minimum (two
+    // 30-minute slots), the click it anchors resolves to 16:30-17:30, which
+    // runs a full 30 minutes past the 17:00 close the backend's
+    // `AvailabilityHoursRule` enforces — offering it would be exactly the
+    // denial this task exists to prevent, just via the hours rule instead of
+    // the minimum-duration one.
+    const config: CalendarConfig = { ...NINE_TO_FIVE, minDurationMinutes: 60 }
+    expect(slotsPerClick(config)).toBe(2)
+    expect(isSlotOutOfHours(33, config)).toBe(true)
+  })
+
+  it('leaves that same row bookable when no minimum is configured', () => {
+    // The negative control: nothing about slot 33 itself changed — only
+    // configuring a minimum that widens its click unit past closing does.
+    expect(isSlotOutOfHours(33, NINE_TO_FIVE)).toBe(false)
+  })
+
+  it('does not grey a row whose widened click unit still lands inside hours', () => {
+    // 09:00-09:30 (slot 18) widened by the same 60-minute minimum resolves
+    // to 09:00-10:00, well inside 09:00-17:00 — the minimum alone must not
+    // grey a row that was always going to be fine.
+    const config: CalendarConfig = { ...NINE_TO_FIVE, minDurationMinutes: 60 }
+    expect(isSlotOutOfHours(18, config)).toBe(false)
   })
 })
 

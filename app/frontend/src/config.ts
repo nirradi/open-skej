@@ -188,20 +188,42 @@ export function formatSlotLabel(index: number, config: CalendarConfig = calendar
 }
 
 /**
- * Whether slot `index` falls outside the Space's operating hours.
+ * How many slots one click starting at `config`'s slot size consumes: the
+ * smallest whole number of slots whose combined length reaches
+ * `config.minDurationMinutes`, or exactly one when no minimum governs the
+ * date (see the module docblock's "the click unit honours the minimum
+ * duration"). A pure function of `minDurationMinutes` and `slotMinutes` —
+ * exported so `isSlotOutOfHours` here and `slotInterval`
+ * (`calendar/week.ts`) share one definition of what one click means, rather
+ * than each rounding it up on its own and risking the two drifting apart.
+ */
+export function slotsPerClick(config: CalendarConfig = calendarConfig): number {
+  return config.minDurationMinutes === null
+    ? 1
+    : Math.ceil(config.minDurationMinutes / config.slotMinutes)
+}
+
+/**
+ * Whether a click starting at slot `index` falls outside the Space's
+ * operating hours.
  *
- * A slot counts as out-of-hours unless it sits **entirely** within
- * `[openMinutes, closeMinutes)` — the same "never offer what the server will
- * refuse" reasoning as everywhere else in the grid: a slot straddling the
- * opening or closing instant contains a minute the backend's
- * `AvailabilityHoursRule` would deny, so it reads as blocked rather than
- * bookable. With both bounds `null` (a Space with no hours restriction),
- * nothing is ever out-of-hours.
+ * A click counts as out-of-hours unless the **whole click unit** —
+ * `slotsPerClick(config)` slots, not just the one row `index` names — sits
+ * entirely within `[openMinutes, closeMinutes)`. This is the same "never
+ * offer what the server will refuse" reasoning as everywhere else in the
+ * grid, applied to the minimum duration's own widening: a click whose row is
+ * itself inside the window but whose resolved end runs past closing
+ * contains a minute the backend's `AvailabilityHoursRule` would deny just as
+ * surely as a single slot straddling the boundary does, so it reads as
+ * blocked rather than bookable. With no minimum configured,
+ * `slotsPerClick` is 1 and this is exactly the single-slot check it always
+ * was. With both bounds `null` (a Space with no hours restriction), nothing
+ * is ever out-of-hours.
  */
 export function isSlotOutOfHours(index: number, config: CalendarConfig = calendarConfig): boolean {
   if (config.openMinutes === null && config.closeMinutes === null) return false
   const start = slotStartMinutes(index, config)
-  const end = start + config.slotMinutes
+  const end = start + slotsPerClick(config) * config.slotMinutes
   const open = config.openMinutes ?? 0
   const close = config.closeMinutes ?? MINUTES_PER_DAY
   return start < open || end > close
