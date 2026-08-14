@@ -322,6 +322,34 @@ def test_system_prompt_forbids_absolute_times_in_deny_copy():
     assert "closes at 17:00" in SYSTEM_PROMPT
 
 
+def test_system_prompt_declares_context_run_on_the_contract():
+    """`context.run` has to be named where every other `Context` field is, or a model has no way
+    to know it exists at all — the free-name list alone does not say it is reachable as an
+    attribute.
+    """
+    assert "context.run" in SYSTEM_PROMPT.split("## Hard constraints", 1)[0]
+
+
+def test_system_prompt_teaches_the_run_versus_the_request():
+    """Task 8.8: `request.duration` is one booking, `context.run.duration` is the back-to-back
+    session across every Resource, and the choice is the rule author's, not a default
+    (`ops/pending/bugs/generated-rules-underparameterized.md`'s peak-hours rule is what picking
+    wrong looks like).
+    """
+    assert "A RULE DECLARES WHICH SPAN IT JUDGES" in SYSTEM_PROMPT
+    assert "context.run.duration" in SYSTEM_PROMPT
+    assert "context.run.start_at" in SYSTEM_PROMPT
+    assert "context.run.booking_count" in SYSTEM_PROMPT
+    assert "in a row" in SYSTEM_PROMPT
+    assert "back to back" in SYSTEM_PROMPT
+
+
+def test_style_section_has_a_worked_example_reading_context_run():
+    style = SYSTEM_PROMPT.split("## Style", 1)[1]
+    assert "context.run.duration" in style
+    assert "class MaxConsecutivePlayRule(BaseRule):" in style
+
+
 # --------------------------------------------------------------------------------------------
 # ClaudeCliClient — argv and payload parsing, never the binary
 # --------------------------------------------------------------------------------------------

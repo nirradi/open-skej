@@ -232,14 +232,20 @@ def _string_field(fields: dict[str, Any], name: str, *, payload: str) -> str:
 
 
 def _mentions_history(source: str) -> bool:
-    """Whether ``source`` looks like it reads booking history at all.
+    """Whether ``source`` looks like it reads booking history at all — directly via
+    ``context.history``, or indirectly via ``context.run``, which the adapter resolves from history
+    before the rule ever runs (``RunContext``, ``.claude/rules/rule-engine.md``, "It resolves the
+    run"). A rule naming only ``context.run`` never mentions "history" in its own source, so
+    checking for that word alone under-reports exactly the rules task 8.8 exists to cover — see
+    ``rules/rules/registry.py``'s module docstring on what ``reads_history`` means for
+    ``max_consecutive_duration``, the hand-written rule in the identical shape.
 
     A substring check, not an AST walk, and deliberately over-inclusive: a false positive costs one
     history query a rule then ignores, while a false negative hands a counting rule an empty
     history and makes it silently permissive — the one direction this codebase never accepts. When
     the cheap check is wrong in the safe direction, take the cheap check.
     """
-    return "history" in source
+    return "history" in source or "context.run" in source
 
 
 def _build_param(entry: Any, *, payload: str) -> RuleParam:

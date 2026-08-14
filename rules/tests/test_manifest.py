@@ -72,6 +72,23 @@ READS_HISTORY_RULE = textwrap.dedent("""\
     """)
 
 
+#: A verified candidate that reads only `context.run`, never `context.history` — the false
+#: negative task 8.8 closes. Its run is resolved from history before it ever runs
+#: (`RunContext`, `.claude/rules/rule-engine.md`, "It resolves the run"), the identical shape
+#: `max_consecutive_duration` is registered with (`rules/rules/registry.py`'s module docstring).
+READS_RUN_RULE = textwrap.dedent("""\
+    class MaxConsecutivePlayRule(BaseRule):
+        def __init__(self, max_minutes):
+            self.max_minutes = max_minutes
+
+        def evaluate(self, request, context):
+            run_minutes = context.run.duration.total_seconds() / 60
+            if run_minutes > self.max_minutes:
+                return RuleResult.deny("Too much play back to back.")
+            return RuleResult.allow()
+    """)
+
+
 def _manifest_json(**overrides) -> str:
     payload = {
         "label": "Maximum duration",
@@ -187,6 +204,34 @@ def test_reads_history_true_on_a_source_that_does_touch_history_stays_true():
                         "kind": "integer",
                         "label": "Max bookings",
                         "unit": "bookings",
+                        "required": True,
+                        "minimum": 1,
+                    }
+                ],
+                reads_history=True,
+            )
+        ),
+    )
+    assert manifest.reads_history is True
+
+
+def test_reads_history_true_on_a_source_that_reads_only_context_run_stays_true():
+    """The gap task 8.8 closes: a rule reading only `context.run` never spells "history" anywhere
+    in its own source, so the old substring check would zero out an honest `true` claim from the
+    model and hand the rule an empty history — silently permissive, the direction this codebase
+    never accepts (`rules/rules/registry.py`'s module docstring on `max_consecutive_duration`).
+    """
+    manifest = generate_manifest(
+        READS_RUN_RULE,
+        "no more than two hours of play in a row",
+        client=FakeClient(
+            _manifest_json(
+                params=[
+                    {
+                        "name": "max_minutes",
+                        "kind": "integer",
+                        "label": "Max consecutive minutes",
+                        "unit": "minutes",
                         "required": True,
                         "minimum": 1,
                     }

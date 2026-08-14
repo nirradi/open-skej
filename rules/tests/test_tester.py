@@ -384,6 +384,16 @@ def test_system_prompt_demands_a_local_frame_disagreement_case():
     assert "weekday=1, start_minutes=540" in SYSTEM_PROMPT
 
 
+def test_system_prompt_demands_a_run_versus_request_case():
+    """A suite that never builds a run wider than the request cannot tell a rule reading
+    `context.run` apart from one reading `request.duration` — both pass every test that never
+    separates the two (task 8.8, ``max-duration-cannon.md``).
+    """
+    assert "THE CASE WHERE THE REQUEST ALONE WOULD PASS AND THE RUN DOES NOT" in SYSTEM_PROMPT
+    assert "AND THE MIRROR, IF THE RULE DOES NOT READ `context.run`" in SYSTEM_PROMPT
+    assert "must never be denied by a long run sitting around it" in SYSTEM_PROMPT
+
+
 def test_build_test_prompt_frames_the_constraint_as_intent_not_behaviour():
     prompt = build_test_prompt(CANDIDATE, "max 2 hours")
 

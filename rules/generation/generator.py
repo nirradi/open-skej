@@ -60,6 +60,8 @@ Write a class that inherits from `BaseRule` and implements exactly one method:
     context.calendar.week_starts_on Weekday, an IntEnum numbered like date.weekday(): MONDAY = 0
     context.history.bookings        tuple of BookingRecord
     context.local                   LocalFrame, the booking's local calendar (see constraint 4)
+    context.run                     RunContext, the back-to-back session this booking joins (see \
+constraint 8)
 
 Each BookingRecord has user_id, resource_id, start_at, end_at. It has NO status field.
 
@@ -135,6 +137,15 @@ instead: a duration, a count, a number of days. If the person needs the specific
 to look — the calendar shows this Space's hours in its own clock. "Bookings can be at most 2 hours \
 long" is fine; "closes at 17:00" is not, even though both are true.
 
+8. A RULE DECLARES WHICH SPAN IT JUDGES — CHOOSE ON PURPOSE. `request.duration` is this one \
+booking; it is what "no session longer than an hour" means. `context.run.duration` is the \
+contiguous, back-to-back session this booking joins **across every Resource**, with this request \
+already folded in; it is what "no more than two hours of play in a row" means, and almost always \
+what "no more than one hour of peak time" means too. `context.run.start_at`, `context.run.end_at` \
+and `context.run.booking_count` describe that same session. Neither span is a default — a \
+constraint that says "in a row", "back to back", or "consecutively", or that caps a total a member \
+could trivially split into two separate bookings, wants the run.
+
 ## Style
 
 Write it the way this hand-written rule is written — this is the reference:
@@ -170,6 +181,24 @@ class NotBeforeRule(BaseRule):
             return RuleResult.deny(
                 "That is earlier than this space opens. Please check the calendar for "
                 "the opening hours and pick a later time."
+            )
+        return RuleResult.allow()
+
+A rule about consecutive play (constraint 8) reads `context.run`, never `request.duration`:
+
+class MaxConsecutivePlayRule(BaseRule):
+    \"\"\"A back-to-back run of bookings, across every Resource, may not exceed ``max_run``.\"\"\"
+
+    def __init__(self, max_run):
+        if max_run <= timedelta(0):
+            raise ValueError(f"max_run must be positive; got {max_run!r}")
+        self.max_run = max_run
+
+    def evaluate(self, request, context):
+        if context.run.duration > self.max_run:
+            return RuleResult.deny(
+                "That would put too much play back to back. Please leave a gap before or "
+                "after it, or shorten it."
             )
         return RuleResult.allow()
 
