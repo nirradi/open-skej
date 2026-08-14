@@ -226,7 +226,7 @@ via `archived_at`, matching the Space's own end-state.
 
 The rule types the AI generation loop has authored are rows in `generated_rule_types`, part of this
 production schema. A generated type is **not scoped to a Space**: it joins the catalog every Space
-can pick an instance from, exactly as the eight hand-written types in `rules.REGISTRY` do. Being
+can pick an instance from, exactly as the eleven hand-written types in `rules.REGISTRY` do. Being
 available to a Space is not the same as being enforced on it — nothing is enforced until an admin
 adds a `space_rules` instance through the rules API above, and *that* act, not the generation, is the
 human gate.

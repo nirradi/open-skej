@@ -220,12 +220,15 @@ assembles the canon per Space** from that Space's own `space_rules` rows rather 
 only when the Space's canon includes a counting rule: the router loads the user's bookings across
 every Resource in the Space, capped to `history_window`, and passes them in; with no counting rule
 configured, history stays empty and no query runs. **It resolves the counting windows** in the
-Space's own zone — the local week and local calendar month containing the booking, converted to UTC
-instants and handed to `MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule`, which no longer derive
-them. **It resolves the `LocalFrame`** every context carries — `_build_local_frame`, the general
-form of the per-type resolution above. Those three types get bespoke resolved parameters only because
-they were written before the frame existed; a type nobody hand-wrote has no such case and can
-express a local day through the frame or not at all. Every bound in it comes from
+Space's own zone — the local day, week and local calendar month containing the booking, converted
+to UTC instants and handed to `MaxBookingsPerDayRule` / `MaxBookingsPerWeekRule` /
+`MaxBookingsPerMonthRule`, which derive none of them, and the local day alone to
+`MaxDurationPerDayRule` (task 8.7), which needs no tolerance since it never merges (see
+`frequency.py`'s own section below). **It resolves the `LocalFrame`** every context carries —
+`_build_local_frame`, the general form of the per-type resolution above. Those five types get
+bespoke resolved parameters only because they were written before the frame existed; a type nobody
+hand-wrote has no such case and can express a local day through the frame or not at all. Every
+bound in it comes from
 `_local_midnight_utc` and nothing else, and `_local_day_bounds` takes the *next date's* local
 midnight rather than adding 24 hours, for the reason `_local_week_bounds` already gives one line
 down. `start_minutes` / `end_minutes` are the elapsed minutes from that local midnight, derived from
@@ -245,9 +248,11 @@ so a user can be denied by a booking two hops away, and that is intended. When h
 only span in the sweep is the request's own, so the run is the request alone with
 `booking_count=1`; that is the correct answer, not a degraded one. The sweep itself is
 `rules.spans.merge_adjoining_spans` (task 8.6 moved it out of this module and into the engine
-package), because `_resolve_run` is no longer its only caller: `MaxBookingsPerWeekRule` /
-`MaxBookingsPerMonthRule` (below) call it themselves too, on `request` and `context.history.bookings`
-together, at evaluate time.
+package), because `_resolve_run` is no longer its only caller: `MaxBookingsPerDayRule` /
+`MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule` (below) call it themselves too, on `request`
+and `context.history.bookings` together, at evaluate time. `MaxDurationPerDayRule` (task 8.7) is
+the one exception — it reads the same raw `context.history.bookings` but never calls
+`merge_adjoining_spans`, so it takes no tolerance at all (see `frequency.py`'s own section below).
 
 **The gap tolerance is that date's own resolved minimum duration, zero when no `min_duration` row
 governs the date — not exact abutment, even though the run's own design note (`max-duration-cannon.md`,
@@ -362,7 +367,7 @@ this document warns about elsewhere (the grid is advisory, the engine is the onl
 counts).
 
 **A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the
-nine classes above a runtime identity separate from being importable Python. A registered type
+eleven classes above a runtime identity separate from being importable Python. A registered type
 declares: a **stable string id** (`not_in_the_past`, `min_duration`, `max_duration`,
 `max_consecutive_duration`, `slot_alignment`, `availability_hours`, …) that a future
 `space_rules.rule_type` column stores — never the Python class
@@ -372,7 +377,8 @@ refuses", never a restatement of the code; an **ordered parameter schema**, one 
 constructor argument (name, kind, label, unit, required, a minimum), rich enough to render an admin
 form field and to validate a request body's params against — one schema for both jobs, because two
 independently written ones would drift, and the drift would show up as a form whose own submission
-gets refused; a declared **priority**; **`reads_history`**, true for the two counting rules and
+gets refused; a declared **priority**; **`reads_history`**, true for the three counting rules
+(`max_bookings_per_day` / `_week` / `_month`), `max_duration_per_day`, and
 `max_consecutive_duration`, so a caller can skip the Space-wide history query when nothing
 configured would read it. The flag means "this rule type's **verdict** depends on history", not "its
 `evaluate` names `context.history`" — `max_consecutive_duration` is the type that pulls the two
@@ -386,18 +392,19 @@ derivation of the flag checks for a *generated* type (`generation/manifest.py`,
 under-report `True` for a generated rule that reads `context.run` the way this one does — a real
 gap, left open deliberately, because teaching the Generator and its manifest call about the run is
 task 8.8's job, not this one's; this paragraph only names the gap so it is not rediscovered as a
-surprise. **`needs_local_resolution`**, true for `slot_alignment`
-and both counting rules — the three whose constructor needs values resolved
-against the Space's own zone and the booking's own date rather than the raw stored params, which is
-what keeps every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to
-convert for itself. `availability_hours` is deliberately **not** one of them any more: it stores
+surprise. **`needs_local_resolution`**, true for `slot_alignment` and the four history-reading
+rules from `frequency.py` — the five whose constructor needs values resolved against the Space's
+own zone and the booking's own date rather than the raw stored params, which is what keeps every
+local-to-UTC conversion at the adapter boundary instead of inviting a rule type to convert for
+itself. `availability_hours` is deliberately **not** one of them any more: it stores
 minutes from the venue's own local midnight directly and reads them off `context.local` inside its
 own `evaluate`, so its `build` function needs nothing resolved for it at all — the same local
 question every other type still needs an adapter to answer for it, this one answers for itself once
 handed a `LocalFrame`. **`is_single`**, advisory only and never a uniqueness constraint, since the
 engine's flat AND makes two instances of one type coherent — they AND to the stricter, which is true
-for every type whether or not it is flagged. For a type like `max_bookings_per_week` a second
-instance is almost certainly not what an admin meant, so it is `is_single`; `availability_hours`,
+for every type whether or not it is flagged. For a type like `max_bookings_per_week` (or its daily
+and monthly siblings, or `max_duration_per_day`) a second instance is almost certainly not what an
+admin meant, so it is `is_single`; `availability_hours`,
 `max_duration`, `min_duration`, `max_consecutive_duration` and `slot_alignment` are deliberately
 **not**, because scoping each
 instance to a different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as
@@ -439,31 +446,38 @@ of the registry.
 
 **The order a canon assembled this way runs in reproduces `(NotInThePast, BookingHorizon,
 MinDuration, MaxDuration, MaxConsecutiveDuration, SlotAlignment, AvailabilityHours,
-MaxBookingsPerWeek, MaxBookingsPerMonth)` because that is what each type's declared priority sorts
-to, and it arbitrates user-facing copy.** The controller is fail-fast, so the first rule to deny
-decides the single message shown when a request breaks several rules at once. The date rules run
-first because they reject a booking on *when* it is, which no shortening or shifting within the day
-can fix; telling someone to trim a three-hour booking that sits 90 days out sends them to fix the one
-thing that is not the problem. Duration (all three flavours), slot alignment and availability hours
-are all remedies the user can apply to an otherwise bookable date and time — lengthen it or shorten
-it, stop abutting a neighbour, line it up with the grid, pick another time — so they follow, in that
-order: `min_duration` sits beside `max_duration` rather than with the date rules above it, at
-priority 25 between `booking_horizon` (20) and `max_duration` (30), because the two duration rules
-bound opposite directions and can never both deny the same request — their relative order never
-arbitrates copy — and 25 leaves 26–29 free for a later insertion, the same spacing discipline that
-let `max_consecutive_duration` land at 32 between `max_duration` and `slot_alignment` without moving
-either, and `slot_alignment` land at 35 without moving `availability_hours` off 40.
-`max_consecutive_duration` sits **after** `max_duration` rather than before it, unlike `min_duration`,
-because the two do not bound opposite directions the way `min_duration`/`max_duration` do — a
-booking can break both at once, and shortening the request is a remedy `max_duration`'s copy can
-name that `max_consecutive_duration`'s cannot, so the rule naming the fixable-by-editing-this-request
-problem gets first refusal over the one whose fix means touching a booking that already exists.
-Slot alignment itself sits beside the duration rules rather than with the date rules above it or the
-counting rules below, because "line up with the grid" is exactly as fixable-within-the-date as
-"shorten it" or "pick another time" is. Past and horizon are mutually exclusive and never arbitrate
-against each other. **The counting rules come last** because a frequency cap is the one denial no
-change to *this* request can fix — no shorter, earlier or later booking clears it — so every rule
-naming a fixable problem gets first refusal.
+MaxDurationPerDay, MaxBookingsPerDay, MaxBookingsPerWeek, MaxBookingsPerMonth)` because that is what
+each type's declared priority sorts to, and it arbitrates user-facing copy.** The controller is
+fail-fast, so the first rule to deny decides the single message shown when a request breaks several
+rules at once. The date rules run first because they reject a booking on *when* it is, which no
+shortening or shifting within the day can fix; telling someone to trim a three-hour booking that
+sits 90 days out sends them to fix the one thing that is not the problem. Duration (all three
+flavours), slot alignment and availability hours are all remedies the user can apply to an otherwise
+bookable date and time — lengthen it or shorten it, stop abutting a neighbour, line it up with the
+grid, pick another time — so they follow, in that order: `min_duration` sits beside `max_duration`
+rather than with the date rules above it, at priority 25 between `booking_horizon` (20) and
+`max_duration` (30), because the two duration rules bound opposite directions and can never both
+deny the same request — their relative order never arbitrates copy — and 25 leaves 26–29 free for a
+later insertion, the same spacing discipline that let `max_consecutive_duration` land at 32 between
+`max_duration` and `slot_alignment` without moving either, and `slot_alignment` land at 35 without
+moving `availability_hours` off 40. `max_consecutive_duration` sits **after** `max_duration` rather
+than before it, unlike `min_duration`, because the two do not bound opposite directions the way
+`min_duration`/`max_duration` do — a booking can break both at once, and shortening the request is a
+remedy `max_duration`'s copy can name that `max_consecutive_duration`'s cannot, so the rule naming
+the fixable-by-editing-this-request problem gets first refusal over the one whose fix means touching
+a booking that already exists. Slot alignment itself sits beside the duration rules rather than with
+the date rules above it or the counting rules below, because "line up with the grid" is exactly as
+fixable-within-the-date as "shorten it" or "pick another time" is. Past and horizon are mutually
+exclusive and never arbitrate against each other. **The four counting and total rules come last**
+because no shorter, earlier or later booking clears a frequency cap or a daily total on its own the
+way it clears every rule above — moving *when* the request is never fixes *how much* history there
+already is. Among the four, `max_duration_per_day` (42) and `max_bookings_per_day` (45) precede the
+week (50) and month (60) caps: of the three windows a user could break a cap in at once, the
+narrowest is the most useful thing to be told about first. And between the two day-scoped rules,
+`max_duration_per_day` outranks `max_bookings_per_day` for the same reason `max_duration` outranks
+`max_consecutive_duration` above — its own denial copy can still offer "shorten it", a fix within
+this request, where `max_bookings_per_day`'s cannot: a count over the cap has no shorter form, only
+another day entirely.
 
 **Denial copy is contract, not wording.** `app/e2e/tests/03-sad-path.spec.ts` asserts the
 max-duration message as a full-string match and reproduces the singular/plural and `" and "` join of
@@ -514,66 +528,74 @@ place a venue open past its own local midnight is admitted deliberately, rather 
 accident through a typo — the same role it always played, now stated as a range rather than an
 ordering.
 
-`frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n, window_start, window_end,
-tolerance)` and `MaxBookingsPerMonthRule(n, window_start, window_end, tolerance)`, the only ones
-whose verdict depends on anything beyond the request.
-They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of four
-of `canon.py`'s six hand-written rules (`SlotAlignmentRule` and `MinDurationRule` are the other two
-missing, each excluded for its own, different reason — see "The canon" above). The API does not run
-`DEFAULT_CANON`; it assembles a
-per-Space canon that *includes* these two when a Space holds a `max_bookings_per_week` /
-`max_bookings_per_month` rule instance. Keeping them out of the reference canon is what lets the
-end-to-end suite assert against a seeded Space configured to those four rules' values without a
-counting rule silently changing the outcome.
+`frequency.py` holds four rules, the only ones whose verdict depends on anything beyond the
+request: three that **count** — `MaxBookingsPerDayRule(n, window_start, window_end, tolerance)`,
+`MaxBookingsPerWeekRule(n, window_start, window_end, tolerance)` and
+`MaxBookingsPerMonthRule(n, window_start, window_end, tolerance)`, built and behaving identically
+bar the window each is handed (task 8.7 added the day rule beside the pre-existing week and
+month ones) — and one that **sums**, `MaxDurationPerDayRule(max_duration, window_start,
+window_end)`, a *total* rather than a count and the one rule in this module that does not merge
+history into runs at all. They are **exported but deliberately absent from `DEFAULT_CANON`**, the
+reference canon of four of `canon.py`'s six hand-written rules (`SlotAlignmentRule` and
+`MinDurationRule` are the other two missing, each excluded for its own, different reason — see
+"The canon" above). The API does not run `DEFAULT_CANON`; it assembles a per-Space canon that
+*includes* one of these four when a Space holds the matching `space_rules` row. Keeping them out
+of the reference canon is what lets the end-to-end suite assert against a seeded Space configured
+to those four rules' values without a history-reading rule silently changing the outcome.
 
-**Neither rule derives its own window — both are handed one.** The window is a half-open
+**None of the four derives its own window — every one is handed it.** The window is a half-open
 `[window_start, window_end)` pair of UTC instants passed at construction, and the rule does nothing
-but count into it. Deriving it here is what made a local week wrong: a Sydney booking at 00:30 on
-Monday local is 13:30 **Sunday** in UTC, so a window snapped to UTC midnight put it in the previous
-week and a cap of one admitted a second booking in the same Sydney week. A local week has no fixed
-UTC representation and the engine has no timezone to find one with, so the layer that does resolves
-it. This is the same boundary split availability hours already follow, and `CalendarContext` still
-carries **no timezone field** for the same reason it never did — a zone there would invite every
-rule, generated ones included, to convert for itself.
+but read into it — count into it for the three counting rules, sum into it for the duration total.
+Deriving it here is what made a local week wrong: a Sydney booking at 00:30 on Monday local is
+13:30 **Sunday** in UTC, so a window snapped to UTC midnight put it in the previous week and a cap
+of one admitted a second booking in the same Sydney week — the identical miscount a day window
+would make for `max_bookings_per_day` / `max_duration_per_day` if either derived its own. A local
+day, week or month has no fixed UTC representation and the engine has no timezone to find one
+with, so the layer that does resolves it. This is the same boundary split availability hours
+already follow, and `CalendarContext` still carries **no timezone field** for the same reason it
+never did — a zone there would invite every rule, generated ones included, to convert for itself.
 
-An inverted pair is a **caller bug** here and is rejected at construction. A counting window is
-two absolute instants, not a recurring daily one, so — like `AvailabilityHoursRule` since it moved
-onto plain minutes — it has no wrap to describe at all.
+An inverted pair is a **caller bug** here and is rejected at construction, for all four rules. A
+window here is two absolute instants, not a recurring daily one, so — like `AvailabilityHoursRule`
+since it moved onto plain minutes — it has no wrap to describe at all.
 
-**A booking is counted against the window it starts in, and the window is anchored on the request
-rather than on `now`.** A request three weeks out is judged against that week's bookings, not this
-week's; anchoring on `now` would refuse next month's first booking because of this month's traffic.
-That property now lives in the caller that computes the bounds — `rules_stub._build_canon` resolves
-both windows from the booking's own **local** date. Windows are half-open, so a booking straddling a
-boundary counts once, against the side it begins on.
+**A booking is counted (or summed) against the window it starts in, and the window is anchored on
+the request rather than on `now`.** A request three weeks out is judged against that week's
+bookings, not this week's; anchoring on `now` would refuse next month's first booking because of
+this month's traffic. That property now lives in the caller that computes the bounds —
+`rules_stub._build_canon` resolves every window from the booking's own **local** date. Windows are
+half-open, so a booking straddling a boundary counts once, against the side it begins on.
 
-**A local week is seven local days, not `start + 7 days`.** Across a DST transition it is 167 or 169
-hours, and adding a fixed `timedelta` to the start would put the closing boundary an hour inside the
-neighbouring week — the same class of error as the UTC snapping this replaced, one line further
-down. The adapter resolves both ends from local midnight independently. `week_starts_on` stays a
-calendar convention on `CalendarContext`, read by the adapter when it resolves the week; no rule
-reads it any more.
+**A local week is seven local days, not `start + 7 days`, and a local day is the next date's local
+midnight, not `start + 24h`.** Across a DST transition a week is 167 or 169 hours and a day is 23
+or 25, and adding a fixed `timedelta` to the start would put the closing boundary an hour inside
+the neighbouring window — the same class of error as the UTC snapping this replaced, one line
+further down (`app.rules_stub._local_day_bounds` / `_local_week_bounds`, and their shared
+docstring reasoning). The adapter resolves both ends of every window from local midnight
+independently. `week_starts_on` stays a calendar convention on `CalendarContext`, read by the
+adapter when it resolves the week; no rule reads it any more.
 
-**The bound counts runs, not rows, and each rule merges the request into them itself.** Task 8.6's
-plan named a preferred mechanism first: have the adapter fold the request into the merged runs
-ahead of time and hand these rules a `Context.history` that already reflects them, so the `+1`
-would simply disappear. That mechanism does not survive contact with an invariant one layer up:
-`Context.__post_init__` (`interfaces.py`) requires every entry in `context.history.bookings` to
-fall inside `history_window(context.calendar.now)` — the "evaluation costs at most one calendar
-month of history" promise. A request is not bound by that promise at all (only by
-`BookingHorizonRule`, itself often configured weeks or months wide), so folding it into
-`Context.history` raises on construction for any request beyond the window — denying an ordinary
-future booking outright, on any Space running one of these two rules, not merely an edge case. That
-conflict was not visible from the plan and is the reason the fallback mechanism it also named is
-what shipped instead: `Context.history` stays exactly what it always was, raw rows, and
-`MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule` merge `request` with `context.history.bookings`
-themselves, inside `evaluate`, via `rules.spans.merge_adjoining_spans` (task 8.4's sweep, shared
-rather than duplicated) and a `tolerance` resolved by the adapter exactly as `context.run`'s is.
-Because the merge happens on a live parameter rather than a `Context` field, no invariant governs
-how far in the future `request` may sit.
+**The three counting rules bound runs, not rows, and each merges the request into them itself.**
+Task 8.6's plan named a preferred mechanism first: have the adapter fold the request into the
+merged runs ahead of time and hand these rules a `Context.history` that already reflects them, so
+the `+1` would simply disappear. That mechanism does not survive contact with an invariant one
+layer up: `Context.__post_init__` (`interfaces.py`) requires every entry in
+`context.history.bookings` to fall inside `history_window(context.calendar.now)` — the "evaluation
+costs at most one calendar month of history" promise. A request is not bound by that promise at
+all (only by `BookingHorizonRule`, itself often configured weeks or months wide), so folding it
+into `Context.history` raises on construction for any request beyond the window — denying an
+ordinary future booking outright, on any Space running one of these three rules, not merely an
+edge case. That conflict was not visible from the plan and is the reason the fallback mechanism it
+also named is what shipped instead: `Context.history` stays exactly what it always was, raw rows,
+and `MaxBookingsPerDayRule` / `MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule` merge `request`
+with `context.history.bookings` themselves, inside `evaluate`, via
+`rules.spans.merge_adjoining_spans` (task 8.4's sweep, shared rather than duplicated) and a
+`tolerance` resolved by the adapter exactly as `context.run`'s is. Because the merge happens on a
+live parameter rather than a `Context` field, no invariant governs how far in the future `request`
+may sit.
 
-The rule then compares the merged count directly, with no `+1`: two bookings the same user holds
-back to back are one session against the cap, not two
+Each counting rule then compares the merged count directly, with no `+1`: two bookings the same
+user holds back to back are one session against the cap, not two
 (`ops/pending/bugs/max-duration-cannon.md`, "Counting runs, not rows"), so `existing + 1 >
 max_bookings` would double-count the very session a request completes. Since the request is always
 one of the spans the sweep merges, a request that opens a new session raises the count by one; one
@@ -583,16 +605,34 @@ contract: extending a run that started last week adds nothing to this week's cou
 and mildly surprising the first time someone meets it, but the alternative is counting one session
 twice.
 
-This mechanism is scoped to exactly these two rule types, and deliberately so: no other rule in the
-canon reads `context.history.bookings` today (`MaxConsecutiveDurationRule` reads only
-`context.run`), and a *generated* rule that counts raw history keeps counting raw rows unless it is
-separately taught to merge — which is out of scope here and belongs with task 8.8's work teaching
-the Generator about the run.
+**`MaxDurationPerDayRule` is the exception: it sums `request.duration` plus every history entry
+starting in its window, and never calls `merge_adjoining_spans` at all.** This is not an oversight
+— a later reader who "fixes" it to merge like its three siblings would introduce a silent
+under-count. A total is the same number however the day's bookings are grouped, so merging would
+ordinarily change nothing: two one-hour bookings held back to back sum to two hours whether counted
+as one merged two-hour run or as two separate one-hour entries. But a user holding **two Resources
+at overlapping times** breaks that equivalence — 17:00-18:00 on one court and 17:30-18:30 on
+another overlap by half an hour, so `merge_adjoining_spans` (which treats an overlap, a negative
+gap, exactly like an abutment) collapses them into one 17:00-18:30 run, 90 minutes, when the member
+has actually booked two hours of court time across the two courts. Summing the raw entries instead
+gives the correct two hours; merging first would silently report 90 minutes and let a cap that
+should have caught this pass it. So this rule reads the raw `context.history.bookings` it needs
+and sums it directly — the one place in this stream runs are deliberately not used. It also takes
+no `tolerance`: nothing here merges, so there is no gap for one to close, and `_resolve_for_row`
+resolves only the window for it, never a tolerance.
 
-Because the window follows the request, a request beyond the history window still merges — with
-its own history entries, if any are near enough in time — into a run of its own, and passes unless
-that run alone is over the cap. That is the documented bound of the engine's promise — evaluation
-costs at most one calendar month of history — not a gap in these rules.
+This merge mechanism is scoped to exactly the three counting rule types, and deliberately so: no
+other rule in the canon reads `context.history.bookings` and merges it today
+(`MaxConsecutiveDurationRule` reads only `context.run`, and `MaxDurationPerDayRule` reads the raw
+entries directly per above), and a *generated* rule that counts raw history keeps counting raw
+rows unless it is separately taught to merge — which is out of scope here and belongs with task
+8.8's work teaching the Generator about the run.
+
+Because the window follows the request, a request beyond the history window still merges (or sums)
+— with its own history entries, if any are near enough in time or within the window — into a run
+of its own (or a total of its own), and passes unless that alone is over the cap. That is the
+documented bound of the engine's promise — evaluation costs at most one calendar month of history —
+not a gap in these rules.
 
 ## Safe execution
 

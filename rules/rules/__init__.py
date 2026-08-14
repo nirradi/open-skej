@@ -12,7 +12,12 @@ from .canon import (
     default_canon,
 )
 from .controller import RULE_ERROR_MESSAGE, ContextMismatchError, evaluate_request
-from .frequency import MaxBookingsPerMonthRule, MaxBookingsPerWeekRule
+from .frequency import (
+    MaxBookingsPerDayRule,
+    MaxBookingsPerMonthRule,
+    MaxBookingsPerWeekRule,
+    MaxDurationPerDayRule,
+)
 from .interfaces import (
     HISTORY_ROLLING_WINDOW,
     BaseRule,
@@ -61,8 +66,10 @@ __all__ = [
     "default_canon",
     "DEFAULT_CANON",
     # Exported but deliberately not in DEFAULT_CANON — see frequency.py.
+    "MaxBookingsPerDayRule",
     "MaxBookingsPerWeekRule",
     "MaxBookingsPerMonthRule",
+    "MaxDurationPerDayRule",
     # The rule type registry — a separate, additive description of the same rule classes.
     "REGISTRY",
     "ParamKind",

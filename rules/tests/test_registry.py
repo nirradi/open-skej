@@ -34,7 +34,12 @@ from rules.canon import (
     NotInThePastRule,
     SlotAlignmentRule,
 )
-from rules.frequency import MaxBookingsPerMonthRule, MaxBookingsPerWeekRule
+from rules.frequency import (
+    MaxBookingsPerDayRule,
+    MaxBookingsPerMonthRule,
+    MaxBookingsPerWeekRule,
+    MaxDurationPerDayRule,
+)
 from rules.interfaces import (
     BookingRecord,
     BookingRequest,
@@ -94,7 +99,7 @@ def existing_booking(start_at: datetime) -> BookingRecord:
     )
 
 
-# --- the nine stable ids, and their declared params -------------------------------------------
+# --- the eleven stable ids, and their declared params -------------------------------------------
 
 EXPECTED_IDS = {
     "not_in_the_past",
@@ -104,12 +109,14 @@ EXPECTED_IDS = {
     "max_consecutive_duration",
     "slot_alignment",
     "availability_hours",
+    "max_duration_per_day",
+    "max_bookings_per_day",
     "max_bookings_per_week",
     "max_bookings_per_month",
 }
 
 
-def test_all_nine_stable_ids_are_registered():
+def test_all_eleven_stable_ids_are_registered():
     assert set(REGISTRY) == EXPECTED_IDS
 
 
@@ -123,6 +130,8 @@ def test_all_nine_stable_ids_are_registered():
         ("max_consecutive_duration", ("max_consecutive_minutes",)),
         ("slot_alignment", ("slot_minutes",)),
         ("availability_hours", ("opens_at_minutes", "closes_at_minutes")),
+        ("max_duration_per_day", ("max_duration_minutes",)),
+        ("max_bookings_per_day", ("max_bookings",)),
         ("max_bookings_per_week", ("max_bookings",)),
         ("max_bookings_per_month", ("max_bookings",)),
     ],
@@ -146,7 +155,7 @@ def test_stable_ids_are_never_the_python_class_name():
 
 
 def test_priorities_sort_into_the_documented_canon_order():
-    """`rule-engine.md`'s nine-element assembled order, now read off declared priority."""
+    """`rule-engine.md`'s eleven-element assembled order, now read off declared priority."""
     assert [declared.rule_type for declared in rule_types()] == [
         "not_in_the_past",
         "booking_horizon",
@@ -155,6 +164,8 @@ def test_priorities_sort_into_the_documented_canon_order():
         "max_consecutive_duration",
         "slot_alignment",
         "availability_hours",
+        "max_duration_per_day",
+        "max_bookings_per_day",
         "max_bookings_per_week",
         "max_bookings_per_month",
     ]
@@ -195,6 +206,29 @@ def test_min_duration_sits_strictly_between_booking_horizon_and_max_duration():
     )
 
 
+def test_max_duration_per_day_sits_strictly_between_availability_hours_and_max_bookings_per_day():
+    """`max_duration_per_day`'s priority (42) is between `availability_hours` (40) and
+    `max_bookings_per_day` (45) — task 8.7's own reasoning: of the day/week/month caps a user could
+    break at once, the narrowest window is the most useful thing to be told, so the day-scoped pair
+    sits ahead of the week and month rules, and the duration total precedes the booking count within
+    that pair."""
+    assert (
+        REGISTRY["availability_hours"].priority
+        < REGISTRY["max_duration_per_day"].priority
+        < REGISTRY["max_bookings_per_day"].priority
+    )
+
+
+def test_max_bookings_per_day_sits_strictly_between_max_duration_per_day_and_the_weekly_cap():
+    """`max_bookings_per_day`'s priority (45) is between `max_duration_per_day` (42) and
+    `max_bookings_per_week` (50) — the narrowest counting window goes first among the three."""
+    assert (
+        REGISTRY["max_duration_per_day"].priority
+        < REGISTRY["max_bookings_per_day"].priority
+        < REGISTRY["max_bookings_per_week"].priority
+    )
+
+
 def test_priorities_are_unique_and_spaced_for_a_later_insertion():
     """Priorities are spaced in multiples of ten rather than consecutive integers, so a later type
     can still be inserted between two existing ones without renumbering the rest — exactly what
@@ -211,7 +245,7 @@ def test_priorities_are_unique_and_spaced_for_a_later_insertion():
 # --- reads_history / needs_local_resolution / is_single ---------------------------------------
 
 
-def test_reads_history_is_true_for_the_two_counting_types_and_max_consecutive_duration():
+def test_reads_history_is_true_for_the_counting_and_duration_total_types():
     """`reads_history` means "this rule's verdict depends on history", not "this rule's own
     `evaluate` names `context.history`" (`rules/rules/registry.py`, `.claude/rules/rule-engine.md`).
     `max_consecutive_duration` is the type that pulls the two apart: its `evaluate` reads only
@@ -220,25 +254,29 @@ def test_reads_history_is_true_for_the_two_counting_types_and_max_consecutive_du
     the Space-wide history query — see `app/backend/tests/test_rules_stub.py` for that property
     pinned end to end."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.reads_history} == {
+        "max_duration_per_day",
+        "max_bookings_per_day",
         "max_bookings_per_week",
         "max_bookings_per_month",
         "max_consecutive_duration",
     }
 
 
-def test_needs_local_resolution_is_true_for_slot_alignment_and_the_two_counting_types():
+def test_needs_local_resolution_is_true_for_slot_alignment_and_the_history_reading_types():
     """`slot_alignment` needs its `anchor` resolved against the Space's zone and the booking's own
-    date, the same reason the counting rules need local resolution. `availability_hours` no longer
-    does: it stores minutes-from-local-midnight directly and reads `context.local` itself, so its
-    build function needs nothing resolved for it (`rules/rules/registry.py`)."""
+    date, the same reason the day/week/month rules need local resolution. `availability_hours` no
+    longer does: it stores minutes-from-local-midnight directly and reads `context.local` itself, so
+    its build function needs nothing resolved for it (`rules/rules/registry.py`)."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.needs_local_resolution} == {
         "slot_alignment",
+        "max_duration_per_day",
+        "max_bookings_per_day",
         "max_bookings_per_week",
         "max_bookings_per_month",
     }
 
 
-def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
+def test_is_single_is_true_only_for_the_six_non_day_scoped_types():
     """`availability_hours`, `max_duration`, `min_duration`, `max_consecutive_duration` and
     `slot_alignment` are meant to vary by day via `applies_to` (e.g. "Mon/Wed/Fri 10-15" plus
     "Tue/Thu 8-12" as two `availability_hours` rows), so a second instance of any of them is the
@@ -247,6 +285,8 @@ def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
     assert {rt.rule_type for rt in REGISTRY.values() if rt.is_single} == {
         "not_in_the_past",
         "booking_horizon",
+        "max_duration_per_day",
+        "max_bookings_per_day",
         "max_bookings_per_week",
         "max_bookings_per_month",
     }
@@ -416,3 +456,39 @@ def test_build_max_bookings_per_month_behaves_like_the_class():
     req = request(NOW, NOW + timedelta(hours=1))
     assert built.evaluate(req, already_full) == direct.evaluate(req, already_full)
     assert not built.evaluate(req, already_full).passed
+
+
+def test_build_max_bookings_per_day_behaves_like_the_class():
+    """Task 8.7. Built exactly like `max_bookings_per_week` above, against a narrower window."""
+    window_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    window_end = datetime(2026, 7, 21, tzinfo=timezone.utc)
+    resolved = {"window_start": window_start, "window_end": window_end, "tolerance": timedelta(0)}
+
+    built = REGISTRY["max_bookings_per_day"].build({"max_bookings": 1}, resolved)
+    direct = MaxBookingsPerDayRule(
+        max_bookings=1, window_start=window_start, window_end=window_end, tolerance=timedelta(0)
+    )
+
+    already_full = context(existing_booking(NOW - timedelta(hours=2)))
+    req = request(NOW, NOW + timedelta(hours=1))
+    assert built.evaluate(req, already_full) == direct.evaluate(req, already_full)
+    assert not built.evaluate(req, already_full).passed
+
+
+def test_build_max_duration_per_day_behaves_like_the_class():
+    """Task 8.7. Unlike every counting build function above, `resolved` carries no `tolerance` —
+    `MaxDurationPerDayRule` sums raw entries and never merges (`rules.frequency`'s module
+    docstring), so there is nothing for a gap tolerance to do."""
+    window_start = datetime(2026, 7, 20, tzinfo=timezone.utc)
+    window_end = datetime(2026, 7, 21, tzinfo=timezone.utc)
+    resolved = {"window_start": window_start, "window_end": window_end}
+
+    built = REGISTRY["max_duration_per_day"].build({"max_duration_minutes": 60}, resolved)
+    direct = MaxDurationPerDayRule(
+        max_duration=timedelta(minutes=60), window_start=window_start, window_end=window_end
+    )
+
+    already_booked = context(existing_booking(NOW - timedelta(hours=2)))
+    req = request(NOW, NOW + timedelta(minutes=30))
+    assert built.evaluate(req, already_booked) == direct.evaluate(req, already_booked)
+    assert not built.evaluate(req, already_booked).passed
