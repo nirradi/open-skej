@@ -38,7 +38,6 @@ import type { Page } from '@playwright/test'
 
 import {
   BACKEND_URL,
-  berlinWeekdayMondayFirst,
   createBookingViaApi,
   discoverSpaceAResource,
   expect,
@@ -217,8 +216,7 @@ test.describe('the cross-Resource consecutive-duration guard', () => {
  * Task 8.9's second case — the counterpart to task 8.6's own behaviour
  * change, which shipped with no end-to-end coverage until now: a member
  * holding two abutting bookings against a weekly cap of two can still book
- * a third on another day, because the abutting pair is one session, not two
- * rows.
+ * a second session, because the abutting pair is one session, not two rows.
  *
  * A naive `existing + 1 > max_bookings` count would refuse the third
  * booking below — two existing rows plus a new one is three, over a cap of
@@ -239,7 +237,7 @@ test.describe('the cross-Resource consecutive-duration guard', () => {
  * the calendar grid, and setup has no reason to go through the pointer.
  */
 test.describe('the weekly cap counts sessions, not rows', () => {
-  test('an abutting pair still leaves room for a session on another day', async ({ api }) => {
+  test('an abutting pair counts once against the cap', async ({ api }) => {
     const { publicId, resourceIds, headers: memberHeaders } = await discoverSpaceAResource(api)
     const [court1] = resourceIds
 
@@ -254,40 +252,57 @@ test.describe('the weekly cap counts sessions, not rows', () => {
     const { id: ruleId } = (await createResponse.json()) as { id: number }
 
     try {
-      // Anchor on a Monday comfortably in the future — the local week
-      // `MaxBookingsPerWeekRule` counts against is Monday-Sunday
-      // (`WEEK_STARTS_ON` in `rules_stub.py`, fixed rather than
-      // per-Space configuration).
-      const anchor = localInstantDaysFromNow(30, 12, 0)
-      const mondayOffset = 30 - berlinWeekdayMondayFirst(anchor)
+      // **Every booking sits on ONE day, two days out, and that is the whole
+      // point of the anchor.** A counting rule only ever sees the history the
+      // adapter was allowed to load, and `rules.interfaces.history_window`
+      // bounds that at `max(next_month_start, now + 7 days)`. An anchor a
+      // month ahead puts every booking below *past* that bound, so the rule
+      // counts an empty history, the request becomes session one, and the
+      // booking this test expects to be refused is correctly allowed — which
+      // is what the first version of this test hit. `upper >= now + 7 days`
+      // holds by construction whatever the date, so anything inside a week of
+      // now is always in-window; "fewer days" alone is not enough, because
+      // `upper` is a `max` of two moving quantities and an anchor that clears
+      // it in mid-month can fall outside it near a month boundary.
+      //
+      // One day also means one local week without arithmetic, so
+      // `MaxBookingsPerWeekRule`'s Monday-Sunday window (`WEEK_STARTS_ON` in
+      // `rules_stub.py`) needs no alignment here at all.
+      const DAYS_AHEAD = 2
 
-      // Two abutting bookings on Monday compose one two-hour session —
-      // exactly at `max_consecutive_duration`'s own cap (inclusive, so this
-      // still passes) — followed by a third, unrelated session on
-      // Wednesday, the same week.
+      // Two abutting bookings compose one two-hour session — exactly at
+      // `max_consecutive_duration`'s own cap, which is inclusive, so the pair
+      // is allowed and it is the *cap on sessions* being tested, not that one.
       await createBookingViaApi(
         api,
-        localInstantDaysFromNow(mondayOffset, 9, 0),
-        localInstantDaysFromNow(mondayOffset, 10, 0),
+        localInstantDaysFromNow(DAYS_AHEAD, 9, 0),
+        localInstantDaysFromNow(DAYS_AHEAD, 10, 0),
         court1,
       )
       await createBookingViaApi(
         api,
-        localInstantDaysFromNow(mondayOffset, 10, 0),
-        localInstantDaysFromNow(mondayOffset, 11, 0),
+        localInstantDaysFromNow(DAYS_AHEAD, 10, 0),
+        localInstantDaysFromNow(DAYS_AHEAD, 11, 0),
         court1,
       )
+      // Session two: a real gap, so nothing merges it with the pair above.
+      // Space A seeds no `availability_hours` row (`sandbox_seed.py` deletes
+      // the one `create_space` starts with), so an afternoon hour is as
+      // bookable as a morning one.
       await createBookingViaApi(
         api,
-        localInstantDaysFromNow(mondayOffset + 2, 9, 0),
-        localInstantDaysFromNow(mondayOffset + 2, 10, 0),
+        localInstantDaysFromNow(DAYS_AHEAD, 14, 0),
+        localInstantDaysFromNow(DAYS_AHEAD, 15, 0),
         court1,
       )
       expect(await listAllBookings(api)).toHaveLength(3)
 
-      // A fourth session the same week is what actually trips the cap.
-      const fourthStart = localInstantDaysFromNow(mondayOffset + 4, 9, 0)
-      const fourthEnd = localInstantDaysFromNow(mondayOffset + 4, 10, 0)
+      // Three rows so far but only two sessions, so the cap of two is met and
+      // not yet broken. A third session is what trips it — and under the old
+      // row-counting behaviour the *second* of the abutting pair would already
+      // have been refused, which is the regression this test guards.
+      const fourthStart = localInstantDaysFromNow(DAYS_AHEAD, 17, 0)
+      const fourthEnd = localInstantDaysFromNow(DAYS_AHEAD, 18, 0)
       const deniedResponse = await api.post(
         `${BACKEND_URL}/spaces/${publicId}/resources/${court1}/bookings`,
         {
