@@ -2,7 +2,7 @@
 
 Three things are pinned here.
 
-The **boundaries**, because a frequency limit is only as good as its edges: a booking one second
+The **boundaries**, because a frequency limit is only as good as its edges: a session one second
 before a week starts belongs to the previous week, one starting exactly on the boundary instant
 belongs to this one, and December does not spill into January. Each of those could plausibly have
 gone the other way, and getting one wrong refuses a booking the user can see is legal.
@@ -20,6 +20,17 @@ the window it is given.
 The **copy**, because denial text crosses into the UI verbatim. Expected strings are written out in
 full rather than built from the helpers the rules use; deriving them would assert only that the code
 agrees with itself.
+
+**What task 8.6 changed here.** These rules now merge ``request`` with ``context.history.bookings``
+themselves, inside ``evaluate`` (``rules.spans.merge_adjoining_spans`` plus a ``tolerance`` supplied
+at construction — see ``rules/rules/frequency.py``'s module docstring for why the merge lives in the
+rule rather than being folded into ``Context.history`` ahead of time), and compare the merged count
+to the cap directly, no ``+1``. The request is always one of the spans the sweep merges, so when
+nothing in history is close enough to abut it, the merge reproduces the old ``existing + 1 >
+max_bookings`` bound exactly — the request contributes its own run precisely where it used to
+contribute a bare ``+1``. What is new is exactly the case where something *does* abut: the
+request's own run then merges with an existing one instead of adding a second, which is the whole
+point of this task and is covered separately below.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -48,7 +59,7 @@ NOW = datetime(2026, 7, 15, 10, 0, tzinfo=timezone.utc)
 
 
 def at(moment: datetime) -> BookingRecord:
-    """An hour-long existing booking starting at ``moment``."""
+    """An hour-long session already in history, starting at ``moment``."""
     return BookingRecord(
         user_id=USER, resource_id=RESOURCE, start_at=moment, end_at=moment + timedelta(hours=1)
     )
@@ -104,14 +115,23 @@ def utc_month(moment: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
-def weekly(max_bookings: int, moment: datetime = NOW, week_starts_on: Weekday = Weekday.MONDAY):
+def weekly(
+    max_bookings: int,
+    moment: datetime = NOW,
+    week_starts_on: Weekday = Weekday.MONDAY,
+    tolerance: timedelta = timedelta(0),
+):
     start, end = utc_week(moment, week_starts_on)
-    return MaxBookingsPerWeekRule(max_bookings, window_start=start, window_end=end)
+    return MaxBookingsPerWeekRule(
+        max_bookings, window_start=start, window_end=end, tolerance=tolerance
+    )
 
 
-def monthly(max_bookings: int, moment: datetime = NOW):
+def monthly(max_bookings: int, moment: datetime = NOW, tolerance: timedelta = timedelta(0)):
     start, end = utc_month(moment)
-    return MaxBookingsPerMonthRule(max_bookings, window_start=start, window_end=end)
+    return MaxBookingsPerMonthRule(
+        max_bookings, window_start=start, window_end=end, tolerance=tolerance
+    )
 
 
 # --- weekly ---------------------------------------------------------------------------------
@@ -123,8 +143,9 @@ def test_empty_history_passes():
     assert result.fail_reason is None
 
 
-def test_nth_booking_passes_and_n_plus_first_fails():
-    """The bound counts the request itself, so with a limit of 2 the *third* booking is refused."""
+def test_at_the_cap_passes_and_one_more_denies():
+    """The request is always one of the spans merged, so with nothing in history close enough to
+    abut it, this reproduces the old "the bound counts the request itself" bound exactly."""
     rule = weekly(2)
     one_existing = context(at(NOW - timedelta(days=1)))
     two_existing = context(at(NOW - timedelta(days=1)), at(NOW - timedelta(days=2)))
@@ -134,7 +155,7 @@ def test_nth_booking_passes_and_n_plus_first_fails():
 
 
 def test_booking_just_before_the_week_boundary_does_not_count():
-    """Mon 13th 00:00 starts the week; a booking a second earlier belongs to the previous one."""
+    """Mon 13th 00:00 starts the week; a session a second earlier belongs to the previous one."""
     rule = weekly(1)
     week_start = datetime(2026, 7, 13, tzinfo=timezone.utc)
 
@@ -183,18 +204,20 @@ def test_weekly_denial_copy():
     result = rule.evaluate(request_at(NOW), full)
 
     assert result.fail_reason == (
-        "You can make at most 2 bookings a week,"
-        " and you already have 2 bookings that week."
+        "You can make at most 2 sessions a week,"
+        " and this booking would bring you to 3 sessions that week."
         " Please pick a time in another week."
     )
 
 
-def test_weekly_denial_copy_is_singular_at_one():
+def test_weekly_denial_copy_is_singular_at_the_cap():
+    """``_format_sessions`` renders ``max_bookings=1`` as "1 session" — the merged count that
+    triggers a denial can never itself be singular, since denying requires it to exceed 1."""
     result = weekly(1).evaluate(request_at(NOW), context(at(NOW - timedelta(days=1))))
 
     assert result.fail_reason == (
-        "You can make at most 1 booking a week,"
-        " and you already have 1 booking that week."
+        "You can make at most 1 session a week,"
+        " and this booking would bring you to 2 sessions that week."
         " Please pick a time in another week."
     )
 
@@ -216,7 +239,7 @@ def test_monthly_empty_history_passes():
     assert monthly(2).evaluate(request_at(NOW), context()).passed
 
 
-def test_monthly_nth_passes_and_n_plus_first_fails():
+def test_monthly_at_the_cap_passes_and_one_more_denies():
     rule = monthly(2)
     one = context(at(datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc)))
     two = context(
@@ -261,8 +284,8 @@ def test_monthly_denial_copy():
     )
 
     assert result.fail_reason == (
-        "You can make at most 1 booking a month,"
-        " and you already have 1 booking that month."
+        "You can make at most 1 session a month,"
+        " and this booking would bring you to 2 sessions that month."
         " Please pick a time in another month."
     )
 
@@ -273,13 +296,67 @@ def test_monthly_rule_rejects_a_non_positive_limit(limit):
         MaxBookingsPerMonthRule(limit, *utc_month(NOW))
 
 
-# --- shared -------------------------------------------------------------------------------
+# --- the merge itself (task 8.6) --------------------------------------------------------------
+
+
+def test_a_request_extending_a_held_session_counts_once_not_twice():
+    """The regression task 8.6 exists for. With no merging this would be one existing row plus the
+    request, two against a cap of one — refused. Merging them (the request abuts the held booking
+    exactly, so even zero tolerance joins them) makes it one session instead."""
+    rule = weekly(1)
+    held = at(NOW - timedelta(hours=1))  # ends exactly where the request starts
+
+    result = rule.evaluate(request_at(NOW), context(held))
+
+    assert result.passed
+
+
+def test_a_single_merged_session_counts_once_however_many_rows_it_was_built_from():
+    """This rule has no idea whether one ``BookingRecord`` in history is a single short booking or
+    the merged result of several rows abutting each other — merging happens once, on ``request``
+    and every history entry together, and the rule counts whatever runs fall out of it.
+
+    That is exactly the lever ``app.rules_stub`` pulls in production: a two-hour session built from
+    two adjoining one-hour bookings merges to one run, which is what makes it consume one slot of a
+    cap rather than two. Contrasted here against two *separate* one-hour bookings covering the same
+    total time, which do not merge and do consume two.
+    """
+    rule = weekly(2)
+    day = NOW - timedelta(days=1)
+    unrelated_request = request_at(NOW)  # far enough from `day` that it never merges with it
+
+    two_separate_sessions = context(at(day), at(day + timedelta(hours=3)))
+    one_merged_session = context(
+        BookingRecord(
+            user_id=USER, resource_id=RESOURCE, start_at=day, end_at=day + timedelta(hours=2)
+        )
+    )
+
+    # Two rows plus the request's own separate session already break a cap of two...
+    assert not rule.evaluate(unrelated_request, two_separate_sessions).passed
+    # ...but one record spanning the same stretch of the week is still only one entry.
+    assert rule.evaluate(unrelated_request, one_merged_session).passed
+
+
+def test_a_five_minute_gap_joins_when_the_tolerance_covers_it():
+    """Mirrors ``app.rules_stub._resolve_run``'s own tolerance tests — the rule reads the identical
+    kind of value, just supplied at construction instead of resolved from history at evaluate
+    time."""
+    rule = weekly(1, tolerance=timedelta(minutes=60))
+    held = BookingRecord(
+        user_id=USER,
+        resource_id=RESOURCE,
+        start_at=NOW - timedelta(hours=1, minutes=5),
+        end_at=NOW - timedelta(minutes=5),
+    )
+
+    assert rule.evaluate(request_at(NOW), context(held)).passed
 
 
 def test_history_is_counted_regardless_of_what_it_describes():
     """Everything in HistoryContext counts. There is no status to inspect and none is inferred.
 
-    The engine is deliberately ignorant of a schema that will keep changing; a booking that should
+    The engine is deliberately ignorant of a schema that will keep changing; an entry that should
     not count toward a limit is one the caller does not put in the context.
     """
     rule = weekly(1)

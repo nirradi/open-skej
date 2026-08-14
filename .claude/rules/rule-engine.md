@@ -243,7 +243,11 @@ tolerance**; `_resolve_run` picks the merged span the request itself fell into b
 sweep. The merge is **transitive** — 17-18 and 18-19 held, a request for 19-20, is one 17-20 run —
 so a user can be denied by a booking two hops away, and that is intended. When history is empty the
 only span in the sweep is the request's own, so the run is the request alone with
-`booking_count=1`; that is the correct answer, not a degraded one.
+`booking_count=1`; that is the correct answer, not a degraded one. The sweep itself is
+`rules.spans.merge_adjoining_spans` (task 8.6 moved it out of this module and into the engine
+package), because `_resolve_run` is no longer its only caller: `MaxBookingsPerWeekRule` /
+`MaxBookingsPerMonthRule` (below) call it themselves too, on `request` and `context.history.bookings`
+together, at evaluate time.
 
 **The gap tolerance is that date's own resolved minimum duration, zero when no `min_duration` row
 governs the date — not exact abutment, even though the run's own design note (`max-duration-cannon.md`,
@@ -510,9 +514,9 @@ place a venue open past its own local midnight is admitted deliberately, rather 
 accident through a typo — the same role it always played, now stated as a range rather than an
 ordering.
 
-`frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n, window_start, window_end)` and
-`MaxBookingsPerMonthRule(n, window_start, window_end)`, the only ones whose verdict depends on
-anything beyond the request.
+`frequency.py` holds the rules that count: `MaxBookingsPerWeekRule(n, window_start, window_end,
+tolerance)` and `MaxBookingsPerMonthRule(n, window_start, window_end, tolerance)`, the only ones
+whose verdict depends on anything beyond the request.
 They are **exported but deliberately absent from `DEFAULT_CANON`**, the reference canon of four
 of `canon.py`'s six hand-written rules (`SlotAlignmentRule` and `MinDurationRule` are the other two
 missing, each excluded for its own, different reason — see "The canon" above). The API does not run
@@ -550,13 +554,45 @@ down. The adapter resolves both ends from local midnight independently. `week_st
 calendar convention on `CalendarContext`, read by the adapter when it resolves the week; no rule
 reads it any more.
 
-**The bound counts the request itself.** With a limit of two and two bookings already in the window,
-the third is refused — checking the existing count alone would admit the booking that takes the user
-over the line.
+**The bound counts runs, not rows, and each rule merges the request into them itself.** Task 8.6's
+plan named a preferred mechanism first: have the adapter fold the request into the merged runs
+ahead of time and hand these rules a `Context.history` that already reflects them, so the `+1`
+would simply disappear. That mechanism does not survive contact with an invariant one layer up:
+`Context.__post_init__` (`interfaces.py`) requires every entry in `context.history.bookings` to
+fall inside `history_window(context.calendar.now)` — the "evaluation costs at most one calendar
+month of history" promise. A request is not bound by that promise at all (only by
+`BookingHorizonRule`, itself often configured weeks or months wide), so folding it into
+`Context.history` raises on construction for any request beyond the window — denying an ordinary
+future booking outright, on any Space running one of these two rules, not merely an edge case. That
+conflict was not visible from the plan and is the reason the fallback mechanism it also named is
+what shipped instead: `Context.history` stays exactly what it always was, raw rows, and
+`MaxBookingsPerWeekRule` / `MaxBookingsPerMonthRule` merge `request` with `context.history.bookings`
+themselves, inside `evaluate`, via `rules.spans.merge_adjoining_spans` (task 8.4's sweep, shared
+rather than duplicated) and a `tolerance` resolved by the adapter exactly as `context.run`'s is.
+Because the merge happens on a live parameter rather than a `Context` field, no invariant governs
+how far in the future `request` may sit.
 
-Because the window follows the request, a request beyond the history window is measured against a
-history the caller has no bookings for, and passes. That is the documented bound of the engine's
-promise — evaluation costs at most one calendar month of history — not a gap in these rules.
+The rule then compares the merged count directly, with no `+1`: two bookings the same user holds
+back to back are one session against the cap, not two
+(`ops/pending/bugs/max-duration-cannon.md`, "Counting runs, not rows"), so `existing + 1 >
+max_bookings` would double-count the very session a request completes. Since the request is always
+one of the spans the sweep merges, a request that opens a new session raises the count by one; one
+that only extends a run the user already holds raises it by zero, since extending a run never moves
+where it starts. **A run counts on the side it begins**, matching every other window in this
+contract: extending a run that started last week adds nothing to this week's count — consistent,
+and mildly surprising the first time someone meets it, but the alternative is counting one session
+twice.
+
+This mechanism is scoped to exactly these two rule types, and deliberately so: no other rule in the
+canon reads `context.history.bookings` today (`MaxConsecutiveDurationRule` reads only
+`context.run`), and a *generated* rule that counts raw history keeps counting raw rows unless it is
+separately taught to merge — which is out of scope here and belongs with task 8.8's work teaching
+the Generator about the run.
+
+Because the window follows the request, a request beyond the history window still merges — with
+its own history entries, if any are near enough in time — into a run of its own, and passes unless
+that run alone is over the cap. That is the documented bound of the engine's promise — evaluation
+costs at most one calendar month of history — not a gap in these rules.
 
 ## Safe execution
 

@@ -271,10 +271,15 @@ def _build_max_bookings_per_week(
     params: Mapping[str, Any], resolved: Mapping[str, Any] | None
 ) -> BaseRule:
     assert resolved is not None
+    # `tolerance` (task 8.6): the gap `evaluate` closes when it merges the request with history
+    # into sessions, resolved by the adapter exactly as `app.rules_stub._resolve_run` resolves it
+    # for `context.run` — see `rules.frequency`'s module docstring for why the merge happens in
+    # the rule rather than on `Context.history` itself.
     return MaxBookingsPerWeekRule(
         max_bookings=params["max_bookings"],
         window_start=resolved["window_start"],
         window_end=resolved["window_end"],
+        tolerance=resolved["tolerance"],
     )
 
 
@@ -286,6 +291,7 @@ def _build_max_bookings_per_month(
         max_bookings=params["max_bookings"],
         window_start=resolved["window_start"],
         window_end=resolved["window_end"],
+        tolerance=resolved["tolerance"],
     )
 
 

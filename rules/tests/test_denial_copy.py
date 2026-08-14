@@ -220,7 +220,15 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
     },
     "max_bookings_per_week": {
         "params": {"max_bookings": 1},
-        "resolved": {"window_start": _FRAME.week_start, "window_end": _FRAME.week_end},
+        # `tolerance` (task 8.6): `evaluate` merges `request` with `context.history.bookings`
+        # itself now, at zero tolerance here (exact abutment only) — see `rules.frequency`'s module
+        # docstring. The single history entry below does not abut the request, so the merge leaves
+        # it and the request as two separate sessions, over the cap of one.
+        "resolved": {
+            "window_start": _FRAME.week_start,
+            "window_end": _FRAME.week_end,
+            "tolerance": timedelta(0),
+        },
         "case": lambda: (
             request(NOW, NOW + timedelta(hours=1)),
             context(
@@ -237,7 +245,11 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
     },
     "max_bookings_per_month": {
         "params": {"max_bookings": 1},
-        "resolved": {"window_start": _FRAME.month_start, "window_end": _FRAME.month_end},
+        "resolved": {
+            "window_start": _FRAME.month_start,
+            "window_end": _FRAME.month_end,
+            "tolerance": timedelta(0),
+        },
         "case": lambda: (
             request(NOW, NOW + timedelta(hours=1)),
             context(

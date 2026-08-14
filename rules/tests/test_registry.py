@@ -383,15 +383,21 @@ def test_build_availability_hours_reads_raw_minutes_params_directly():
 def test_build_max_bookings_per_week_behaves_like_the_class():
     window_start = datetime(2026, 7, 13, tzinfo=timezone.utc)
     window_end = datetime(2026, 7, 20, tzinfo=timezone.utc)
-    resolved = {"window_start": window_start, "window_end": window_end}
+    # `tolerance` (task 8.6): `evaluate` merges `request` with history itself now — see
+    # `rules.frequency`'s module docstring. Zero here means exact abutment only, so the one
+    # history entry below (not abutting the request) stays a separate session.
+    resolved = {"window_start": window_start, "window_end": window_end, "tolerance": timedelta(0)}
 
     built = REGISTRY["max_bookings_per_week"].build({"max_bookings": 1}, resolved)
     direct = MaxBookingsPerWeekRule(
-        max_bookings=1, window_start=window_start, window_end=window_end
+        max_bookings=1, window_start=window_start, window_end=window_end, tolerance=timedelta(0)
     )
 
     already_full = context(existing_booking(NOW - timedelta(days=1)))
-    req = request(NOW, NOW + timedelta(hours=1))
+    # Within `[window_start, window_end)` itself, unlike module-level `NOW` (2026-07-20 10:00),
+    # which the hardcoded window above does not cover — the rule now merges the request into the
+    # window count too (task 8.6), so a request the window does not contain would never be denied.
+    req = request(window_end - timedelta(hours=1), window_end)
     assert built.evaluate(req, already_full) == direct.evaluate(req, already_full)
     assert not built.evaluate(req, already_full).passed
 
@@ -399,11 +405,11 @@ def test_build_max_bookings_per_week_behaves_like_the_class():
 def test_build_max_bookings_per_month_behaves_like_the_class():
     window_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
     window_end = datetime(2026, 8, 1, tzinfo=timezone.utc)
-    resolved = {"window_start": window_start, "window_end": window_end}
+    resolved = {"window_start": window_start, "window_end": window_end, "tolerance": timedelta(0)}
 
     built = REGISTRY["max_bookings_per_month"].build({"max_bookings": 1}, resolved)
     direct = MaxBookingsPerMonthRule(
-        max_bookings=1, window_start=window_start, window_end=window_end
+        max_bookings=1, window_start=window_start, window_end=window_end, tolerance=timedelta(0)
     )
 
     already_full = context(existing_booking(NOW - timedelta(days=1)))
