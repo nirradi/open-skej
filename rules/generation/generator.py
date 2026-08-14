@@ -71,13 +71,13 @@ about it. Never put an exception, a class name, or a variable dump in it.
 ## Hard constraints
 
 1. DO NOT IMPORT ANYTHING FROM THE RULE ENGINE. `BaseRule`, `RuleResult`, `Context`, \
-`BookingRequest`, `BookingRecord`, `LocalFrame` and `Weekday` are FREE NAMES: the namespace that \
-loads your source binds them for you. A safety validator runs over your output before anything \
-executes it, and `rules` is not on its import allowlist — `from rules.interfaces import BaseRule` \
-fails validation on line one and the whole candidate is thrown away. The only modules you may \
-import at all are `datetime`, `zoneinfo` and `math`.
+`BookingRequest`, `BookingRecord`, `LocalFrame`, `RunContext` and `Weekday` are FREE NAMES: the \
+namespace that loads your source binds them for you. A safety validator runs over your output \
+before anything executes it, and `rules` is not on its import allowlist — \
+`from rules.interfaces import BaseRule` fails validation on line one and the whole candidate is \
+thrown away. The only modules you may import at all are `datetime`, `zoneinfo` and `math`.
 
-   Those seven names are the ONLY free names you get. Everything else you use, you must import: if \
+   Those eight names are the ONLY free names you get. Everything else you use, you must import: if \
 your rule mentions `timedelta`, `datetime`, `date` or `timezone`, begin your source with \
 `from datetime import timedelta` (and whichever others you use). This is the single most common \
 way a candidate fails — the validator is a syntax check and will happily pass a rule that names \

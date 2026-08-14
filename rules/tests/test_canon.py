@@ -34,10 +34,11 @@ from rules.interfaces import (
     CalendarContext,
     Context,
     RuleResult,
+    RunContext,
     UserContext,
     Weekday,
 )
-from tests.frames import utc_frame
+from tests.frames import solo_run, utc_frame
 
 USER = "u1"
 RESOURCE = "court-1"
@@ -60,6 +61,7 @@ def context(
     *,
     frame_for: datetime | None = None,
     frame_end: datetime | None = None,
+    run: RunContext | None = None,
 ) -> Context:
     """A context for a UTC venue, its local frame resolved for ``frame_for``'s own day.
 
@@ -69,12 +71,20 @@ def context(
     reads the frame directly, so its tests must pass ``frame_end`` too: ``utc_frame`` otherwise
     defaults the frame's end to exactly one hour past ``frame_for``, which silently disagrees with
     a request built with a different duration.
+
+    No rule in this module reads ``context.run``, so ``run`` defaults to a span matching the same
+    default width the frame gets — inert, like the frame is for these rules — and a caller running
+    the *whole canon* through ``evaluate_request`` against a request of a different shape must pass
+    its own ``run`` (``solo_run(that_request)``) or the controller's run cross-check raises for a
+    reason unrelated to what the test is about.
     """
     start = frame_for if frame_for is not None else now
+    end = frame_end if frame_end is not None else start + timedelta(hours=1)
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
         local=utc_frame(start, frame_end),
+        run=run or RunContext(start_at=start, end_at=end, booking_count=1),
     )
 
 
@@ -330,7 +340,11 @@ def hours_rule() -> AvailabilityHoursRule:
 
 
 def hours_context(start_at: datetime, end_at: datetime) -> Context:
-    return context(frame_for=start_at, frame_end=end_at)
+    return context(
+        frame_for=start_at,
+        frame_end=end_at,
+        run=RunContext(start_at=start_at, end_at=end_at, booking_count=1),
+    )
 
 
 def test_a_booking_starting_exactly_at_opening_is_allowed():
@@ -491,27 +505,27 @@ def test_a_date_denial_beats_a_duration_denial():
     the user would shorten it, resubmit, and be refused again.
     """
     far = NOW + timedelta(days=90)
-    result = evaluate_request(hours_from(far, hours=3), context(frame_for=far), DEFAULT_CANON)
+    req = hours_from(far, hours=3)
+    result = evaluate_request(req, context(frame_for=far, run=solo_run(req)), DEFAULT_CANON)
     assert "days ahead" in (result.fail_reason or "")
 
 
 def test_a_past_denial_beats_a_duration_denial():
     yesterday = NOW - timedelta(days=1)
-    result = evaluate_request(
-        hours_from(yesterday, hours=3), context(frame_for=yesterday), DEFAULT_CANON
-    )
+    req = hours_from(yesterday, hours=3)
+    result = evaluate_request(req, context(frame_for=yesterday, run=solo_run(req)), DEFAULT_CANON)
     assert "already passed" in (result.fail_reason or "")
 
 
 def test_duration_is_reported_before_availability_hours():
     """An over-long booking that also runs past closing reports its length first."""
-    result = evaluate_request(
-        request(at(21, 30), at(23, 45)), context(frame_for=at(21, 30)), DEFAULT_CANON
-    )
+    req = request(at(21, 30), at(23, 45))
+    result = evaluate_request(req, context(frame_for=at(21, 30), run=solo_run(req)), DEFAULT_CANON)
     assert "at most 2 hours" in (result.fail_reason or "")
 
 
 def test_an_ordinary_booking_passes_the_whole_canon():
     tomorrow = NOW + timedelta(days=1)
-    result = evaluate_request(hours_from(tomorrow), context(frame_for=tomorrow), DEFAULT_CANON)
+    req = hours_from(tomorrow)
+    result = evaluate_request(req, context(frame_for=tomorrow, run=solo_run(req)), DEFAULT_CANON)
     assert result == RuleResult.allow()

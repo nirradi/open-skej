@@ -19,10 +19,11 @@ from rules.interfaces import (
     Context,
     HistoryContext,
     RuleResult,
+    RunContext,
     UserContext,
     Weekday,
 )
-from tests.frames import utc_frame
+from tests.frames import solo_run, utc_frame
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 USER = "u1"
@@ -42,11 +43,13 @@ def make_context(
     *bookings: BookingRecord,
     user_id: str = USER,
     frame_for: datetime = NOW,
+    run: RunContext | None = None,
 ) -> Context:
     return Context(
         user=UserContext(user_id=user_id),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
         local=utc_frame(frame_for),
+        run=run or solo_run(make_request()),
         history=HistoryContext(bookings=bookings),
     )
 
@@ -247,6 +250,7 @@ def test_a_booking_starting_exactly_at_the_day_boundary_is_in_frame():
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
         local=utc_frame(midnight),
+        run=solo_run(request),
         history=HistoryContext(),
     )
     assert evaluate_request(request, context, []).passed
@@ -262,6 +266,7 @@ def test_a_booking_running_past_the_local_day_is_accepted():
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
         local=utc_frame(late, late + timedelta(hours=2)),
+        run=solo_run(request),
         history=HistoryContext(),
     )
     assert context.local.end_minutes == 1500
@@ -272,3 +277,68 @@ def test_canon_may_be_any_iterable():
     rules = (SpyRule(RuleResult.allow()), SpyRule(RuleResult.deny("no")))
     result = evaluate_request(make_request(), make_context(), iter(rules))
     assert not result.passed
+
+
+# --------------------------------------------------------------------------------------
+# The run cross-check
+# --------------------------------------------------------------------------------------
+#
+# Same reasoning as the local-frame check above: a run that does not contain its own request
+# describes a different stretch of the calendar than the booking sits in, so a rule reading
+# ``run.duration`` would judge someone else's session. Fail closed on the outcome, loud on the
+# cause — this must raise, not deny.
+
+
+def test_a_run_starting_after_the_request_raises():
+    """The run's own start is later than the request it supposedly contains — this booking is not
+    actually inside the span the adapter resolved."""
+    request = make_request()
+    run = RunContext(
+        start_at=request.start_at + timedelta(minutes=1), end_at=request.end_at, booking_count=1
+    )
+    context = make_context(run=run)
+    with pytest.raises(ContextMismatchError, match="does not contain its own request"):
+        evaluate_request(request, context, [])
+
+
+def test_a_run_ending_before_the_request_raises():
+    """The mirror case: the run's own end falls before the request's end."""
+    request = make_request()
+    run = RunContext(
+        start_at=request.start_at, end_at=request.end_at - timedelta(minutes=1), booking_count=1
+    )
+    context = make_context(run=run)
+    with pytest.raises(ContextMismatchError, match="does not contain its own request"):
+        evaluate_request(request, context, [])
+
+
+def test_the_run_check_runs_before_any_rule():
+    spy = SpyRule(RuleResult.allow())
+    request = make_request()
+    run = RunContext(
+        start_at=request.start_at, end_at=request.end_at - timedelta(minutes=1), booking_count=1
+    )
+    context = make_context(run=run)
+    with pytest.raises(ContextMismatchError):
+        evaluate_request(request, context, [spy])
+    assert not spy.called
+
+
+def test_a_run_wider_than_the_request_on_both_sides_is_accepted():
+    """The run may legitimately be bigger than the request — it is the whole merged span, and the
+    request may be extending one end of a run that already reaches past the other."""
+    request = make_request()
+    run = RunContext(
+        start_at=request.start_at - timedelta(hours=1),
+        end_at=request.end_at + timedelta(hours=1),
+        booking_count=3,
+    )
+    context = make_context(run=run)
+    assert evaluate_request(request, context, []).passed
+
+
+def test_a_run_exactly_equal_to_the_request_is_accepted():
+    """The common case: no adjoining bookings, so the run is exactly the request, count 1."""
+    request = make_request()
+    context = make_context(run=solo_run(request))
+    assert evaluate_request(request, context, []).passed

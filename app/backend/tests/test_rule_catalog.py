@@ -25,6 +25,7 @@ from rules import (
     CalendarContext,
     Context,
     HistoryContext,
+    RunContext,
     UserContext,
     Weekday,
     evaluate_request,
@@ -137,6 +138,10 @@ def _context(booking: BookingRequest, tz_name: str = "UTC") -> Context:
     """A minimal, valid `Context` for `booking`, built through the same private helpers
     `test_rules_stub.py` already uses — this module has no interest in local-frame arithmetic of
     its own, only in whether a hoisted rule reads the frame it is handed correctly.
+
+    `run` mirrors what `app.rules_stub.evaluate` itself resolves for an empty history: the request
+    alone, `booking_count=1` — this module never passes history into `evaluate_request`, so that is
+    the only run any of these cases could genuinely have.
     """
     engine_request = _engine_request(booking)
     on_date = _local_date(engine_request.start_at, tz_name)
@@ -144,6 +149,9 @@ def _context(booking: BookingRequest, tz_name: str = "UTC") -> Context:
         user=UserContext(user_id=booking.user_id),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
         local=_build_local_frame(engine_request, tz_name, on_date),
+        run=RunContext(
+            start_at=engine_request.start_at, end_at=engine_request.end_at, booking_count=1
+        ),
         history=HistoryContext(),
     )
 

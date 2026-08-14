@@ -64,6 +64,7 @@ CANDIDATE_TESTS = textwrap.dedent("""\
         HistoryContext,
         LocalFrame,
         RuleResult,
+        RunContext,
         UserContext,
         Weekday,
     )
@@ -91,11 +92,16 @@ CANDIDATE_TESTS = textwrap.dedent("""\
         )
 
 
+    def run():
+        return RunContext(start_at=NOW, end_at=NOW + timedelta(hours=1), booking_count=1)
+
+
     def context(bookings=()):
         return Context(
             user=UserContext("user-1"),
             calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
             local=frame(),
+            run=run(),
             history=HistoryContext(bookings=tuple(bookings)),
         )
 

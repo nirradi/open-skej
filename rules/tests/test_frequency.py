@@ -33,6 +33,7 @@ from rules.interfaces import (
     CalendarContext,
     Context,
     HistoryContext,
+    RunContext,
     UserContext,
     Weekday,
 )
@@ -64,10 +65,14 @@ def context(
     now: datetime = NOW,
     week_starts_on: Weekday = Weekday.MONDAY,
 ) -> Context:
+    # These rules are driven through `.evaluate(request, context)` directly, never through
+    # `evaluate_request`'s cross-check (module docstring), so `run` has nothing it must stay
+    # aligned with — a fixed one-booking span anchored on `now` is enough.
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=week_starts_on, now=now),
         local=utc_frame(now, week_starts_on=week_starts_on),
+        run=RunContext(start_at=now, end_at=now + timedelta(hours=1), booking_count=1),
         history=HistoryContext(bookings=bookings),
     )
 

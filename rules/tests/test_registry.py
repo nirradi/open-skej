@@ -40,6 +40,7 @@ from rules.interfaces import (
     CalendarContext,
     Context,
     HistoryContext,
+    RunContext,
     UserContext,
     Weekday,
 )
@@ -68,11 +69,17 @@ def context(
     are inert for them and the default (anchored on ``now``) is fine. ``AvailabilityHoursRule``
     reads ``context.local`` directly, so its own tests pass ``frame_for``/``frame_end`` matching the
     request under test — see ``test_build_availability_hours_reads_raw_minutes_params_directly``.
+
+    Every comparison here is ``build(...).evaluate(...)`` against the rule constructed directly
+    (module docstring), never ``evaluate_request``, so ``context.run`` is inert the same way the
+    frame is for most types here — no rule this registry builds reads it yet.
     """
+    start = frame_for if frame_for is not None else now
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
-        local=utc_frame(frame_for if frame_for is not None else now, frame_end),
+        local=utc_frame(start, frame_end),
+        run=RunContext(start_at=start, end_at=start + timedelta(hours=1), booking_count=1),
         history=HistoryContext(bookings=bookings),
     )
 

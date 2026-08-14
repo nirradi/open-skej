@@ -18,6 +18,7 @@ from rules.interfaces import (
     HistoryContext,
     LocalFrame,
     RuleResult,
+    RunContext,
     UserContext,
     Weekday,
     history_window,
@@ -41,11 +42,13 @@ def make_context(
     *bookings: BookingRecord,
     now: datetime = NOW,
     week_starts_on: Weekday = Weekday.MONDAY,
+    run: RunContext | None = None,
 ) -> Context:
     return Context(
         user=UserContext(user_id="u1"),
         calendar=CalendarContext(week_starts_on=week_starts_on, now=now),
         local=utc_frame(now, week_starts_on=week_starts_on),
+        run=run or RunContext(start_at=now, end_at=now + timedelta(hours=1), booking_count=1),
         history=HistoryContext(bookings=bookings),
     )
 
@@ -311,6 +314,86 @@ def test_minutes_reject_a_non_int() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# RunContext — the contiguous span of the user's own bookings the request sits in
+# --------------------------------------------------------------------------------------
+
+
+def run(**overrides: object) -> RunContext:
+    """A valid one-booking run for Monday 2026-07-20, with fields swapped in per test."""
+    fields: dict = {
+        "start_at": utc(2026, 7, 20, 9),
+        "end_at": utc(2026, 7, 20, 10),
+        "booking_count": 1,
+    }
+    fields.update(overrides)
+    return RunContext(**fields)
+
+
+def test_a_valid_run_round_trips() -> None:
+    built = run()
+    assert built.start_at == utc(2026, 7, 20, 9)
+    assert built.end_at == utc(2026, 7, 20, 10)
+    assert built.booking_count == 1
+
+
+def test_run_duration_is_end_minus_start() -> None:
+    assert run(start_at=utc(2026, 7, 20, 9), end_at=utc(2026, 7, 20, 11, 30)).duration == timedelta(
+        hours=2, minutes=30
+    )
+
+
+def test_run_rejects_naive_datetimes() -> None:
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        run(start_at=NAIVE)
+    with pytest.raises(ValueError, match="timezone-aware UTC"):
+        run(end_at=NAIVE)
+
+
+def test_run_rejects_a_non_utc_offset() -> None:
+    offset = datetime(2026, 7, 20, 9, tzinfo=PLUS_TWO)
+    with pytest.raises(ValueError, match="must be UTC"):
+        run(start_at=offset)
+
+
+def test_run_rejects_a_non_datetime() -> None:
+    with pytest.raises(TypeError, match="must be a datetime"):
+        run(start_at="2026-07-20T09:00:00Z")  # type: ignore[arg-type]
+
+
+def test_run_start_must_be_strictly_before_end() -> None:
+    with pytest.raises(ValueError, match="must be strictly before"):
+        run(start_at=utc(2026, 7, 20, 10), end_at=utc(2026, 7, 20, 10))
+    with pytest.raises(ValueError, match="must be strictly before"):
+        run(start_at=utc(2026, 7, 20, 11), end_at=utc(2026, 7, 20, 10))
+
+
+def test_run_booking_count_must_be_at_least_one() -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        run(booking_count=0)
+    with pytest.raises(ValueError, match="at least 1"):
+        run(booking_count=-1)
+
+
+def test_run_booking_count_rejects_a_non_int() -> None:
+    with pytest.raises(TypeError, match="must be an int"):
+        run(booking_count=1.0)
+
+
+def test_run_booking_count_rejects_a_bool() -> None:
+    """``bool`` is an ``int`` subclass — ``True`` reaching a field that means "how many rows" would
+    silently read as one booking, which happens to be a plausible-looking value."""
+    with pytest.raises(TypeError, match="must be an int"):
+        run(booking_count=True)  # type: ignore[arg-type]
+
+
+def test_run_may_span_more_than_one_booking() -> None:
+    """The common case a run-aware rule exists for: several rows merged into one span."""
+    merged = run(start_at=utc(2026, 7, 20, 17), end_at=utc(2026, 7, 20, 20), booking_count=3)
+    assert merged.duration == timedelta(hours=3)
+    assert merged.booking_count == 3
+
+
+# --------------------------------------------------------------------------------------
 # HistoryContext
 # --------------------------------------------------------------------------------------
 
@@ -401,15 +484,24 @@ def test_window_rejection_names_the_offending_index() -> None:
 def test_context_rejects_wrong_component_types() -> None:
     calendar = CalendarContext(Weekday.MONDAY, NOW)
     local = utc_frame(NOW)
+    run = RunContext(start_at=NOW, end_at=NOW + timedelta(hours=1), booking_count=1)
     with pytest.raises(TypeError, match="must be a UserContext"):
-        Context(user="u1", calendar=calendar, local=local)  # type: ignore[arg-type]
+        Context(user="u1", calendar=calendar, local=local, run=run)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="must be a CalendarContext"):
-        Context(user=UserContext("u1"), calendar=NOW, local=local)  # type: ignore[arg-type]
+        Context(  # type: ignore[arg-type]
+            user=UserContext("u1"), calendar=NOW, local=local, run=run
+        )
     with pytest.raises(TypeError, match="must be a LocalFrame"):
-        Context(user=UserContext("u1"), calendar=calendar, local=NOW)  # type: ignore[arg-type]
+        Context(  # type: ignore[arg-type]
+            user=UserContext("u1"), calendar=calendar, local=NOW, run=run
+        )
+    with pytest.raises(TypeError, match="must be a RunContext"):
+        Context(  # type: ignore[arg-type]
+            user=UserContext("u1"), calendar=calendar, local=local, run=NOW
+        )
     with pytest.raises(TypeError, match="must be a HistoryContext"):
         Context(  # type: ignore[arg-type]
-            user=UserContext("u1"), calendar=calendar, local=local, history=()
+            user=UserContext("u1"), calendar=calendar, local=local, run=run, history=()
         )
 
 
@@ -426,11 +518,27 @@ def test_context_requires_a_local_frame_with_no_default() -> None:
         )
 
 
+def test_context_requires_a_run_with_no_default() -> None:
+    """The second field spending the aggregate's "add a field without breaking every rule" promise
+    (``local`` was the first, in 7.3). The only default available is "the request alone, count 1",
+    which is right for a request with no neighbours and silently permissive for one the adapter
+    forgot to resolve — a run-aware cap would then see a one-hour run where the user holds six.
+    Callers resolve a real run or they do not get a context, exactly as for ``local``.
+    """
+    with pytest.raises(TypeError, match="run"):
+        Context(  # type: ignore[call-arg]
+            user=UserContext("u1"),
+            calendar=CalendarContext(Weekday.MONDAY, NOW),
+            local=utc_frame(NOW),
+        )
+
+
 def test_context_history_defaults_to_empty() -> None:
     context = Context(
         user=UserContext("u1"),
         calendar=CalendarContext(Weekday.MONDAY, NOW),
         local=utc_frame(NOW),
+        run=RunContext(start_at=NOW, end_at=NOW + timedelta(hours=1), booking_count=1),
     )
     assert context.history.bookings == ()
 

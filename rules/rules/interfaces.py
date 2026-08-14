@@ -33,6 +33,7 @@ __all__ = [
     "UserContext",
     "CalendarContext",
     "LocalFrame",
+    "RunContext",
     "HistoryContext",
     "Context",
     "RuleResult",
@@ -234,6 +235,51 @@ class LocalFrame:
 
 
 @dataclass(frozen=True)
+class RunContext:
+    """The contiguous span of this user's bookings that the request sits in.
+
+    Two consecutive bookings — 17:00-18:00 and 18:00-19:00 held by the same user — are, by default,
+    one 2-hour session rather than two independent hours: the owner's stated intent
+    (``ops/pending/bugs/max-duration-cannon.md``, "Resolution: the run") is that a member who books
+    back-to-back is treated as if they had made one longer booking, unless a rule says otherwise. A
+    rule that wants that reading judges ``context.run`` instead of the request; one that does not
+    keeps reading ``request.duration`` exactly as before, unaffected by this field's existence.
+
+    This is deliberately **not** built by rewriting ``request`` into the merged span and handing
+    that to the engine instead. That obvious shortcut breaks ``NotInThePastRule`` (a merged start
+    can sit before ``now`` for a booking that is genuinely extending one already in progress),
+    ``LocalFrame`` (a merged start crossing local midnight resolves the frame for the wrong day),
+    ``BookingHorizonRule`` (a merged start can only look closer than the real one, loosening the
+    bound), and the counting rules (double-counting the same session unless history is rewritten
+    too). Carrying the run as its own field means every one of those rules keeps seeing the request
+    it was actually asked to judge, and only a rule that explicitly reads ``context.run`` opts into
+    the merged view at all.
+
+    ``start_at`` / ``end_at`` bound the whole merged run, not just the request; ``booking_count`` is
+    how many rows compose it, the request itself included, so a request with no adjoining bookings
+    still has ``booking_count == 1`` rather than ``0``. The adapter resolves this **transitively** —
+    17-18 and 18-19 already held, a request for 19-20, merges into one 17-20 run — and **across
+    every Resource in the Space**, since ``HistoryContext`` is already filtered to the user and
+    never to one resource; a run is consequently not a real booking on any one court, which is the
+    second reason it is never dressed up as a ``BookingRequest``.
+    """
+
+    start_at: datetime
+    end_at: datetime
+    booking_count: int
+
+    def __post_init__(self) -> None:
+        _validate_span(self.start_at, self.end_at, "RunContext")
+        count = _require_int(self.booking_count, "RunContext.booking_count")
+        if count < 1:
+            raise ValueError(f"RunContext.booking_count must be at least 1; got {count}")
+
+    @property
+    def duration(self) -> timedelta:
+        return self.end_at - self.start_at
+
+
+@dataclass(frozen=True)
 class HistoryContext:
     """The requesting user's relevant prior bookings.
 
@@ -291,10 +337,14 @@ class Context:
 
     Aggregating rather than passing four positional parameters is what lets a later task add a new
     kind of context without breaking the ``evaluate`` signature of every rule ever written.
-    ``local`` is the first time that promise is spent, and it is spent as a **required field with
-    no default**: the only frame a default could name is the UTC one, and a rule reading that is
-    silently wrong for every venue not on UTC — precisely the bug ``LocalFrame`` exists to remove,
-    reintroduced as a convenience. Every caller resolves a real frame or does not build a context.
+    ``local`` was the first time that promise was spent; ``run`` is the second, and it is spent the
+    same way — as a **required field with no default**. The only default available for a run is "the
+    request alone, count 1", which is exactly right for a request with no adjoining bookings and
+    silently **permissive** for one the adapter simply forgot to resolve: a run-aware cap would then
+    see a one-hour run where the user actually holds six. Silently permissive is the direction this
+    codebase does not accept (``CLAUDE.md``, "Fail closed"). Every caller resolves a real run — even
+    when that real run is just the request, which is the correct answer whenever history is empty,
+    not a degraded stand-in for one — or it does not get a context.
 
     The history window invariant is enforced here rather than on ``HistoryContext`` because it is
     the only place both the history and ``now`` are visible. A rule must not be able to silently
@@ -304,6 +354,7 @@ class Context:
     user: UserContext
     calendar: CalendarContext
     local: LocalFrame
+    run: RunContext
     history: HistoryContext = field(default_factory=HistoryContext)
 
     def __post_init__(self) -> None:
@@ -315,6 +366,8 @@ class Context:
             )
         if not isinstance(self.local, LocalFrame):
             raise TypeError(f"Context.local must be a LocalFrame, got {type(self.local).__name__}")
+        if not isinstance(self.run, RunContext):
+            raise TypeError(f"Context.run must be a RunContext, got {type(self.run).__name__}")
         if not isinstance(self.history, HistoryContext):
             raise TypeError(
                 f"Context.history must be a HistoryContext, got {type(self.history).__name__}"

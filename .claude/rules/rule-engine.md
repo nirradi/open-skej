@@ -71,12 +71,30 @@ into a pass defeats containment *silently* — it looks like a working rule that
   the resource. `BookingRecord` has no status field and the engine never inspects one: filtering
   belongs to the layer that owns the schema, so a future `deleted` or no-show flag cannot silently
   obsolete every rule that forgot to check it.
-* **`Context`** — aggregates `user` / `calendar` / `local` / `history` and enforces the
-  history-window invariant. **`local` is required and has no default**: the only frame a default
-  could name is the UTC one, and a rule reading that is silently wrong for every venue off UTC —
-  the precise bug the frame exists to remove, reintroduced as a convenience. Every caller resolves
-  a real frame or does not get a context. This is the first time the aggregate's promise below —
-  that a field can be added without touching `evaluate`'s signature — has actually been spent.
+* **`RunContext`** — `start_at`, `end_at`, `booking_count` (a plain `int`, at least 1, the request
+  itself included) and `duration` (a property, `end_at - start_at`). The contiguous, cross-Resource
+  span of this user's own bookings the request sits in: by default, two consecutive bookings are
+  treated as one session rather than two independent ones
+  (`ops/pending/bugs/max-duration-cannon.md`, "Resolution: the run"), and a rule that wants that
+  reading reads `context.run` instead of `request`; a rule that does not is unaffected by its
+  existence. This is deliberately **not** built by rewriting `request` into the merged span and
+  handing the engine that instead — the obvious shortcut breaks four things: `NotInThePastRule`
+  denies a merged start that predates `now` for a booking genuinely extending one already in
+  progress; `LocalFrame` resolves against the wrong date when a merged start crosses local midnight;
+  `BookingHorizonRule` only ever loosens, since a merged start can look no further out than the real
+  one; and the counting rules double-count a session unless history is rewritten too. Carrying the
+  run as its own field on `Context` means every rule that does not explicitly read it keeps judging
+  the request it was actually asked to judge.
+* **`Context`** — aggregates `user` / `calendar` / `local` / `run` / `history` and enforces the
+  history-window invariant. **`local` and `run` are both required and have no default**: the only
+  frame a default could name is the UTC one, and a rule reading that is silently wrong for every
+  venue off UTC — the precise bug the frame exists to remove, reintroduced as a convenience; the only
+  run a default could name is "the request alone, count 1", which is right for a request with no
+  neighbours and silently **permissive** for one the adapter forgot to resolve, since a run-aware cap
+  would then see a one-hour run where the user holds six — the direction this codebase's fail-closed
+  discipline does not accept. Every caller resolves a real frame and a real run or does not get a
+  context. `local` was the first time the aggregate's promise below — that a field can be added
+  without touching `evaluate`'s signature — was spent; `run` is the second.
 * **`RuleResult`** — `passed` (bool), `fail_reason` (`str | None`, friendly copy shown verbatim in
   the UI). Named `passed` because `pass` is a keyword.
 * **`BaseRule`** — abstract, requiring `evaluate(self, request, context) -> RuleResult`. The
@@ -110,6 +128,13 @@ sits in, so a rule counting "bookings in this local day" would quietly count ano
 answering "denied" would present that adapter bug as an ordinary refusal. Fail closed on the
 outcome, loud on the cause. **`start_at` only** — `end_at` may legitimately fall past the local day,
 which is exactly what an `end_minutes` above 1440 means.
+
+**The cross-check covers the run too.** `run.start_at <= request.start_at and request.end_at <=
+run.end_at`, or `ContextMismatchError` — a run that does not contain its own request describes a
+different stretch of the calendar than the booking sits in, so a rule reading `run.duration` or
+`run.booking_count` would silently judge someone else's session. Both bounds are checked because a
+run may legitimately be wider than the request on either side (the request extending a run that
+already reaches past it) or both (the request landing inside a run two hops away on either side).
 
 ## Backend integration
 
@@ -151,12 +176,12 @@ through the path an unregistered `rule_type` already took. That is the fail-clos
 no new code: **an unavailable rule is a rule that refuses, never one that is skipped**, since
 skipping it would silently drop a constraint a Space had configured.
 
-**The namespace a hoisted rule executes in binds `SAFE_BUILTINS`, the seven engine free names, and
+**The namespace a hoisted rule executes in binds `SAFE_BUILTINS`, the eight engine free names, and
 the two pieces of execution machinery a module cannot run without.** `SAFE_BUILTINS` is a list of
 names a rule may *write*; a compiled module also calls builtins its source never mentions — every
 `class` statement calls `__build_class__` and every `import` calls `__import__`. Withholding those
 two hardens nothing and makes *every* generated rule unhoistable, since a rule is a class by
-definition and the Generator's prompt requires it to import anything outside the seven free names.
+definition and the Generator's prompt requires it to import anything outside the eight free names.
 `__import__` is the guarded one above; `__build_class__` is handed over as-is, because building a
 class is what the source was validated as doing. The free names come from `harness.ENGINE_NAMES`
 rather than a second list, for the same reason that tuple exists at all. This namespace is
@@ -184,7 +209,7 @@ the guard would stop working. A genuinely unknown id still denies; self-healing 
 for failing closed.
 
 `app/backend/app/rules_stub.py` is the adapter, and the whole of it. It holds no rule logic; it
-translates between the HTTP boundary and `evaluate_request`, and five translations live there and
+translates between the HTTP boundary and `evaluate_request`, and six translations live there and
 nowhere else. **It converts every datetime to UTC** (`.astimezone(timezone.utc)`) before building
 engine types — the engine rejects a non-zero offset outright, so a booking a client sends as
 `+02:00` must be converted, and is then judged on its UTC wall clock. **It supplies the allow-path
@@ -209,6 +234,34 @@ the end rounds up, since rounding it down would report a booking as finishing ea
 and is the permissive direction. `DEFAULT_CANON` is no longer what the API runs — it remains the *reference* canon the
 generation loop is measured against and the source of the default values a Space that overrides
 nothing would use.
+
+**It resolves the run** every context carries — `_resolve_run`, task 8.4. The request plus every
+history entry (already Space-wide and user-filtered, so cross-Resource falls out of the input rather
+than needing to be built) are swept once, sorted by `start_at`, merging while the gap to the next
+span is zero, negative (an overlap, reachable across two Resources), or smaller than a **gap
+tolerance**; `_resolve_run` picks the merged span the request itself fell into back out of that
+sweep. The merge is **transitive** — 17-18 and 18-19 held, a request for 19-20, is one 17-20 run —
+so a user can be denied by a booking two hops away, and that is intended. When history is empty the
+only span in the sweep is the request's own, so the run is the request alone with
+`booking_count=1`; that is the correct answer, not a degraded one.
+
+**The gap tolerance is that date's own resolved minimum duration, zero when no `min_duration` row
+governs the date — not exact abutment, even though the run's own design note (`max-duration-cannon.md`,
+decision 3) chose exact abutment first.** That decision rests on every booking landing on a slot
+grid, which is what makes a sub-slot gap unconstructable; `slot_alignment` is a per-Space row, not a
+property of the engine, so a Space configuring `min_duration` without it has arbitrary start times,
+and a gap smaller than the minimum duration — 17:00-18:00 and 18:05-19:05, with a 5-minute gap — is
+dead space nobody could ever construct a booking to fill. Left as exact abutment, that gap would
+fracture every run-based rule for free. A tolerance equal to the minimum duration closes it without
+branching on whether a grid exists: any gap a legal booking could actually occupy is at least that
+long, so a gap shorter than it is indistinguishable from no gap at all, and a Space with no
+`min_duration` row gets `tolerance == 0` — exact abutment, unchanged. The resolution is read from
+`resolve_day_schedule(config, on_date).min_duration_minutes` rather than re-derived here, including
+its "two matching rows AND to the stricter" combining rule (the larger minimum wins) — a second
+implementation of "what minimum duration governs this date" would be exactly the drift this document
+keeps warning about. That field's own wire exposure and its coherence case against the operating
+window are task 8.2's; task 8.4 added the resolution to `resolve_day_schedule` because it needed it
+first, and 8.2 builds on it rather than re-deriving it.
 
 `rules_stub.py` also holds one thing that is not a fifth translation onto `evaluate_request` — it
 never calls it. `resolve_day_schedule`, called by `GET /spaces/{public_id}/schedule`
@@ -624,8 +677,8 @@ importing from it.
 
 **The prelude binds exactly the free names the Generator's prompt promises**, and no more. It is that
 promise in executable form; binding one extra would admit a candidate here that fails wherever it is
-really loaded. There are **seven**: `BaseRule`, `BookingRecord`, `BookingRequest`, `Context`,
-`LocalFrame`, `RuleResult` and `Weekday`. `harness.ENGINE_NAMES` and the prompt's own count are
+really loaded. There are **eight**: `BaseRule`, `BookingRecord`, `BookingRequest`, `Context`,
+`LocalFrame`, `RuleResult`, `RunContext` and `Weekday`. `harness.ENGINE_NAMES` and the prompt's own count are
 asserted equal by a test, because the two are one statement written in two languages and a name added
 to only one of them fails silently — a candidate binds in the sandbox on the strength of a name the
 model was never told it could use, passes there, and dies wherever it is really loaded.
