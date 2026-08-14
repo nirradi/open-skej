@@ -388,13 +388,14 @@ apart, since its own `evaluate` reads only `context.run`, and it is `True` anywa
 itself is resolved from history before the rule ever runs ("It resolves the run" below); a Space
 configuring that rule and nothing else that reads history must still make the router run the
 Space-wide history query, or the run the rule receives is always the request alone and it silently
-never denies — the exact silently-permissive failure this codebase refuses. This widens what 7.7's
-derivation of the flag checks for a *generated* type (`generation/manifest.py`,
-`_mentions_history`): that check still only looks for `context.history` in the source and will
-under-report `True` for a generated rule that reads `context.run` the way this one does — a real
-gap, left open deliberately, because teaching the Generator and its manifest call about the run is
-task 8.8's job, not this one's; this paragraph only names the gap so it is not rediscovered as a
-surprise. **`needs_local_resolution`**, true for `slot_alignment` and the four history-reading
+never denies — the exact silently-permissive failure this codebase refuses. A *generated* type's own
+derivation of the flag (`generation/manifest.py`, `_mentions_history`) checks for `context.run` in
+the source as well as `context.history`, for the identical reason: a generated rule that reads only
+the run never spells "history" anywhere in its own text, and checking for that word alone would
+under-report `True` for it exactly as it would have for a hand-written `max_consecutive_duration`.
+That check can only ever raise the model's own declared claim, never lower it (the manifest call's
+own "AI generation loop" paragraph below has the mechanics).
+**`needs_local_resolution`**, true for `slot_alignment` and the four history-reading
 rules from `frequency.py` — the five whose constructor needs values resolved against the Space's
 own zone and the booking's own date rather than the raw stored params, which is what keeps every
 local-to-UTC conversion at the adapter boundary instead of inviting a rule type to convert for
@@ -824,6 +825,20 @@ month, weekday, and the time of day a booking starts — and says plainly that `
 worked rule reading `context.local.start_minutes`, because that section does most of the teaching and
 a facility shown only in a constraint list gets used less than one that is demonstrated.
 
+**The Generator is told which span a rule judges, the same lesson arriving for a second facet.**
+`request.duration` is the one booking a rule was handed; `context.run.duration` is the contiguous,
+cross-Resource session the request already sits inside, with the request folded in
+(`RunContext`, "It resolves the run" above). A constraint phrased "in a row", "back to back", or
+"consecutively", or one that caps a total a member could trivially split into two separate bookings,
+wants the run rather than the request, and the choice is the rule author's, never a default — the
+same ambiguity `MaxConsecutiveDurationRule` closes for the hand-written canon
+(`ops/pending/bugs/max-duration-cannon.md`) reproduces itself in every generated duration rule until
+the prompt says so. A real generated peak-hours rule did exactly that
+(`ops/pending/bugs/generated-rules-underparameterized.md`): 17:00–18:00 plus 18:00–19:00 read as two
+hours of peak play under a rule whose whole purpose was to cap peak at one. The Style section carries
+a third worked rule reading `context.run.duration`, for the identical reason the local-frame one does
+— a field named only in a constraint list gets used less than one demonstrated.
+
 **The Tester is told to pin a case where the local frame and the UTC clock disagree.** A rule reading
 `start_at.hour` instead of `context.local.start_minutes` passes every test written for a venue on UTC
 and is wrong for every other venue, so a suite that never separates the two cannot catch the mistake
@@ -833,6 +848,15 @@ wrong. It also carries one complete `Context` fixture for the suite to copy, and
 convenience: an example showing a `LocalFrame` with the surrounding construction left implied is one
 a model completes from memory, and it completes it without `week_starts_on` — measured on a live run,
 which is the same defect recorded below arriving through a new door.
+
+**The Tester is told to pin a run-versus-request case, on whichever side applies to the candidate.**
+A suite that never builds a `RunContext` wider than the request cannot tell a rule reading
+`context.run` apart from one reading `request.duration` — both pass identically otherwise. So a
+candidate that reads `context.run` must be tested against a run that starts before the request, wide
+enough that the run alone breaks the bound while the request on its own would not; a candidate that
+does not must be tested against a wide run around a request that is well within bounds by itself, and
+must still pass. Without both halves a generated rule reaching for the wrong span is
+indistinguishable from one reaching for the right one.
 
 **`validate_source` runs on the generated source alone, and the prelude is prepended afterwards.**
 The assembled module imports `engine`, which is not on the import allowlist, so validating it instead
@@ -966,6 +990,18 @@ two errors are not symmetric: a false positive costs one history query the rule 
 false negative hands the rule an empty history and makes it silently *permissive* — a "no more than
 three a week" rule counting zero existing bookings and allowing one it should have refused. When the
 cheap check errs in the safe direction, take the cheap check.
+
+**The source check can only elevate the model's own declared claim, never suppress it.**
+`generate_manifest` computes `declared_reads_history or _mentions_history(rule_source)` — an `or`,
+not an `and` — because the asymmetry above cuts both ways on the model's own account of itself: a
+model that under-claims `false` for a rule reading `context.run` (a real reading, not a hallucinated
+one — the source genuinely never spells "history") must still be corrected *up* by the source check,
+or the false negative the check exists to catch survives the one place it does the most damage. A
+model that claims `true` is trusted outright and never marked down against a substring miss, because
+downgrading an honest `true` would reintroduce that identical false negative through the opposite
+door. Correcting only ever in the permissive-to-restrictive direction is what "deliberately
+over-inclusive" means for a *derived* value combined with a *declared* one, not merely for the
+substring check in isolation.
 
 **The generation client is chosen by `RULE_GENERATION_CLIENT`, and `stub` is the default.**
 `generation.stub.StubLLMClient` answers with a canned, valid rule and a canned suite, deterministically

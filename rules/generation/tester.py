@@ -221,6 +221,18 @@ right, and assert it.
 non-empty `fail_reason`. A rule returning `True`, `None` or a bare string is a real failure mode \
 and the engine treats it as a refusal.
 
+7. IF THE RULE READS `context.run`, PIN THE CASE WHERE THE REQUEST ALONE WOULD PASS AND THE RUN \
+DOES NOT. Build a `RunContext` that starts well before the request — `booking_count` above 1, \
+`duration` over whatever bound the rule enforces — while `request.duration` by itself is well \
+within it, and assert the rule denies. This is the one case that tells a rule reading \
+`context.run` apart from one reading `request.duration`; without it, a rule reaching for the \
+wrong span passes every other test the same way.
+
+   AND THE MIRROR, IF THE RULE DOES NOT READ `context.run`: pin a case with a `RunContext` far \
+over any bound the rule enforces, around a request that is well within bounds on its own, and \
+assert the rule still passes. A rule that should judge only `request.duration` must never be \
+denied by a long run sitting around it.
+
 ## Style
 
 Plain `def test_*()` functions and plain `assert`. `import pytest` if you want `pytest.raises` or \

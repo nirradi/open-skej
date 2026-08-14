@@ -72,6 +72,23 @@ READS_HISTORY_RULE = textwrap.dedent("""\
     """)
 
 
+#: A verified candidate that reads only `context.run`, never `context.history` — the false
+#: negative task 8.8 closes. Its run is resolved from history before it ever runs
+#: (`RunContext`, `.claude/rules/rule-engine.md`, "It resolves the run"), the identical shape
+#: `max_consecutive_duration` is registered with (`rules/rules/registry.py`'s module docstring).
+READS_RUN_RULE = textwrap.dedent("""\
+    class MaxConsecutivePlayRule(BaseRule):
+        def __init__(self, max_minutes):
+            self.max_minutes = max_minutes
+
+        def evaluate(self, request, context):
+            run_minutes = context.run.duration.total_seconds() / 60
+            if run_minutes > self.max_minutes:
+                return RuleResult.deny("Too much play back to back.")
+            return RuleResult.allow()
+    """)
+
+
 def _manifest_json(**overrides) -> str:
     payload = {
         "label": "Maximum duration",
@@ -162,17 +179,29 @@ def test_build_manifest_prompt_delimits_both_the_constraint_and_the_rule():
 
 
 # --------------------------------------------------------------------------------------------
-# reads_history: corrected against the source, never trusted from the model
+# reads_history: the source check can only elevate the model's declared claim, never suppress it
 # --------------------------------------------------------------------------------------------
+#
+# `generate_manifest` computes `declared_reads_history or _mentions_history(rule_source)` — an
+# `or`. The damaging error is a false negative (an empty history handed to a rule that needed one,
+# silently permissive); a false positive only costs one query a rule then ignores. That asymmetry
+# means the source check must be able to raise a `false` claim to `true`, and must never lower a
+# `true` claim to `false` on the strength of a substring miss — doing the latter would reintroduce
+# the identical false negative through the opposite door. Task 8.8 is where this became
+# load-bearing: a generated rule reading only `context.run` genuinely needs history even though
+# its own account of itself, following the manifest prompt's literal instructions, is `false`.
 
 
-def test_reads_history_true_on_a_source_that_never_touches_history_is_corrected_to_false():
+def test_reads_history_true_from_the_model_is_trusted_even_when_the_source_does_not_confirm_it():
+    """A `true` claim is never marked down against a substring miss — see the module docstring on
+    why suppressing an honest `true` would be the same false negative arriving from the other side.
+    """
     manifest = generate_manifest(
         ONE_PARAM_RULE,
         "max 2 hours",
         client=FakeClient(_manifest_json(reads_history=True)),
     )
-    assert manifest.reads_history is False
+    assert manifest.reads_history is True
 
 
 def test_reads_history_true_on_a_source_that_does_touch_history_stays_true():
@@ -198,7 +227,11 @@ def test_reads_history_true_on_a_source_that_does_touch_history_stays_true():
     assert manifest.reads_history is True
 
 
-def test_reads_history_false_is_never_elevated_to_true():
+def test_reads_history_false_from_the_model_is_elevated_to_true_when_the_source_reads_history():
+    """The model under-claims `false`; the source genuinely reads `context.history.bookings`. The
+    source check must win, or a model that mis-describes its own rule silently drops the history
+    query the rule actually needs.
+    """
     manifest = generate_manifest(
         READS_HISTORY_RULE,
         "max 2 a week",
@@ -217,6 +250,50 @@ def test_reads_history_false_is_never_elevated_to_true():
                 reads_history=False,
             )
         ),
+    )
+    assert manifest.reads_history is True
+
+
+def test_reads_history_false_from_the_model_is_elevated_when_the_source_reads_only_the_run():
+    """The exact case task 8.8 exists for. `READS_RUN_RULE` never spells "history" anywhere in its
+    own text, so a model faithfully following the manifest prompt's literal instructions ("true if
+    `evaluate` reads `context.history.bookings`") declares `false` — a likely claim, not an unlucky
+    one. Its run is still resolved from history before the rule ever runs (`RunContext`,
+    `.claude/rules/rule-engine.md`, "It resolves the run"), so `reads_history` must come out `true`
+    regardless: this is what closes the gap, not the earlier version of this test that declared
+    `true` and never exercised the correction at all.
+    """
+    manifest = generate_manifest(
+        READS_RUN_RULE,
+        "no more than two hours of play in a row",
+        client=FakeClient(
+            _manifest_json(
+                params=[
+                    {
+                        "name": "max_minutes",
+                        "kind": "integer",
+                        "label": "Max consecutive minutes",
+                        "unit": "minutes",
+                        "required": True,
+                        "minimum": 1,
+                    }
+                ],
+                reads_history=False,
+            )
+        ),
+    )
+    assert manifest.reads_history is True
+
+
+def test_reads_history_false_from_the_model_stays_false_when_the_source_confirms_neither():
+    """Elevation is not unconditional. `ONE_PARAM_RULE` reads neither `context.history` nor
+    `context.run`, and the model correctly declares `false` — that combination must stay `false`,
+    or every generated rule would silently acquire `reads_history=True` regardless of what it does.
+    """
+    manifest = generate_manifest(
+        ONE_PARAM_RULE,
+        "max 2 hours",
+        client=FakeClient(_manifest_json(reads_history=False)),
     )
     assert manifest.reads_history is False
 

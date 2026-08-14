@@ -196,12 +196,17 @@ def generate_manifest(
         label=label,
         description=manifest_description,
         params=params,
-        # The damaging direction is a false positive: it would skip the Space-wide history query
-        # and run a counting rule against nothing, which is silently permissive. Trust the source
-        # over the model's own claim — an over-claimed `true` is corrected, an under-claimed
-        # `false` is not elevated, because a rule that genuinely never reads history costs nothing
-        # extra by having it stay `false`.
-        reads_history=declared_reads_history and _mentions_history(rule_source),
+        # The damaging direction is a false negative: it would skip the Space-wide history query
+        # and run a rule that needs history against none at all, which is silently permissive —
+        # a "no more than three a week" rule counting zero bookings it was never given and
+        # allowing one it should have refused. A false positive only costs one query a rule then
+        # ignores. So the source can elevate a `false` claim to `true` (a rule reading
+        # `context.run` genuinely needs history even when its own account of itself says
+        # otherwise — see `_mentions_history`), but it can never suppress a `true` claim: the
+        # model's own `true` is trusted outright, because downgrading it on the strength of a
+        # substring miss would reintroduce the exact false negative this whole correction exists
+        # to close. When the two disagree, whichever one says `true` wins.
+        reads_history=declared_reads_history or _mentions_history(rule_source),
     )
 
 
@@ -232,14 +237,20 @@ def _string_field(fields: dict[str, Any], name: str, *, payload: str) -> str:
 
 
 def _mentions_history(source: str) -> bool:
-    """Whether ``source`` looks like it reads booking history at all.
+    """Whether ``source`` looks like it reads booking history at all — directly via
+    ``context.history``, or indirectly via ``context.run``, which the adapter resolves from history
+    before the rule ever runs (``RunContext``, ``.claude/rules/rule-engine.md``, "It resolves the
+    run"). A rule naming only ``context.run`` never mentions "history" in its own source, so
+    checking for that word alone under-reports exactly the rules task 8.8 exists to cover — see
+    ``rules/rules/registry.py``'s module docstring on what ``reads_history`` means for
+    ``max_consecutive_duration``, the hand-written rule in the identical shape.
 
     A substring check, not an AST walk, and deliberately over-inclusive: a false positive costs one
     history query a rule then ignores, while a false negative hands a counting rule an empty
     history and makes it silently permissive — the one direction this codebase never accepts. When
     the cheap check is wrong in the safe direction, take the cheap check.
     """
-    return "history" in source
+    return "history" in source or "context.run" in source
 
 
 def _build_param(entry: Any, *, payload: str) -> RuleParam:
