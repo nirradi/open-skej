@@ -60,7 +60,11 @@ siblings.
   Resources — the frequency cap is Space-wide, and demonstrating that
   requires a third booking to land on a *different* Resource than the first
   two — and neither the member nor the stranger has a membership row in
-  either — a member of Space A must get 404 here, never 403.
+  either — a member of Space A must get 404 here, never 403. The cap now
+  counts sessions, not rows (task 8.6): three bookings that abut each other
+  in time compose one session and never trip a cap of three, so demonstrating
+  the cap manually needs three genuinely separate, non-adjoining bookings —
+  not merely three ``POST``s.
 
 ## Reset, not accumulate
 

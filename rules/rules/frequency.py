@@ -1,4 +1,4 @@
-"""Hand-written canon rules that count a user's bookings over a calendar window.
+"""Hand-written canon rules that count a user's sessions over a calendar window.
 
 A sibling of ``canon.py`` rather than part of it: these two rules are the first that read
 ``context.history``, and they are the only ones whose verdict depends on anything beyond the request
@@ -8,8 +8,49 @@ Written by hand, not generated, for the same reason as the rest of the canon: th
 reference the generation loop is measured against, and "max 2 times a week" is the golden example
 the loop is expected to reproduce.
 
+**They count sessions, not rows — task 8.6.** Two bookings the same user holds back to back are one
+session, not two (``ops/pending/bugs/max-duration-cannon.md``, "Counting runs, not rows"): a cap of
+two meaning two *sessions* is not served by counting raw booking rows, since a member who books two
+abutting hours would otherwise spend the whole cap on one afternoon of continuous play.
+
+**The merge happens inside ``evaluate``, on ``request`` and ``context.history.bookings`` together —
+not ahead of time, on ``Context`` itself.** The plan this task shipped from named a preferred
+mechanism first: have the adapter fold the request into the merged runs and hand this rule a
+``Context.history`` that already reflects them, so the rule would do nothing but drop the old
+``+1``. That mechanism conflicts with an invariant one layer up that is not visible from this
+module: ``Context.__post_init__`` (``interfaces.py``) requires every entry in
+``context.history.bookings`` to fall inside ``history_window(context.calendar.now)`` — the
+"evaluation costs at most one calendar month of history" promise. A request folded into that field
+is not bounded by that promise at all; it can be booked arbitrarily far out (limited only by
+``BookingHorizonRule``, itself often configured well past a month), so folding it into
+``Context.history`` raises ``ValueError`` on construction for any request beyond the window instead
+of evaluating normally — breaking an ordinary future booking on *any* Space running one of these two
+rules, not merely an edge case. So the request is merged in here instead, at evaluate time, where it
+is a live parameter rather than a field a shared invariant polices. This also removes the need for
+the ``resource_id`` fiction the plan flagged as a real cost of the preferred mechanism (a merged run
+crossing Resources has no single true one) — merging ``(start, end)`` pairs directly needs no
+``BookingRecord`` to carry a resource at all.
+
+**``tolerance`` is what makes two rows one session.** Supplied at construction (like
+``window_start``/``window_end``, below), it is the adapter's resolved gap tolerance — that date's
+own minimum duration, zero when none governs it (``rules.spans.merge_adjoining_spans``,
+``app.rules_stub._resolve_run``, task 8.4). ``request`` and every entry in
+``context.history.bookings`` are swept together through :func:`rules.spans.merge_adjoining_spans`,
+and the rule counts how many of the merged runs **start** inside its window — no ``+1``: since the
+request is one of the spans the sweep already merges, a request that only extends a run the user
+already holds changes nothing about which runs start where, while a request that opens a new
+session adds exactly one run starting in the window, which is what pushes a count over the line.
+Nothing about this rule enforces that a caller handed it real history — it trusts
+``context.history.bookings`` completely, per the next paragraph — but the merge itself, unlike the
+old ``+1``, cannot forget to count the request: it is always one of
+the spans swept.
+
+**A run counts on the side it begins**, matching every other window in this contract: extending a
+run that started last week adds nothing to this week's count. Consistent, and mildly surprising the
+first time someone meets it — but the alternative is counting one session twice.
+
 **Everything in ``HistoryContext`` counts.** No status is inspected and none exists to inspect —
-``BookingRecord`` has no such field. A booking that should not count toward a limit is one the
+``BookingRecord`` has no such field. An entry that should not count toward a limit is one the
 caller does not put in the context. The engine stays ignorant of a schema that will keep changing;
 a rule that filtered internally would silently mis-enforce the day a ``deleted`` or ``no_show`` flag
 appeared, with nothing to signal that it had.
@@ -34,14 +75,14 @@ this month's traffic. That property now lives in whoever computes the bounds, an
 of the *caller* rather than of these rules; ``app.rules_stub`` resolves both windows from the
 booking's own local date for exactly this reason. The practical consequence is unchanged: history
 reaches only as far as ``interfaces.history_window`` permits, so a request beyond it is measured
-against a history the caller has no bookings for and passes. That is the documented bound of the
-engine's promise — evaluation costs at most one calendar month of history — not a gap in these
-rules.
+against a history the caller has no bookings for, sweeps into a run of its own, and passes if that
+is not itself over the cap. That is the documented bound of the engine's promise — evaluation costs
+at most one calendar month of history — not a gap in these rules.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .interfaces import (
     BaseRule,
@@ -51,6 +92,7 @@ from .interfaces import (
     RuleResult,
     _require_utc,
 )
+from .spans import MergedSpan, merge_adjoining_spans
 
 __all__ = [
     "MaxBookingsPerWeekRule",
@@ -58,9 +100,14 @@ __all__ = [
 ]
 
 
-def _format_bookings(count: int) -> str:
-    """Render a booking count the way a person would say it, e.g. "1 booking", "3 bookings"."""
-    return f"{count} booking" if count == 1 else f"{count} bookings"
+def _format_sessions(count: int) -> str:
+    """Render a session count the way a person would say it, e.g. "1 session", "3 sessions".
+
+    Named for what is counted since task 8.6: a booking two rows compose is one session, and
+    telling a user they have "2 bookings" when they hold four rows that make two sessions is a
+    message they cannot reconcile with their own calendar.
+    """
+    return f"{count} session" if count == 1 else f"{count} sessions"
 
 
 def _validate_window(
@@ -82,19 +129,33 @@ def _validate_window(
     return start, end
 
 
-def _count_starting_within(
-    bookings: tuple[BookingRecord, ...], lower: datetime, upper: datetime
-) -> int:
-    """Count bookings whose ``start_at`` lies in the half-open interval ``[lower, upper)``.
+def _count_runs_starting_within(runs: list[MergedSpan], lower: datetime, upper: datetime) -> int:
+    """Count merged runs whose ``start_at`` lies in the half-open interval ``[lower, upper)``.
 
-    A booking belongs to the window it **starts** in, and to exactly one window: an interval that
-    straddles midnight on a boundary would otherwise be counted twice, once against each side.
+    A run belongs to the window it **starts** in, and to exactly one window: an interval that
+    straddles midnight on a boundary would otherwise be counted twice, once against each side. This
+    is the one piece of the old row-counting logic that carries over unchanged — what changed with
+    task 8.6 is only what it counts (runs, already including the request) rather than raw rows.
     """
-    return sum(1 for booking in bookings if lower <= booking.start_at < upper)
+    return sum(1 for run in runs if lower <= run.start_at < upper)
+
+
+def _sessions(
+    request: BookingRequest, history: tuple[BookingRecord, ...], tolerance: timedelta
+) -> list[MergedSpan]:
+    """``request``'s own span folded into ``context.history.bookings`` and swept once.
+
+    The request is always one of the spans the sweep merges — see the module docstring for why
+    that happens here, at evaluate time, rather than ahead of time on ``Context.history`` itself.
+    """
+    spans = [(request.start_at, request.end_at)] + [
+        (booking.start_at, booking.end_at) for booking in history
+    ]
+    return merge_adjoining_spans(spans, tolerance)
 
 
 class MaxBookingsPerWeekRule(BaseRule):
-    """A user may hold at most ``max_bookings`` bookings in the week the request falls in.
+    """A user may hold at most ``max_bookings`` sessions in the week the request falls in.
 
     The week is ``[window_start, window_end)``, a pair of UTC instants supplied by the caller. It is
     *not* derived here: which instants bound "the week this booking is in" depends on the venue's
@@ -102,16 +163,27 @@ class MaxBookingsPerWeekRule(BaseRule):
     deriving it. The caller is expected to resolve the week containing the **request**, in the
     venue's own zone, honouring whatever first-day-of-week convention applies.
 
-    The bound counts the request itself: with ``max_bookings=2`` and two bookings already in that
-    week, the third is refused — a check on the existing count alone would allow a booking that
-    takes the user one over the line.
+    ``tolerance`` is the gap ``evaluate`` closes when merging ``request`` with
+    ``context.history.bookings`` into sessions — see the module docstring. It defaults to
+    ``timedelta(0)`` (exact abutment only), which is what a caller resolving no ``min_duration`` for
+    the date should pass, and what a test constructing this rule directly is usually happy to take.
 
-    The boundary is half-open. A booking one second before the window starts belongs to the previous
+    The bound is compared directly against the merged session count, no ``+1`` — see the module
+    docstring for why: the request is always one of the spans merged, so the count already accounts
+    for it.
+
+    The boundary is half-open. A session one second before the window starts belongs to the previous
     week and does not count; one starting exactly at the boundary instant belongs to this week and
     does.
     """
 
-    def __init__(self, max_bookings: int, window_start: datetime, window_end: datetime) -> None:
+    def __init__(
+        self,
+        max_bookings: int,
+        window_start: datetime,
+        window_end: datetime,
+        tolerance: timedelta = timedelta(0),
+    ) -> None:
         if max_bookings <= 0:
             raise ValueError(
                 f"MaxBookingsPerWeekRule.max_bookings must be positive; got {max_bookings!r}"
@@ -120,36 +192,46 @@ class MaxBookingsPerWeekRule(BaseRule):
         self.window_start, self.window_end = _validate_window(
             window_start, window_end, "MaxBookingsPerWeekRule"
         )
+        self.tolerance = tolerance
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
         lower, upper = self.window_start, self.window_end
-        existing = _count_starting_within(context.history.bookings, lower, upper)
-        if existing + 1 > self.max_bookings:
+        runs = _sessions(request, context.history.bookings, self.tolerance)
+        count = _count_runs_starting_within(runs, lower, upper)
+        if count > self.max_bookings:
             return RuleResult.deny(
-                f"You can make at most {_format_bookings(self.max_bookings)} a week,"
-                f" and you already have {_format_bookings(existing)} that week."
+                f"You can make at most {_format_sessions(self.max_bookings)} a week,"
+                f" and this booking would bring you to {_format_sessions(count)} that week."
                 " Please pick a time in another week."
             )
         return RuleResult.allow()
 
 
 class MaxBookingsPerMonthRule(BaseRule):
-    """A user may hold at most ``max_bookings`` bookings in the calendar month the request falls in.
+    """A user may hold at most ``max_bookings`` sessions in the calendar month the request falls in.
 
     Calendar months, not rolling 30-day windows: the limit a user is told about is the one they can
-    count on a calendar. December rolls into January like any other boundary — a December booking
+    count on a calendar. December rolls into January like any other boundary — a December session
     does not count toward January's allowance.
 
     As with the weekly rule the month is ``[window_start, window_end)``, supplied by the caller
     rather than derived, for the same reason: "the calendar month this booking is in" is a question
     about the venue's local calendar, and the last local evening of a month is already the next
-    month in UTC for any venue far enough ahead of it.
+    month in UTC for any venue far enough ahead of it. ``tolerance`` is the merge gap — see
+    ``MaxBookingsPerWeekRule`` and the module docstring.
 
-    The bound counts the request itself, and the window is half-open, so a booking at the opening
-    instant belongs to that month and one a second earlier does not.
+    The bound is compared directly against the merged session count, no ``+1`` — see the module
+    docstring. The window is half-open, so a session at the opening instant belongs to that month
+    and one a second earlier does not.
     """
 
-    def __init__(self, max_bookings: int, window_start: datetime, window_end: datetime) -> None:
+    def __init__(
+        self,
+        max_bookings: int,
+        window_start: datetime,
+        window_end: datetime,
+        tolerance: timedelta = timedelta(0),
+    ) -> None:
         if max_bookings <= 0:
             raise ValueError(
                 f"MaxBookingsPerMonthRule.max_bookings must be positive; got {max_bookings!r}"
@@ -158,14 +240,16 @@ class MaxBookingsPerMonthRule(BaseRule):
         self.window_start, self.window_end = _validate_window(
             window_start, window_end, "MaxBookingsPerMonthRule"
         )
+        self.tolerance = tolerance
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
         lower, upper = self.window_start, self.window_end
-        existing = _count_starting_within(context.history.bookings, lower, upper)
-        if existing + 1 > self.max_bookings:
+        runs = _sessions(request, context.history.bookings, self.tolerance)
+        count = _count_runs_starting_within(runs, lower, upper)
+        if count > self.max_bookings:
             return RuleResult.deny(
-                f"You can make at most {_format_bookings(self.max_bookings)} a month,"
-                f" and you already have {_format_bookings(existing)} that month."
+                f"You can make at most {_format_sessions(self.max_bookings)} a month,"
+                f" and this booking would bring you to {_format_sessions(count)} that month."
                 " Please pick a time in another month."
             )
         return RuleResult.allow()

@@ -30,6 +30,7 @@ from .interfaces import (
 )
 from .registry import REGISTRY, ParamKind, RuleParam, RuleType, rule_types
 from .safety import UnsafeRuleError, validate_source
+from .spans import MergedSpan, merge_adjoining_spans
 
 __all__ = [
     "BaseRule",
@@ -68,4 +69,7 @@ __all__ = [
     "RuleParam",
     "RuleType",
     "rule_types",
+    # Interval-merging math shared by the run resolver and the frequency rules (task 8.6).
+    "MergedSpan",
+    "merge_adjoining_spans",
 ]

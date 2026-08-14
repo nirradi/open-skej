@@ -519,6 +519,124 @@ def test_max_bookings_per_month_denies_the_booking_that_goes_over():
     assert "a month" in result.message
 
 
+# --- task 8.6: the counting rules count runs, not rows ----------------------------------------
+#
+# `ops/pending/bugs/max-duration-cannon.md`, "Counting runs, not rows": these rules now resolve
+# `context.history` into merged sessions (`_history_of_runs`), the request already folded in, and
+# compare directly with no `+1`. The cases above (denied on a row count that never abuts anything)
+# hold unchanged — the row count and the run count agree whenever nothing merges — so what is new
+# here is exactly the cases where merging changes the verdict: abutment collapsing two rows into
+# one session, a request extending a run it already holds, and the "a run counts on the side it
+# begins" consequence at a window boundary.
+
+
+def test_two_abutting_bookings_count_as_one_against_a_weekly_cap():
+    """A member who books two abutting hours spends one slot of the cap, not two — the fix task 8.6
+    exists for. The two history rows below abut exactly and are drawn from two different Resources,
+    which a run merges across by design (`RunContext`)."""
+    weekly_cap = _config(max_bookings_per_week=2)
+    history = (
+        request(at(1), at(2), resource_id="court-1"),
+        request(at(2), at(3), resource_id="court-2"),
+    )
+
+    result = evaluate(request(at(10), at(11)), weekly_cap, history)
+
+    assert result.allowed
+
+
+def test_two_separated_bookings_count_as_two_against_a_weekly_cap():
+    """Contrast with the abutting case above: with a real gap between them, two bookings are still
+    two sessions, so the identical cap that admitted the abutting pair refuses this one."""
+    weekly_cap = _config(max_bookings_per_week=2)
+    history = (request(at(1), at(2)), request(at(5), at(6)))
+
+    result = evaluate(request(at(10), at(11)), weekly_cap, history)
+
+    assert not result.allowed
+
+
+def test_a_request_extending_a_held_run_is_allowed_at_a_weekly_cap_the_row_count_would_refuse():
+    """The regression task 8.6 exists for. Counting raw rows (``existing + 1 > max_bookings``)
+    would have refused this: one existing row plus the request is two, over a cap of one. Counting
+    runs instead sees one session, since the request abuts the existing booking exactly."""
+    weekly_cap = _config(max_bookings_per_week=1)
+    history = (request(at(9), at(10)),)
+
+    result = evaluate(request(at(10), at(11)), weekly_cap, history)
+
+    assert result.allowed
+
+
+def test_a_weekly_run_starting_before_the_window_does_not_count_even_when_the_request_crosses_in():
+    """A run counts on the side it **begins**. A session that started last week, which the request
+    merely extends into this one, is still last week's session — it adds nothing to this week's
+    count. Mildly surprising, and stated as intentional in `.claude/rules/rule-engine.md`."""
+    weekly_cap = _config(max_bookings_per_week=1)
+    week_start = DAY  # 2026-07-20 is a Monday (see MONDAY below)
+    history = (request(week_start - timedelta(hours=1), week_start, resource_id="court-1"),)
+
+    result = evaluate(
+        request(week_start, week_start + timedelta(hours=1), resource_id="court-2"),
+        weekly_cap,
+        history,
+        now=week_start - timedelta(hours=2),
+    )
+
+    assert result.allowed
+
+
+def test_a_weekly_run_starting_exactly_at_the_window_boundary_counts():
+    """Contrast with the case above: a run that begins exactly on the boundary belongs to the week
+    that opens there, so an unrelated second session the same week still trips the cap."""
+    weekly_cap = _config(max_bookings_per_week=1)
+    week_start = DAY
+    history = (request(week_start, week_start + timedelta(hours=1), resource_id="court-1"),)
+
+    result = evaluate(request(at(10), at(11), resource_id="court-2"), weekly_cap, history)
+
+    assert not result.allowed
+
+
+def test_two_abutting_bookings_count_as_one_against_a_monthly_cap():
+    monthly_cap = _config(max_bookings_per_month=2)
+    history = (
+        request(at(1), at(2), resource_id="court-1"),
+        request(at(2), at(3), resource_id="court-2"),
+    )
+
+    result = evaluate(request(at(10), at(11)), monthly_cap, history)
+
+    assert result.allowed
+
+
+def test_a_request_extending_a_held_run_is_allowed_at_a_monthly_cap_the_row_count_would_refuse():
+    """Monthly gets the identical coverage as weekly — do not test one and assume the other."""
+    monthly_cap = _config(max_bookings_per_month=1)
+    history = (request(at(9), at(10)),)
+
+    result = evaluate(request(at(10), at(11)), monthly_cap, history)
+
+    assert result.allowed
+
+
+def test_a_monthly_run_starting_before_the_window_does_not_count_even_when_the_request_crosses_in():
+    """Mirrors the weekly case: a run counts on the side it begins, so a session that started in
+    June and the request merely extends into July adds nothing to July's count."""
+    monthly_cap = _config(max_bookings_per_month=1)
+    month_start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    history = (request(month_start - timedelta(hours=1), month_start, resource_id="court-1"),)
+
+    result = evaluate(
+        request(month_start, month_start + timedelta(hours=1), resource_id="court-2"),
+        monthly_cap,
+        history,
+        now=month_start - timedelta(hours=2),
+    )
+
+    assert result.allowed
+
+
 def test_a_null_everywhere_space_enforces_only_not_in_the_past():
     assert evaluate(request(at(10), at(11)), NULL_CONFIG).allowed
     assert evaluate(request(at(10), at(10) + timedelta(hours=10)), NULL_CONFIG).allowed

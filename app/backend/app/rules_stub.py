@@ -49,6 +49,14 @@ Translations that happen here and nowhere else:
   date's own resolved minimum duration — and hands it over as ``Context.run``.
   A rule that wants to judge the whole run rather than the one request reads
   it there; every rule that does not is unaffected by its existence.
+* **The counting rules' tolerance.** ``_resolve_for_row`` (task 8.6) resolves the identical gap
+  tolerance ``_resolve_run`` uses, for the two counting types alone, and hands it to
+  ``MaxBookingsPerWeekRule`` / ``MaxBookingsPerMonthRule`` at construction. This module does
+  **not** merge the request into ``Context.history`` itself — see ``rules/rules/frequency.py``'s
+  module docstring for why that mechanism (the plan's stated preference) does not work: it
+  conflicts with ``Context``'s own history-window invariant for any request beyond it. The two
+  rules merge ``request`` with the raw ``context.history.bookings`` themselves, at evaluate time,
+  which is why they alone need this resolved value.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
@@ -93,6 +101,7 @@ from rules import (
     UserContext,
     Weekday,
     evaluate_request,
+    merge_adjoining_spans,
 )
 from rules import BookingRecord as EngineBookingRecord
 from rules import BookingRequest as EngineBookingRequest
@@ -492,7 +501,7 @@ def row_applies(applies_to: dict | None, on_date: date) -> bool:
     return True
 
 
-def _resolve_for_row(row: SpaceRuleRow, on_date: date, tz_name: str) -> dict:
+def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) -> dict:
     """Resolve whatever ``REGISTRY[row.rule_type]`` needs, from this row's own
     raw params, against the Space's zone and the booking's own local date.
 
@@ -502,22 +511,34 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, tz_name: str) -> dict:
     itself (``.claude/rules/rule-engine.md``). Each branch mirrors exactly
     what the pre-6.6 ``_build_canon`` did inline for the equivalent column.
 
+    Takes the whole ``config`` rather than just its ``timezone`` since task 8.6: the two counting
+    rows also need a gap ``tolerance``, and resolving one needs ``resolve_day_schedule(config,
+    on_date)`` — the same resolution ``evaluate``'s own ``_resolve_run`` call already reads a
+    minimum duration from, for the identical reason (``rules.frequency``'s module docstring).
+
     Raises ``KeyError``/``TypeError``/``ValueError`` for a row whose
     ``params`` do not have what this resolution needs (a missing
     ``slot_minutes``, a value of the wrong type) — ``_build_canon`` treats
     that identically to a failure inside ``RuleType.build`` itself, since both
     are "this row's stored params no longer satisfy its type's schema".
     """
+    tz_name = config.timezone
+
     if row.rule_type == "slot_alignment":
         return {"anchor": _local_midnight_utc(on_date, tz_name)}
 
-    if row.rule_type == "max_bookings_per_week":
-        window_start, window_end = _local_week_bounds(on_date, tz_name)
-        return {"window_start": window_start, "window_end": window_end}
-
-    if row.rule_type == "max_bookings_per_month":
-        window_start, window_end = _local_month_bounds(on_date, tz_name)
-        return {"window_start": window_start, "window_end": window_end}
+    if row.rule_type in ("max_bookings_per_week", "max_bookings_per_month"):
+        window_start, window_end = (
+            _local_week_bounds(on_date, tz_name)
+            if row.rule_type == "max_bookings_per_week"
+            else _local_month_bounds(on_date, tz_name)
+        )
+        tolerance_minutes = resolve_day_schedule(config, on_date).min_duration_minutes or 0
+        return {
+            "window_start": window_start,
+            "window_end": window_end,
+            "tolerance": timedelta(minutes=tolerance_minutes),
+        }
 
     # `REGISTRY[row.rule_type].needs_local_resolution` is true for exactly
     # these three types today (`rules/rules/registry.py`); a fourth arriving
@@ -586,9 +607,7 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
 
         try:
             resolved = (
-                _resolve_for_row(row, on_date, config.timezone)
-                if rule_type.needs_local_resolution
-                else None
+                _resolve_for_row(row, on_date, config) if rule_type.needs_local_resolution else None
             )
             rule = rule_type.build(row.params, resolved)
         except (KeyError, TypeError, ValueError) as exc:
@@ -784,70 +803,6 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
     )
 
 
-@dataclass(frozen=True)
-class _MergedSpan:
-    """One contiguous run out of ``_merge_adjoining_spans``' closure. Not exported — a caller
-    outside this module wants ``RunContext``, which ``_resolve_run`` builds from exactly one of
-    these."""
-
-    start_at: datetime
-    end_at: datetime
-    booking_count: int
-
-
-def _merge_adjoining_spans(
-    spans: list[tuple[datetime, datetime]], tolerance: timedelta
-) -> list[_MergedSpan]:
-    """Merge ``spans`` into every contiguous run they form, closing a gap up to ``tolerance``.
-
-    Returns **all** merged runs, not only the one a particular request falls into — this is what
-    lets ``_resolve_run`` (one run) and a later frequency-cap rewrite (task 8.6, every run in a
-    window) share one sweep rather than each computing its own closure. ``_resolve_run`` is the
-    only caller today; it picks its own request's span back out of this list.
-
-    Two spans join when the gap between their sorted order is **zero** (exact abutment),
-    **negative** (an overlap — reachable once the input is drawn from more than one Resource,
-    since two Resources' bookings are never mutually exclusive in time the way two bookings on one
-    Resource are), or **smaller than ``tolerance``**. The join is **transitive**: three spans each
-    within tolerance of the next merge into one run even if the first and third are not within
-    tolerance of each other, because merging is a single left-to-right sweep over the sorted spans
-    rather than a pairwise comparison — 17-18 and 18-19 held, a request for 19-20, is one 17-20
-    run.
-
-    Why a tolerance at all, when ``max-duration-cannon.md``'s decision 3 chose exact abutment:
-    that decision rests on every booking landing on a slot grid, which makes a sub-slot gap
-    unconstructable. ``slot_alignment`` is a per-Space row, not a property of the engine, so a
-    Space configuring ``min_duration`` without it has arbitrary start times — a 5-minute gap
-    between 17:00-18:00 and 18:05-19:05 would break the run, nobody could ever construct a booking
-    to fill exactly that gap, and every run-based rule below gets a free escape hatch. A tolerance
-    equal to the date's minimum duration closes it: any gap a legal booking could actually occupy
-    is at least that long, so a gap shorter than it is not "two sessions with a short break
-    between them", it is dead space nothing could ever book — which is indistinguishable from no
-    gap at all. A Space with no ``min_duration`` row gets ``tolerance == timedelta(0)``, which is
-    exactly decision 3's original exact-abutment rule, so this is a strict generalisation of it
-    rather than a loosening.
-    """
-    if not spans:
-        return []
-
-    ordered = sorted(spans, key=lambda span: span[0])
-    merged: list[_MergedSpan] = []
-    run_start, run_end = ordered[0]
-    run_count = 1
-
-    for start_at, end_at in ordered[1:]:
-        gap = start_at - run_end
-        if gap <= timedelta(0) or gap < tolerance:
-            run_end = max(run_end, end_at)
-            run_count += 1
-        else:
-            merged.append(_MergedSpan(run_start, run_end, run_count))
-            run_start, run_end, run_count = start_at, end_at, 1
-
-    merged.append(_MergedSpan(run_start, run_end, run_count))
-    return merged
-
-
 def _resolve_run(
     request: EngineBookingRequest,
     history: tuple[EngineBookingRecord, ...],
@@ -860,6 +815,12 @@ def _resolve_run(
     ``HistoryContext`` from — cross-resource falls out of that input rather than needing to be
     built here, since a run is not a real booking on any one court in the first place
     (``RunContext``'s own docstring).
+
+    ``rules.spans.merge_adjoining_spans`` (task 8.4) does the actual sweep — shared with
+    ``MaxBookingsPerWeekRule`` / ``MaxBookingsPerMonthRule`` (task 8.6,
+    ``rules/rules/frequency.py``), which call it themselves rather than reading a pre-merged
+    ``Context.history``; see that module's docstring for why the merge happens in the rule and not
+    here.
 
     The request's own span is folded into the same sweep as every history entry rather than
     merged against the result afterwards — a two-pass version (merge history, then check whether
@@ -876,14 +837,14 @@ def _resolve_run(
     spans = [(request.start_at, request.end_at)] + [
         (booking.start_at, booking.end_at) for booking in history
     ]
-    for run in _merge_adjoining_spans(spans, tolerance):
+    for run in merge_adjoining_spans(spans, tolerance):
         if run.start_at <= request.start_at and request.end_at <= run.end_at:
             return RunContext(
                 start_at=run.start_at, end_at=run.end_at, booking_count=run.booking_count
             )
 
     # Unreachable: `request`'s own span is always one of `spans`, so it is always inside exactly
-    # one of `_merge_adjoining_spans`' returned runs. An `AssertionError` here would mean the sweep
+    # one of `merge_adjoining_spans`' returned runs. An `AssertionError` here would mean the sweep
     # itself is broken, not that this booking is unusual.
     raise AssertionError("the request's own span was not found in its own merge closure")
 
@@ -912,6 +873,15 @@ def evaluate(
     row governs the date) — see that function's docstring for why a
     tolerance is needed at all. This runs whether or not the canon reads
     history: an empty ``history`` still resolves a run, the request alone.
+
+    ``context.history`` carries ``history`` as-is, raw rows, unmerged (unchanged since before task
+    8.6). ``MaxBookingsPerWeekRule`` / ``MaxBookingsPerMonthRule`` merge it with the request
+    themselves, at evaluate time, rather than reading a pre-merged field here — see
+    ``rules/rules/frequency.py``'s module docstring for why: folding the request into
+    ``Context.history`` here would let a request beyond ``rules.history_window`` (any booking past
+    the current month or a week out — the ordinary case for a `BookingHorizonRule` weeks or months
+    wide) violate ``Context``'s own history-window invariant on construction, denying an otherwise
+    unremarkable future booking outright.
 
     A ``space_rules`` row that cannot be built into a rule — an unregistered
     ``rule_type``, or ``params`` that no longer satisfy that type's schema —
