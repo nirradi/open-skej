@@ -218,6 +218,46 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
             ),
         ),
     },
+    "max_duration_per_day": {
+        "params": {"max_duration_minutes": 60},
+        # No `tolerance` — `MaxDurationPerDayRule` sums raw entries rather than merging them into
+        # runs (`rules.frequency`'s module docstring), so `resolved` carries only the window.
+        "resolved": {"window_start": _FRAME.day_start, "window_end": _FRAME.day_end},
+        "case": lambda: (
+            request(NOW, NOW + timedelta(minutes=45)),
+            context(
+                history=[
+                    BookingRecord(
+                        user_id=USER,
+                        resource_id=RESOURCE,
+                        start_at=NOW - timedelta(hours=2),
+                        end_at=NOW - timedelta(hours=1, minutes=30),
+                    )
+                ]
+            ),
+        ),
+    },
+    "max_bookings_per_day": {
+        "params": {"max_bookings": 1},
+        "resolved": {
+            "window_start": _FRAME.day_start,
+            "window_end": _FRAME.day_end,
+            "tolerance": timedelta(0),
+        },
+        "case": lambda: (
+            request(NOW, NOW + timedelta(hours=1)),
+            context(
+                history=[
+                    BookingRecord(
+                        user_id=USER,
+                        resource_id=RESOURCE,
+                        start_at=NOW - timedelta(hours=2),
+                        end_at=NOW - timedelta(hours=1),
+                    )
+                ]
+            ),
+        ),
+    },
     "max_bookings_per_week": {
         "params": {"max_bookings": 1},
         # `tolerance` (task 8.6): `evaluate` merges `request` with `context.history.bookings`

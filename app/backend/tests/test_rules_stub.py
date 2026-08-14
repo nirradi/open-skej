@@ -92,6 +92,15 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
     if rule_kwargs.get("booking_horizon_days") is not None:
         add("booking_horizon", {"days": rule_kwargs["booking_horizon_days"]})
 
+    if rule_kwargs.get("max_bookings_per_day") is not None:
+        add("max_bookings_per_day", {"max_bookings": rule_kwargs["max_bookings_per_day"]})
+
+    if rule_kwargs.get("max_duration_per_day_minutes") is not None:
+        add(
+            "max_duration_per_day",
+            {"max_duration_minutes": rule_kwargs["max_duration_per_day_minutes"]},
+        )
+
     if rule_kwargs.get("max_bookings_per_week") is not None:
         add("max_bookings_per_week", {"max_bookings": rule_kwargs["max_bookings_per_week"]})
 
@@ -482,6 +491,58 @@ def test_a_space_with_no_frequency_cap_ignores_history_entirely():
     assert evaluate(booking, FULL_CONFIG, unrelated_history) == evaluate(booking, FULL_CONFIG, ())
 
 
+def test_max_bookings_per_day_denies_the_booking_that_goes_over():
+    daily_cap = _config(max_bookings_per_day=2)
+    history = (
+        request(at(1), at(2), resource_id="court-1"),
+        request(at(3), at(4), resource_id="court-2"),
+    )
+
+    result = evaluate(request(at(10), at(11), resource_id="court-1"), daily_cap, history)
+
+    assert not result.allowed
+    assert "a day" in result.message
+
+
+def test_max_bookings_per_day_counts_across_every_resource_in_the_space():
+    daily_cap = _config(max_bookings_per_day=1)
+    history = (request(at(1), at(2), resource_id="a-different-court"),)
+
+    result = evaluate(
+        request(at(10), at(11), resource_id="the-requested-court"), daily_cap, history
+    )
+
+    assert not result.allowed
+
+
+def test_max_duration_per_day_denies_the_booking_that_goes_over():
+    daily_total = _config(max_duration_per_day_minutes=90)
+    history = (request(at(1), at(2)),)  # one hour earlier the same day
+
+    result = evaluate(request(at(10), at(11)), daily_total, history)  # +1 hour = 2 hours total
+
+    assert not result.allowed
+    assert "a day" in result.message
+
+
+def test_max_duration_per_day_sums_raw_entries_not_the_merged_run_across_two_resources():
+    """The case ``MaxDurationPerDayRule``'s own docstring exists to protect: a user holding two
+    Resources at overlapping times. The two history entries below overlap by half an hour and sum
+    to 2 hours raw, but would collapse to a 90-minute merged run if this rule made the same
+    ``merge_adjoining_spans`` call every other counting rule in this stream does. The cap (110
+    minutes) sits strictly between the correct total (135 minutes: 120 history + 15 request) and
+    the run-based one (105 minutes), so a rule that merged by mistake would wrongly allow this."""
+    daily_total = _config(max_duration_per_day_minutes=110)
+    history = (
+        request(at(9), at(10), resource_id="court-1"),
+        request(at(9, 30), at(10, 30), resource_id="court-2"),
+    )
+
+    result = evaluate(request(at(12), at(12, 15)), daily_total, history)
+
+    assert not result.allowed
+
+
 def test_max_bookings_per_week_denies_the_booking_that_goes_over():
     weekly_cap = _config(max_bookings_per_week=2)
     history = (
@@ -759,6 +820,45 @@ def _tz_instant(tz_name: str, *parts: int) -> datetime:
 
 def _booking(start: datetime, minutes: int = 30) -> BookingRequest:
     return BookingRequest(start_at=start, end_at=start + timedelta(minutes=minutes))
+
+
+@pytest.mark.parametrize(
+    "tz, existing, requested, expect_allowed",
+    [
+        # Sydney is UTC+11 in January: a booking at 00:30 local is 13:30 the *previous* day in
+        # UTC — the miscount the window-passing design exists to prevent (task 8.7).
+        ("Australia/Sydney", (2026, 1, 12, 20), (2026, 1, 12, 0, 30), False),
+        # Genuinely different Sydney days stay allowed — the fix must not simply deny more.
+        ("Australia/Sydney", (2026, 1, 11, 20), (2026, 1, 12, 0, 30), True),
+        # Honolulu is UTC-10, so its boundary moves the other way: 23:00 local is the *next* UTC
+        # day.
+        ("Pacific/Honolulu", (2026, 1, 12, 23), (2026, 1, 12, 10), False),
+        ("Pacific/Honolulu", (2026, 1, 13, 10), (2026, 1, 12, 10), True),
+        # A UTC venue is unaffected, which is what makes this a fix rather than a change.
+        ("UTC", (2026, 1, 12, 20), (2026, 1, 12, 0, 30), False),
+    ],
+)
+def test_the_daily_window_is_the_space_s_local_day(tz, existing, requested, expect_allowed):
+    config = _config(tz, max_bookings_per_day=1)
+    held = _booking(_tz_instant(tz, *existing), minutes=60)
+    request = _booking(_tz_instant(tz, *requested))
+
+    result = evaluate(request, config, history=(held,), now=request.start_at)
+
+    assert result.allowed is expect_allowed
+
+
+def test_the_daily_duration_window_is_also_the_space_s_local_day():
+    """``max_duration_per_day`` resolves the identical local day as ``max_bookings_per_day`` above
+    — a booking earlier the same Sydney day must count toward the total even though it and the
+    request sit on different UTC calendar dates."""
+    config = _config("Australia/Sydney", max_duration_per_day_minutes=90)
+    held = _booking(_tz_instant("Australia/Sydney", 2026, 1, 12, 20), minutes=60)
+    req = _booking(_tz_instant("Australia/Sydney", 2026, 1, 12, 0, 30), minutes=60)
+
+    result = evaluate(req, config, history=(held,), now=req.start_at)
+
+    assert not result.allowed
 
 
 @pytest.mark.parametrize(

@@ -27,12 +27,13 @@ Translations that happen here and nowhere else:
   booking's own date rather than once at write time (``CLAUDE.md``,
   "Conversion happens at the boundary, per date, never once at write time"):
   a ``slot_alignment`` row's ``anchor`` resolves to the Space's own local
-  midnight via ``_local_midnight_utc``; and both counting rules'
-  ``[window_start, window_end)`` resolve from the local week/month via
-  ``_local_week_bounds`` / ``_local_month_bounds``. See ``_resolve_for_row``.
-  ``availability_hours`` needs none of this any more — its params are already
-  minutes from local midnight, read straight off ``context.local`` by the
-  rule itself.
+  midnight via ``_local_midnight_utc``; and the day/week/month counting rules'
+  ``[window_start, window_end)`` resolve from the local day/week/month via
+  ``_local_day_bounds`` / ``_local_week_bounds`` / ``_local_month_bounds``, the
+  identical local day also serving ``max_duration_per_day`` (task 8.7). See
+  ``_resolve_for_row``. ``availability_hours`` needs none of this any more —
+  its params are already minutes from local midnight, read straight off
+  ``context.local`` by the rule itself.
 * **The local frame.** ``_build_local_frame`` answers every local question a
   rule could ask — the venue's day, week and month as UTC instants, the local
   weekday, and minutes from local midnight — and hands them over as
@@ -49,14 +50,22 @@ Translations that happen here and nowhere else:
   date's own resolved minimum duration — and hands it over as ``Context.run``.
   A rule that wants to judge the whole run rather than the one request reads
   it there; every rule that does not is unaffected by its existence.
-* **The counting rules' tolerance.** ``_resolve_for_row`` (task 8.6) resolves the identical gap
-  tolerance ``_resolve_run`` uses, for the two counting types alone, and hands it to
-  ``MaxBookingsPerWeekRule`` / ``MaxBookingsPerMonthRule`` at construction. This module does
-  **not** merge the request into ``Context.history`` itself — see ``rules/rules/frequency.py``'s
-  module docstring for why that mechanism (the plan's stated preference) does not work: it
-  conflicts with ``Context``'s own history-window invariant for any request beyond it. The two
-  rules merge ``request`` with the raw ``context.history.bookings`` themselves, at evaluate time,
-  which is why they alone need this resolved value.
+* **The counting rules' tolerance.** ``_resolve_for_row`` (task 8.6, extended by task 8.7) resolves
+  the identical gap tolerance ``_resolve_run`` uses, for the three counting types — day, week,
+  month — and hands it to ``MaxBookingsPerDayRule`` / ``MaxBookingsPerWeekRule`` /
+  ``MaxBookingsPerMonthRule`` at construction. ``max_duration_per_day`` gets no tolerance at all —
+  it sums raw entries rather than merging them into runs (see below). This module does **not**
+  merge the request into ``Context.history`` itself — see ``rules/rules/frequency.py``'s module
+  docstring for why that mechanism (the plan's stated preference) does not work: it conflicts with
+  ``Context``'s own history-window invariant for any request beyond it. The three counting rules
+  merge ``request`` with the raw ``context.history.bookings`` themselves, at evaluate time, which is
+  why they alone need this resolved value. ``max_duration_per_day`` reads the identical raw
+  ``context.history.bookings`` but sums the entries directly instead — see
+  ``rules.frequency.MaxDurationPerDayRule``'s own docstring for why that rule is the one place in
+  this stream runs are deliberately not used: a total is the same number however the day's
+  bookings are grouped, except where a user holds two Resources at overlapping times, where a
+  run's span is shorter than the two bookings added together and the total would silently
+  under-count.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
@@ -511,10 +520,13 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
     itself (``.claude/rules/rule-engine.md``). Each branch mirrors exactly
     what the pre-6.6 ``_build_canon`` did inline for the equivalent column.
 
-    Takes the whole ``config`` rather than just its ``timezone`` since task 8.6: the two counting
-    rows also need a gap ``tolerance``, and resolving one needs ``resolve_day_schedule(config,
-    on_date)`` — the same resolution ``evaluate``'s own ``_resolve_run`` call already reads a
-    minimum duration from, for the identical reason (``rules.frequency``'s module docstring).
+    Takes the whole ``config`` rather than just its ``timezone`` since task 8.6: the three counting
+    rows (day, week, month) also need a gap ``tolerance``, and resolving one needs
+    ``resolve_day_schedule(config, on_date)`` — the same resolution ``evaluate``'s own
+    ``_resolve_run`` call already reads a minimum duration from, for the identical reason
+    (``rules.frequency``'s module docstring). ``max_duration_per_day`` (task 8.7) needs only the
+    window and no tolerance at all — it sums raw history entries rather than merging them into
+    runs, so ``resolve_day_schedule`` is not consulted for it.
 
     Raises ``KeyError``/``TypeError``/``ValueError`` for a row whose
     ``params`` do not have what this resolution needs (a missing
@@ -527,12 +539,13 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
     if row.rule_type == "slot_alignment":
         return {"anchor": _local_midnight_utc(on_date, tz_name)}
 
-    if row.rule_type in ("max_bookings_per_week", "max_bookings_per_month"):
-        window_start, window_end = (
-            _local_week_bounds(on_date, tz_name)
-            if row.rule_type == "max_bookings_per_week"
-            else _local_month_bounds(on_date, tz_name)
-        )
+    if row.rule_type in ("max_bookings_per_day", "max_bookings_per_week", "max_bookings_per_month"):
+        if row.rule_type == "max_bookings_per_day":
+            window_start, window_end = _local_day_bounds(on_date, tz_name)
+        elif row.rule_type == "max_bookings_per_week":
+            window_start, window_end = _local_week_bounds(on_date, tz_name)
+        else:
+            window_start, window_end = _local_month_bounds(on_date, tz_name)
         tolerance_minutes = resolve_day_schedule(config, on_date).min_duration_minutes or 0
         return {
             "window_start": window_start,
@@ -540,8 +553,16 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
             "tolerance": timedelta(minutes=tolerance_minutes),
         }
 
+    if row.rule_type == "max_duration_per_day":
+        # The same local day bounds as `max_bookings_per_day` above, task 8.7's other new type —
+        # but no `tolerance`: `MaxDurationPerDayRule` sums raw history entries rather than merging
+        # them into runs, so there is no gap for a tolerance to close
+        # (`rules/rules/frequency.py`'s module docstring, and the rule's own).
+        window_start, window_end = _local_day_bounds(on_date, tz_name)
+        return {"window_start": window_start, "window_end": window_end}
+
     # `REGISTRY[row.rule_type].needs_local_resolution` is true for exactly
-    # these three types today (`rules/rules/registry.py`); a fourth arriving
+    # these five types today (`rules/rules/registry.py`); a sixth arriving
     # without this adapter being taught how to resolve it is a genuine
     # adapter bug, not a bad configuration row, so it is left to raise loudly
     # rather than being folded into `_UnbuildableRuleRowError`.

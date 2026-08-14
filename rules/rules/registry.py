@@ -14,7 +14,7 @@ hand-coding a third of it.
   by must not silently orphan every row that named it.
 * a **label** and a **description** — the description is prose for an admin choosing a rule, "what
   it refuses", written for someone who will never read the Python. Hand-written for each of the
-  nine types below; for a generated type it is authored by the model in a manifest call made after
+  eleven types below; for a generated type it is authored by the model in a manifest call made after
   the generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
   prompt.
 * an **ordered parameter schema** (``RuleParam``) — rich enough to render a form field and to
@@ -84,7 +84,12 @@ from .canon import (
     NotInThePastRule,
     SlotAlignmentRule,
 )
-from .frequency import MaxBookingsPerMonthRule, MaxBookingsPerWeekRule
+from .frequency import (
+    MaxBookingsPerDayRule,
+    MaxBookingsPerMonthRule,
+    MaxBookingsPerWeekRule,
+    MaxDurationPerDayRule,
+)
 from .interfaces import BaseRule
 
 __all__ = [
@@ -99,7 +104,7 @@ __all__ = [
 class ParamKind(str, Enum):
     """The shape of one declared parameter.
 
-    Only two values, because only two are needed by the nine types registered below: a plain
+    Only two values, because only two are needed by the eleven types registered below: a plain
     positive integer (a day count, a minute count, a booking count) and a local time of day
     presented as a clock but **stored as an integer** — minutes from local midnight (an opening or
     closing hour). ``LOCAL_TIME`` describes *presentation*, not storage: the value underneath it is
@@ -123,7 +128,7 @@ class RuleParam:
     those exists. One schema serves both, because two independently written ones would drift, and
     the drift would show up as a form whose own submission gets refused.
 
-    ``minimum`` is the only bound these nine types need: every integer parameter registered below
+    ``minimum`` is the only bound these eleven types need: every integer parameter registered below
     must be positive (a zero-day horizon, a zero-minute duration or a zero-minute slot means
     nothing), and a ``LOCAL_TIME`` parameter's own ``minimum`` bounds only the single value it names
     in isolation (``opens_at_minutes >= 0``, ``closes_at_minutes >= 1``) — the pairwise relationship
@@ -165,7 +170,7 @@ class RuleType:
     """Everything a registered rule type declares about itself. See the module docstring.
 
     ``description`` is prose for an admin choosing a rule, never for a developer reading the
-    source — "what it refuses", in a sentence or two. Hand-written for each of the nine types
+    source — "what it refuses", in a sentence or two. Hand-written for each of the eleven types
     below; for a generated type it is authored by the model in a manifest call made after the
     generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
     prompt, and validated non-empty the same way ``label`` and ``rule_type`` already are: a picker
@@ -295,23 +300,59 @@ def _build_max_bookings_per_month(
     )
 
 
+def _build_max_bookings_per_day(
+    params: Mapping[str, Any], resolved: Mapping[str, Any] | None
+) -> BaseRule:
+    assert resolved is not None
+    # Task 8.7's counting sibling of the week/month build functions above — the identical
+    # `tolerance` resolution, just from `app.rules_stub._local_day_bounds` instead of
+    # `_local_week_bounds` / `_local_month_bounds`.
+    return MaxBookingsPerDayRule(
+        max_bookings=params["max_bookings"],
+        window_start=resolved["window_start"],
+        window_end=resolved["window_end"],
+        tolerance=resolved["tolerance"],
+    )
+
+
+def _build_max_duration_per_day(
+    params: Mapping[str, Any], resolved: Mapping[str, Any] | None
+) -> BaseRule:
+    assert resolved is not None
+    # Unlike the three counting build functions above, no `tolerance`: `MaxDurationPerDayRule`
+    # sums raw history entries rather than merging them into runs, so it takes no gap to close
+    # (`rules.frequency`'s module docstring, and the rule's own).
+    return MaxDurationPerDayRule(
+        max_duration=timedelta(minutes=params["max_duration_minutes"]),
+        window_start=resolved["window_start"],
+        window_end=resolved["window_end"],
+    )
+
+
 # --- the starter registry --------------------------------------------------------------------
 #
-# The nine predicates in force today (`rule-engine.md`, "The canon"). Priority reproduces that
-# section's documented assembled order exactly, spaced in multiples of 10 (plus deliberate
-# multiple-of-5 insertions) rather than consecutive integers: `slot_alignment` sits at 35, strictly
-# between `max_duration` (30) and `availability_hours` (40) — beside `max_duration` rather than
-# with the date rules or the counting rules, because it is a remedy the user can apply within an
-# otherwise-bookable date and time, the same class of denial as duration and hours. `min_duration`
-# sits at 25, strictly between `booking_horizon` (20) and `max_duration` (30): the two duration
-# rules bound opposite directions and can never both deny the same request, so their relative
-# order never arbitrates copy, and 25 reads in the same "remedy within an otherwise bookable date"
-# band as `max_duration` and `slot_alignment` while leaving 26-29 free. `max_consecutive_duration`
-# sits at 32, strictly between `max_duration` (30) and `slot_alignment` (35): a booking that breaks
-# both duration rules at once is more usefully told to shorten itself (fixable by editing only this
-# request) than to stop abutting a neighbour (fixable only by touching a booking that already
-# exists), so `max_duration` keeps first refusal. The gaps either side of every insertion are what
-# let it land without renumbering anything else.
+# The eleven predicates in force today (`rule-engine.md`, "The canon" and "`frequency.py`").
+# Priority reproduces that section's documented assembled order exactly, spaced in multiples of 10
+# (plus deliberate multiple-of-5 insertions) rather than consecutive integers: `slot_alignment` sits
+# at 35, strictly between `max_duration` (30) and `availability_hours` (40) — beside `max_duration`
+# rather than with the date rules or the counting rules, because it is a remedy the user can apply
+# within an otherwise-bookable date and time, the same class of denial as duration and hours.
+# `min_duration` sits at 25, strictly between `booking_horizon` (20) and `max_duration` (30): the
+# two duration rules bound opposite directions and can never both deny the same request, so their
+# relative order never arbitrates copy, and 25 reads in the same "remedy within an otherwise
+# bookable date" band as `max_duration` and `slot_alignment` while leaving 26-29 free.
+# `max_consecutive_duration` sits at 32, strictly between `max_duration` (30) and `slot_alignment`
+# (35): a booking that breaks both duration rules at once is more usefully told to shorten itself
+# (fixable by editing only this request) than to stop abutting a neighbour (fixable only by
+# touching a booking that already exists), so `max_duration` keeps first refusal.
+# `max_duration_per_day` (42) and `max_bookings_per_day` (45) sit strictly between
+# `availability_hours` (40) and `max_bookings_per_week` (50) — task 8.7's own reasoning: of the
+# three windows a user could break a cap in at once (day/week/month), the narrowest is the most
+# useful thing to be told, so the day-scoped pair comes before the week and month rules; between
+# the two, the duration total precedes the booking count for the same reason `max_duration`
+# precedes `max_consecutive_duration` above — a total is judged before a count when both could
+# fire on the same day. The gaps either side of every insertion are what let it land without
+# renumbering anything else.
 
 _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
@@ -464,6 +505,51 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         needs_local_resolution=False,
         is_single=False,
         build=_build_availability_hours,
+    ),
+    RuleType(
+        rule_type="max_duration_per_day",
+        label="Max duration per day",
+        description="Refuses a booking once a member's total booked time in that local day, this "
+        "booking included, would exceed the configured duration — counted across every Resource "
+        "in the Space. Unlike Maximum consecutive duration, this sums every booking that day "
+        "rather than only a contiguous run, so two separate bookings with a gap between them "
+        "still count toward it.",
+        priority=42,
+        params=(
+            RuleParam(
+                name="max_duration_minutes",
+                kind=ParamKind.INTEGER,
+                label="Max duration per day",
+                unit="minutes",
+                required=True,
+                minimum=1,
+            ),
+        ),
+        reads_history=True,
+        needs_local_resolution=True,
+        is_single=True,
+        build=_build_max_duration_per_day,
+    ),
+    RuleType(
+        rule_type="max_bookings_per_day",
+        label="Max bookings per day",
+        description="Refuses a booking once a member already holds the configured number of "
+        "bookings in that local day, counted across every Resource in the Space.",
+        priority=45,
+        params=(
+            RuleParam(
+                name="max_bookings",
+                kind=ParamKind.INTEGER,
+                label="Max bookings",
+                unit="bookings",
+                required=True,
+                minimum=1,
+            ),
+        ),
+        reads_history=True,
+        needs_local_resolution=True,
+        is_single=True,
+        build=_build_max_bookings_per_day,
     ),
     RuleType(
         rule_type="max_bookings_per_week",

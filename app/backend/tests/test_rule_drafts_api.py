@@ -138,8 +138,8 @@ def restore_catalog(session: Session) -> Iterator[None]:
     on purpose — that live hoist is an acceptance criterion — but the catalog is a module-level
     singleton shared by every test in the process, while each test here drops and recreates its
     tables. Without this, a generated type from one test survives in memory after the row behind
-    it is gone, and ``test_rules_api.py``'s "``/rule-types`` lists exactly the seven hand-written
-    types" starts counting nine.
+    it is gone, and ``test_rules_api.py``'s "``/rule-types`` lists exactly the eleven hand-written
+    types" starts counting thirteen.
 
     Requesting ``session`` is what orders this correctly: the teardown below runs *before* the
     engine fixture drops the tables, so the reload has something to read.
