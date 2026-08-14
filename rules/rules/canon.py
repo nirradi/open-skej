@@ -1,4 +1,4 @@
-"""The hand-written canon: six rules, four of which form ``DEFAULT_CANON``.
+"""The hand-written canon: seven rules, four of which form ``DEFAULT_CANON``.
 
 These are hand-written, not generated. They are the reference the AI generation loop is measured
 against, so they are also the worked example of what a rule looks like: parameters on the instance,
@@ -46,6 +46,7 @@ __all__ = [
     "NotInThePastRule",
     "BookingHorizonRule",
     "MaxDurationRule",
+    "MaxConsecutiveDurationRule",
     "MinDurationRule",
     "SlotAlignmentRule",
     "AvailabilityHoursRule",
@@ -128,6 +129,49 @@ class MaxDurationRule(BaseRule):
                 f"Bookings can be at most {_format_duration(self.max_duration)} long,"
                 f" and this one is {_format_duration(request.duration)}."
                 " Please shorten it and try again."
+            )
+        return RuleResult.allow()
+
+
+class MaxConsecutiveDurationRule(BaseRule):
+    """Caps the contiguous **run** of back-to-back bookings this request joins — never the request's
+    own span, which is what ``MaxDurationRule`` immediately above judges instead.
+
+    That distinction is the entire reason this rule exists
+    (``ops/pending/bugs/max-duration-cannon.md``): a Space configured "max 2 hours" meaning *one
+    session* is served correctly by ``MaxDurationRule``, which reads ``request.duration`` and has
+    no way to see anything either side of the request. A Space that meant "no more than 2 hours of
+    court time in a row" was not served at all — a member booking 17:00-18:00 and then, separately,
+    18:00-19:00 passes ``MaxDurationRule`` twice and walks away with four hours nobody configured.
+    This rule is that missing reading: it denies when ``context.run.duration`` — the whole
+    contiguous span the request joins, resolved by the adapter from this user's own history across
+    every Resource in the Space (``RunContext``) — exceeds ``max_duration``, whether or not the
+    request's own span does.
+
+    A Space can configure either, both, or neither; they never disagree about the same booking. A
+    run always contains its own request, so an inclusive bound on the run can never pass a request
+    that the identical bound on ``request.duration`` alone would already have denied — adding this
+    rule to a Space that already has ``max_duration`` can only refuse bookings that rule was already
+    silent on, never change what it already refuses.
+
+    The bound is inclusive, the same convention every duration rule in this canon shares: a run of
+    exactly ``max_duration`` passes, one minute over does not.
+    """
+
+    def __init__(self, max_duration: timedelta) -> None:
+        if max_duration <= timedelta(0):
+            raise ValueError(
+                f"MaxConsecutiveDurationRule.max_duration must be positive; got {max_duration!r}"
+            )
+        self.max_duration = max_duration
+
+    def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
+        if context.run.duration > self.max_duration:
+            return RuleResult.deny(
+                f"Bookings can't add up to more than {_format_duration(self.max_duration)} of"
+                " consecutive play back-to-back, and joining this one to what you already have"
+                f" booked next to it would come to {_format_duration(context.run.duration)}."
+                " Please leave a gap before or after it, or shorten it, and try again."
             )
         return RuleResult.allow()
 

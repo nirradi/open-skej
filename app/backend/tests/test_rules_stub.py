@@ -83,6 +83,12 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
     if rule_kwargs.get("max_duration_minutes") is not None:
         add("max_duration", {"max_duration_minutes": rule_kwargs["max_duration_minutes"]})
 
+    if rule_kwargs.get("max_consecutive_minutes") is not None:
+        add(
+            "max_consecutive_duration",
+            {"max_consecutive_minutes": rule_kwargs["max_consecutive_minutes"]},
+        )
+
     if rule_kwargs.get("booking_horizon_days") is not None:
         add("booking_horizon", {"days": rule_kwargs["booking_horizon_days"]})
 
@@ -1309,3 +1315,60 @@ def test_an_overlap_across_two_resources_joins_even_with_zero_tolerance():
     assert run.start_at == at(10)
     assert run.end_at == at(13)
     assert run.booking_count == 2
+
+
+# --- max_consecutive_duration through evaluate (task 8.5) -------------------------------------
+#
+# `_resolve_run`'s own tests above already prove the resolver merges transitively and across
+# Resources; what belongs here is the property that is genuinely this adapter's own — that a Space
+# configuring *only* `max_consecutive_duration` still gets the Space-wide history query the rule's
+# verdict silently depends on, end to end through `evaluate`, not just at the resolver level.
+
+
+def test_max_consecutive_duration_denies_a_run_across_two_resources():
+    """The bug report itself (`ops/pending/bugs/max-duration-cannon.md`), through the real adapter:
+    one hour already held on one court, a request for the adjoining hour (plus a minute) on a
+    *different* court. The cross-court circumvention concern the bug's own testing note raises is
+    already closed by `HistoryContext` being filtered to the user, never to one resource — proven
+    here by the two bookings landing on different courts and the run still catching them."""
+    consecutive_cap = _config(max_consecutive_minutes=120)
+    history = (request(at(9), at(10), resource_id="court-1"),)
+
+    result = evaluate(request(at(10), at(11, 1), resource_id="court-2"), consecutive_cap, history)
+
+    assert not result.allowed
+    assert "consecutive" in result.message
+
+
+def test_max_consecutive_duration_allows_a_run_of_exactly_the_cap():
+    """The bound is inclusive, mirroring `MaxDurationRule`'s own convention: a run of exactly the
+    cap passes, and this is also the "no neighbour" half of the bug-report pair — the identical
+    request, on its own (no history at all), passes too."""
+    consecutive_cap = _config(max_consecutive_minutes=120)
+    history = (request(at(9), at(10), resource_id="court-1"),)
+
+    joined = evaluate(request(at(10), at(11), resource_id="court-2"), consecutive_cap, history)
+    assert joined.allowed
+
+    solo = evaluate(request(at(10), at(11), resource_id="court-2"), consecutive_cap, ())
+    assert solo.allowed
+
+
+def test_a_space_holding_only_max_consecutive_duration_still_reads_history():
+    """The property that makes this rule work at all (`rules/rules/registry.py`,
+    `.claude/rules/rule-engine.md`): `MaxConsecutiveDurationRule.evaluate` never names
+    `context.history`, only `context.run`, but the run itself is resolved from history by this
+    adapter — so a Space configuring this rule and nothing else that reads history must still make
+    the router run the Space-wide history query. Without it the run the rule sees is always the
+    request alone and it would silently never deny."""
+    consecutive_only = SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="max_consecutive_duration",
+                params={"max_consecutive_minutes": 120},
+            ),
+        ),
+    )
+    assert consecutive_only.reads_history

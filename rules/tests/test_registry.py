@@ -2,7 +2,7 @@
 
 Four things are pinned here, for different reasons.
 
-**The schema itself** — the eight stable ids, each with the exact param names its underlying rule
+**The schema itself** — the nine stable ids, each with the exact param names its underlying rule
 class's constructor needs (read against ``canon.py`` / ``frequency.py`` directly, not against this
 module's own memory of them), the documented priority order, and which flags are set on which type.
 A registry that silently drifted from any of these would still import cleanly and would still look
@@ -28,6 +28,7 @@ import pytest
 from rules.canon import (
     AvailabilityHoursRule,
     BookingHorizonRule,
+    MaxConsecutiveDurationRule,
     MaxDurationRule,
     MinDurationRule,
     NotInThePastRule,
@@ -64,6 +65,7 @@ def context(
     now: datetime = NOW,
     frame_for: datetime | None = None,
     frame_end: datetime | None = None,
+    run: RunContext | None = None,
 ) -> Context:
     """Most rules here read only the request and their own parameters, so the frame's exact bounds
     are inert for them and the default (anchored on ``now``) is fine. ``AvailabilityHoursRule``
@@ -72,14 +74,16 @@ def context(
 
     Every comparison here is ``build(...).evaluate(...)`` against the rule constructed directly
     (module docstring), never ``evaluate_request``, so ``context.run`` is inert the same way the
-    frame is for most types here — no rule this registry builds reads it yet.
+    frame is for most types here, with one exception: ``max_consecutive_duration`` reads it
+    directly, so its own build-wiring test passes ``run`` explicitly rather than taking the inert
+    one-hour default every other type here is happy to ignore.
     """
     start = frame_for if frame_for is not None else now
     return Context(
         user=UserContext(user_id=USER),
         calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=now),
         local=utc_frame(start, frame_end),
-        run=RunContext(start_at=start, end_at=start + timedelta(hours=1), booking_count=1),
+        run=run or RunContext(start_at=start, end_at=start + timedelta(hours=1), booking_count=1),
         history=HistoryContext(bookings=bookings),
     )
 
@@ -90,13 +94,14 @@ def existing_booking(start_at: datetime) -> BookingRecord:
     )
 
 
-# --- the eight stable ids, and their declared params -------------------------------------------
+# --- the nine stable ids, and their declared params -------------------------------------------
 
 EXPECTED_IDS = {
     "not_in_the_past",
     "booking_horizon",
     "min_duration",
     "max_duration",
+    "max_consecutive_duration",
     "slot_alignment",
     "availability_hours",
     "max_bookings_per_week",
@@ -104,7 +109,7 @@ EXPECTED_IDS = {
 }
 
 
-def test_all_eight_stable_ids_are_registered():
+def test_all_nine_stable_ids_are_registered():
     assert set(REGISTRY) == EXPECTED_IDS
 
 
@@ -115,6 +120,7 @@ def test_all_eight_stable_ids_are_registered():
         ("booking_horizon", ("days",)),
         ("min_duration", ("min_duration_minutes",)),
         ("max_duration", ("max_duration_minutes",)),
+        ("max_consecutive_duration", ("max_consecutive_minutes",)),
         ("slot_alignment", ("slot_minutes",)),
         ("availability_hours", ("opens_at_minutes", "closes_at_minutes")),
         ("max_bookings_per_week", ("max_bookings",)),
@@ -140,12 +146,13 @@ def test_stable_ids_are_never_the_python_class_name():
 
 
 def test_priorities_sort_into_the_documented_canon_order():
-    """`rule-engine.md`'s eight-element assembled order, now read off declared priority."""
+    """`rule-engine.md`'s nine-element assembled order, now read off declared priority."""
     assert [declared.rule_type for declared in rule_types()] == [
         "not_in_the_past",
         "booking_horizon",
         "min_duration",
         "max_duration",
+        "max_consecutive_duration",
         "slot_alignment",
         "availability_hours",
         "max_bookings_per_week",
@@ -153,13 +160,26 @@ def test_priorities_sort_into_the_documented_canon_order():
     ]
 
 
-def test_slot_alignment_sits_strictly_between_max_duration_and_availability_hours():
-    """`slot_alignment`'s priority is beside `max_duration`, not with the date or counting rules —
-    the plan's own reasoning for where task 6.5 inserted it."""
+def test_slot_alignment_sits_strictly_between_max_consecutive_duration_and_availability_hours():
+    """`slot_alignment`'s priority is beside the two duration rules, not with the date or counting
+    rules — the plan's own reasoning for where task 6.5 inserted it, unmoved by task 8.5 landing a
+    third rule in that band beside it."""
     assert (
-        REGISTRY["max_duration"].priority
+        REGISTRY["max_consecutive_duration"].priority
         < REGISTRY["slot_alignment"].priority
         < REGISTRY["availability_hours"].priority
+    )
+
+
+def test_max_consecutive_duration_sits_strictly_between_max_duration_and_slot_alignment():
+    """`max_consecutive_duration`'s priority (32) is between `max_duration` (30) and
+    `slot_alignment` (35) — task 8.5's own reasoning: a booking that breaks both duration rules at
+    once is more usefully told to shorten itself than to stop abutting a neighbour, so
+    `max_duration` keeps first refusal, and 32 leaves room on both sides for a later insertion."""
+    assert (
+        REGISTRY["max_duration"].priority
+        < REGISTRY["max_consecutive_duration"].priority
+        < REGISTRY["slot_alignment"].priority
     )
 
 
@@ -191,10 +211,18 @@ def test_priorities_are_unique_and_spaced_for_a_later_insertion():
 # --- reads_history / needs_local_resolution / is_single ---------------------------------------
 
 
-def test_reads_history_is_true_only_for_the_two_counting_types():
+def test_reads_history_is_true_for_the_two_counting_types_and_max_consecutive_duration():
+    """`reads_history` means "this rule's verdict depends on history", not "this rule's own
+    `evaluate` names `context.history`" (`rules/rules/registry.py`, `.claude/rules/rule-engine.md`).
+    `max_consecutive_duration` is the type that pulls the two apart: its `evaluate` reads only
+    `context.run`, never `context.history` directly, but the run itself is resolved from history by
+    the adapter, so a Space configuring this rule and nothing else must still make the router run
+    the Space-wide history query — see `app/backend/tests/test_rules_stub.py` for that property
+    pinned end to end."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.reads_history} == {
         "max_bookings_per_week",
         "max_bookings_per_month",
+        "max_consecutive_duration",
     }
 
 
@@ -211,11 +239,11 @@ def test_needs_local_resolution_is_true_for_slot_alignment_and_the_two_counting_
 
 
 def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
-    """`availability_hours`, `max_duration`, `min_duration` and `slot_alignment` are meant to vary
-    by day via `applies_to` (e.g. "Mon/Wed/Fri 10-15" plus "Tue/Thu 8-12" as two
-    `availability_hours` rows), so a second instance of any of them is the intended pattern, not a
-    mistake worth warning about — `min_duration` for the identical reason `max_duration` already
-    gives."""
+    """`availability_hours`, `max_duration`, `min_duration`, `max_consecutive_duration` and
+    `slot_alignment` are meant to vary by day via `applies_to` (e.g. "Mon/Wed/Fri 10-15" plus
+    "Tue/Thu 8-12" as two `availability_hours` rows), so a second instance of any of them is the
+    intended pattern, not a mistake worth warning about — `min_duration` and
+    `max_consecutive_duration` for the identical reason `max_duration` already gives."""
     assert {rt.rule_type for rt in REGISTRY.values() if rt.is_single} == {
         "not_in_the_past",
         "booking_horizon",
@@ -225,6 +253,7 @@ def test_is_single_is_true_only_for_the_four_non_day_scoped_types():
     assert {rt.rule_type for rt in REGISTRY.values() if not rt.is_single} == {
         "min_duration",
         "max_duration",
+        "max_consecutive_duration",
         "slot_alignment",
         "availability_hours",
     }
@@ -289,6 +318,24 @@ def test_build_max_duration_behaves_like_the_class():
     over = request(NOW, NOW + timedelta(hours=2, minutes=30))
     assert built.evaluate(over, context()) == direct.evaluate(over, context())
     assert not built.evaluate(over, context()).passed
+
+
+def test_build_max_consecutive_duration_behaves_like_the_class():
+    """Unlike every build test above, the request itself is short — the point is that this type
+    judges `context.run`, not `request.duration`, so a passing test here has to prove the built
+    rule reads the *run* it was handed rather than silently ignoring `max_consecutive_minutes` and
+    always allowing (a build function dropping the parameter on the floor would still pass every
+    other assertion in this module)."""
+    built = REGISTRY["max_consecutive_duration"].build({"max_consecutive_minutes": 120})
+    direct = MaxConsecutiveDurationRule(max_duration=timedelta(hours=2))
+
+    one_hour_request = request(NOW, NOW + timedelta(hours=1))
+    joined_run = RunContext(
+        start_at=NOW, end_at=NOW + timedelta(hours=2, minutes=30), booking_count=2
+    )
+    over_ctx = context(run=joined_run)
+    assert built.evaluate(one_hour_request, over_ctx) == direct.evaluate(one_hour_request, over_ctx)
+    assert not built.evaluate(one_hour_request, over_ctx).passed
 
 
 def test_build_slot_alignment_reads_resolved_anchor_not_a_raw_param():

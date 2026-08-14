@@ -88,7 +88,7 @@ GENERATION_CLIENTS = ("stub", "google", "ollama", "claude-cli")
 #: anyone debugging a prompt actually looks; this copy is the admin-facing summary.
 ATTEMPT_FAILURE_CHARS = 2000
 
-#: Priority for every generated type — sorts after all eight hand-written ones, so a
+#: Priority for every generated type — sorts after all nine hand-written ones, so a
 #: deliberately-worded hand-written denial always wins when both would deny
 #: (``ops/plans/stream-7/OVERVIEW.md``).
 GENERATED_RULE_PRIORITY = 100
