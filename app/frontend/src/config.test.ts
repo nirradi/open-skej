@@ -16,13 +16,16 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildWeekSchedule,
   calendarConfig,
+  calendarConfigForDay,
   formatSlotLabel,
   isSlotOutOfHours,
   slotStart,
   slotStartMinutes,
   slotsPerDay,
   slotsPerDayFor,
+  uniformWeekSchedule,
   type CalendarConfig,
 } from './config'
 import { SYSTEM_TIME_ZONE, zonedParts } from './timezone'
@@ -40,6 +43,7 @@ const DEFAULT: CalendarConfig = {
   openMinutes: null,
   closeMinutes: null,
   timeZone: SYSTEM_TZ,
+  minDurationMinutes: null,
 }
 
 /** The same slot size, with hours matching the grid's old hardcoded window. */
@@ -48,6 +52,7 @@ const NINE_TO_FIVE: CalendarConfig = {
   openMinutes: 9 * 60,
   closeMinutes: 17 * 60,
   timeZone: SYSTEM_TZ,
+  minDurationMinutes: null,
 }
 
 /** The same day, at a finer granularity — the documented future change. */
@@ -223,6 +228,58 @@ describe('isSlotOutOfHours', () => {
     const config = { ...DEFAULT, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }
     expect(isSlotOutOfHours(18, config)).toBe(true)
     expect(isSlotOutOfHours(19, config)).toBe(false)
+  })
+})
+
+describe('minDurationMinutes parsing and defaults', () => {
+  it('is null on the shipped default config', () => {
+    expect(calendarConfig.minDurationMinutes).toBeNull()
+  })
+
+  it('parses a resolved minimum duration from the wire shape', () => {
+    const schedule = buildWeekSchedule(
+      [
+        {
+          date: '2026-07-20',
+          slot_minutes: 30,
+          opens_at: null,
+          closes_at: null,
+          coherence_issue: null,
+          min_duration_minutes: 60,
+        },
+      ],
+      SYSTEM_TZ,
+    )
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBe(60)
+    expect(calendarConfigForDay(schedule, '2026-07-20').minDurationMinutes).toBe(60)
+  })
+
+  it('defaults an unenforced minimum duration to null, not an invented floor', () => {
+    const schedule = buildWeekSchedule(
+      [
+        {
+          date: '2026-07-20',
+          slot_minutes: 30,
+          opens_at: null,
+          closes_at: null,
+          coherence_issue: null,
+          min_duration_minutes: null,
+        },
+      ],
+      SYSTEM_TZ,
+    )
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+  })
+
+  it('resolves a date this WeekSchedule was never built for to null, the shipped default', () => {
+    const schedule = buildWeekSchedule([], SYSTEM_TZ)
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+  })
+
+  it('uniformWeekSchedule always resolves to no minimum, regardless of the config it is built from', () => {
+    const withMinimum: CalendarConfig = { ...DEFAULT, minDurationMinutes: 60 }
+    const schedule = uniformWeekSchedule(withMinimum)
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
   })
 })
 

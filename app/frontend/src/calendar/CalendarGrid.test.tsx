@@ -40,7 +40,13 @@ const MONDAY = startOfWeek(NOW)
 // clock) still mean what they say.
 const SYSTEM_TZ = SYSTEM_TIME_ZONE
 
-const THIRTY: CalendarConfig = { slotMinutes: 30, openMinutes: null, closeMinutes: null, timeZone: SYSTEM_TZ }
+const THIRTY: CalendarConfig = {
+  slotMinutes: 30,
+  openMinutes: null,
+  closeMinutes: null,
+  timeZone: SYSTEM_TZ,
+  minDurationMinutes: null,
+}
 const TEN: CalendarConfig = { ...THIRTY, slotMinutes: 10 }
 /** 09:00-17:00, 30-minute slots — for the tests that need a real hours window. */
 const NINE_TO_FIVE: CalendarConfig = {
@@ -48,6 +54,7 @@ const NINE_TO_FIVE: CalendarConfig = {
   openMinutes: 9 * 60,
   closeMinutes: 17 * 60,
   timeZone: SYSTEM_TZ,
+  minDurationMinutes: null,
 }
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
@@ -180,6 +187,7 @@ describe('a heterogeneous week (task 6.9)', () => {
       opens_at: null,
       closes_at: null,
       coherence_issue: coherenceIssues[i] ?? null,
+      min_duration_minutes: null,
     }))
   }
 
@@ -243,6 +251,7 @@ describe('the DEFERRED.md item 19 repro: a Space in one zone, a viewer in anothe
     openMinutes: 13 * 60,
     closeMinutes: 22 * 60,
     timeZone: 'Europe/Berlin',
+    minDurationMinutes: null,
   }
   const AUGUST_MONDAY = new Date(2026, 7, 3)
 
@@ -889,5 +898,85 @@ describe('selection', () => {
       fireEvent.click(screen.getByTestId('calendar-next-week'))
     })
     await waitFor(() => expect(screen.queryByTestId('calendar-selection')).toBeNull())
+  })
+})
+
+describe('the click unit honours the minimum duration (task 8.3)', () => {
+  /** A uniform week at `slotMinutes`, every date resolving the same `minDurationMinutes`. */
+  function scheduleWithMinDuration(minDurationMinutes: number | null, slotMinutes = 30) {
+    return buildWeekSchedule(
+      Array.from({ length: DAYS_PER_WEEK }, (_, i) => ({
+        date: toDateKey(addDays(MONDAY, i)),
+        slot_minutes: slotMinutes,
+        opens_at: null,
+        closes_at: null,
+        coherence_issue: null,
+        min_duration_minutes: minDurationMinutes,
+      })),
+      SYSTEM_TZ,
+    )
+  }
+
+  it('proposes a 60-minute booking from a single click on a 30-minute grid with a 60-minute minimum', async () => {
+    const onSelectionChange = vi.fn()
+    await renderGrid({ schedule: scheduleWithMinDuration(60), onSelectionChange })
+
+    // Index 4 at 30-minute slots, from midnight, is 02:00.
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerUp(window)
+
+    // Still one row highlighted — the axis and the row count are untouched;
+    // only how many minutes that one click submits has changed.
+    expect(selectedIndices(4)).toEqual([4])
+
+    const interval = onSelectionChange.mock.calls.at(-1)?.[0] as { start: Date; end: Date }
+    expect(interval.start.getHours()).toBe(2)
+    expect(interval.start.getMinutes()).toBe(0)
+    expect(interval.end.getHours()).toBe(3)
+    expect(interval.end.getMinutes()).toBe(0)
+  })
+
+  it('clamps a dragged range shorter than the minimum up to it, the same way a single click is', async () => {
+    const onSelectionChange = vi.fn()
+    // 90 minutes needs 3 slots at 30 minutes each.
+    await renderGrid({ schedule: scheduleWithMinDuration(90), onSelectionChange })
+
+    // Drags across only 2 rows (02:00-03:00, 60 minutes of raw drag).
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerOver(slot(4, 5))
+    fireEvent.pointerUp(window)
+
+    // The rows highlighted are exactly what was dragged — clamping is a
+    // property of the *proposed interval*, not of which rows light up.
+    expect(selectedIndices(4)).toEqual([4, 5])
+
+    const interval = onSelectionChange.mock.calls.at(-1)?.[0] as { start: Date; end: Date }
+    expect(interval.start.getHours()).toBe(2)
+    expect(interval.start.getMinutes()).toBe(0)
+    // Clamped up to the 90-minute floor, not left at the 60 minutes dragged.
+    expect(interval.end.getHours()).toBe(3)
+    expect(interval.end.getMinutes()).toBe(30)
+  })
+
+  it('does not stretch a drag already at or beyond the minimum any further', async () => {
+    const onSelectionChange = vi.fn()
+    // 60 minutes needs 2 slots at 30 minutes each.
+    await renderGrid({ schedule: scheduleWithMinDuration(60), onSelectionChange })
+
+    // Drags across 4 rows (02:00-04:00, 120 minutes of raw drag) — already
+    // twice the minimum. A naive re-application of the click-unit widening
+    // to the *last* dragged row would push this to 04:30; the natural end of
+    // the drag itself must win instead.
+    fireEvent.pointerDown(slot(4, 4))
+    fireEvent.pointerOver(slot(4, 7))
+    fireEvent.pointerUp(window)
+
+    expect(selectedIndices(4)).toEqual([4, 5, 6, 7])
+
+    const interval = onSelectionChange.mock.calls.at(-1)?.[0] as { start: Date; end: Date }
+    expect(interval.start.getHours()).toBe(2)
+    expect(interval.start.getMinutes()).toBe(0)
+    expect(interval.end.getHours()).toBe(4)
+    expect(interval.end.getMinutes()).toBe(0)
   })
 })

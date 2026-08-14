@@ -311,6 +311,7 @@ describe('the week in the URL', () => {
       openMinutes: null,
       closeMinutes: null,
       timeZone: SPACE.timezone,
+      minDurationMinutes: null,
     }).start
 
   it('renders the week named by `?week=`, not the current one', async () => {

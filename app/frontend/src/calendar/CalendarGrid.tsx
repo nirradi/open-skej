@@ -93,6 +93,7 @@ import {
   finestSlotMinutes,
   formatSlotLabel,
   isSlotOutOfHours,
+  slotStart,
   slotsPerDayFor,
   uniformWeekSchedule,
   type CalendarConfig,
@@ -265,6 +266,7 @@ export function CalendarGrid({
     openMinutes: null,
     closeMinutes: null,
     timeZone: resolvedSchedule.timeZone,
+    minDurationMinutes: null,
   }
   const [fallbackNow] = useState(() => new Date())
   const now = nowProp ?? fallbackNow
@@ -338,6 +340,7 @@ export function CalendarGrid({
     openMinutes: null,
     closeMinutes: null,
     timeZone: resolvedSchedule.timeZone,
+    minDurationMinutes: null,
   }
   const slotsPerDay = slotsPerDayFor(axisConfig)
 
@@ -474,10 +477,22 @@ export function CalendarGrid({
     const dayIndex = days.findIndex((day) => toDateKey(day) === selection.dateKey)
     if (dayIndex === -1) return null
     const dayConfig = calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex])
-    return {
-      start: slotInterval(days[dayIndex], selection.start, dayConfig).start,
-      end: slotInterval(days[dayIndex], selection.end, dayConfig).end,
-    }
+    const day = days[dayIndex]
+    const start = slotStart(day, selection.start, dayConfig)
+    // The dragged range's own natural end — one slot past its last row, at
+    // that row's own width, unwidened — versus the minimum-duration click
+    // unit anchored at the *first* selected row, whichever reaches further.
+    // A plain click (`selection.start === selection.end`) is exactly the
+    // click-unit case (`slotInterval`'s own docblock); a drag already at or
+    // beyond the minimum must not be stretched further by it, and one
+    // shorter than the minimum is clamped up to it, the same way a single
+    // click is.
+    const naturalEnd = new Date(
+      slotStart(day, selection.end, dayConfig).getTime() + dayConfig.slotMinutes * MS_PER_MINUTE,
+    )
+    const clickEnd = slotInterval(day, selection.start, dayConfig).end
+    const end = naturalEnd.getTime() > clickEnd.getTime() ? naturalEnd : clickEnd
+    return { start, end }
   }, [dateKeys, days, resolvedSchedule, selection])
 
   useEffect(() => {

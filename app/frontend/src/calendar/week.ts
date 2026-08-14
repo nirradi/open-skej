@@ -248,14 +248,28 @@ export function formatClockTime(value: Date, timeZone: string): string {
   return `${hh}:${mm}`
 }
 
-/** The half-open interval `[start, end)` a slot occupies. */
+/**
+ * The half-open interval `[start, end)` a click starting at slot `index`
+ * would submit.
+ *
+ * Spans exactly one slot when `config.minDurationMinutes` is `null` (no
+ * floor governs the date) or already fits in one — otherwise `end` extends
+ * across `slotsPerClick` slots, the smallest whole number that reaches the
+ * minimum. Whole slots, not the raw minute count: a `slot_alignment` row may
+ * also govern the date, and the booking's end has to land on its grid too,
+ * so rounding up to the nearest slot boundary is what keeps a click from
+ * trading one denial for another (`config.ts`'s "the click unit honours the
+ * minimum duration").
+ */
 export function slotInterval(
   day: Date,
   index: number,
   config: CalendarConfig = calendarConfig,
 ): { start: Date; end: Date } {
   const start = slotStart(day, index, config)
-  return { start, end: new Date(start.getTime() + config.slotMinutes * 60 * 1000) }
+  const slotsPerClick =
+    config.minDurationMinutes === null ? 1 : Math.ceil(config.minDurationMinutes / config.slotMinutes)
+  return { start, end: new Date(start.getTime() + slotsPerClick * config.slotMinutes * 60 * 1000) }
 }
 
 /**

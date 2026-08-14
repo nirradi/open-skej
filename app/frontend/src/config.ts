@@ -66,6 +66,16 @@
  * A per-viewer clock was considered and rejected — it would let two members
  * read different times for the same slot, and it makes the operating window
  * wrap midnight for anyone far enough from the venue.
+ *
+ * ## The click unit honours the minimum duration
+ *
+ * `DaySchedule.minDurationMinutes` — carried through `CalendarConfig` by
+ * `calendarConfigForDay` — is a date's own resolved `min_duration` floor, and
+ * it is independent of `slotMinutes`: nothing forces a Space's minimum
+ * duration to be a multiple of its slot size. The click unit is the smallest
+ * whole number of slots that reaches the date's minimum duration
+ * (`slotInterval` in `calendar/week.ts`), so the grid cannot offer a booking
+ * the floor would refuse.
  */
 
 import { SYSTEM_TIME_ZONE, zonedTimeToInstant } from './timezone'
@@ -106,6 +116,14 @@ export interface CalendarConfig {
    * module docblock's "every clock in the grid is the Space's own".
    */
   timeZone: string
+  /**
+   * The date's own resolved `min_duration` floor, in minutes — `null` means
+   * no such rule governs this date. Read only by `slotInterval`
+   * (`calendar/week.ts`) to decide how many slots one click consumes; never
+   * how the grid itself is drawn (see the module docblock's "the click unit
+   * honours the minimum duration").
+   */
+  minDurationMinutes: number | null
 }
 
 export const calendarConfig: CalendarConfig = {
@@ -113,6 +131,7 @@ export const calendarConfig: CalendarConfig = {
   openMinutes: null,
   closeMinutes: null,
   timeZone: SYSTEM_TIME_ZONE,
+  minDurationMinutes: null,
 }
 
 /** How many slot rows the grid renders per day, for an arbitrary config. */
@@ -219,12 +238,18 @@ function parseClockMinutes(value: string): number {
  * date's resolved hours land on its resolved slot grid is a question about
  * which rules govern that date, and this module must never re-derive rule
  * semantics (`.claude/rules/rule-engine.md`).
+ *
+ * `minDurationMinutes` is this date's own resolved `min_duration` floor,
+ * `null` meaning no such rule governs it — the per-day counterpart to
+ * `CalendarConfig.minDurationMinutes`, and read the same way, only by
+ * `slotInterval`.
  */
 export interface DaySchedule {
   slotMinutes: number
   openMinutes: number | null
   closeMinutes: number | null
   coherenceIssue: string | null
+  minDurationMinutes: number | null
 }
 
 /**
@@ -252,6 +277,7 @@ const DEFAULT_DAY_SCHEDULE: DaySchedule = {
   openMinutes: calendarConfig.openMinutes,
   closeMinutes: calendarConfig.closeMinutes,
   coherenceIssue: null,
+  minDurationMinutes: calendarConfig.minDurationMinutes,
 }
 
 /** One `DayScheduleRead` (the wire shape) parsed into a `DaySchedule`. */
@@ -260,12 +286,14 @@ function parseDaySchedule(entry: {
   opens_at: string | null
   closes_at: string | null
   coherence_issue: string | null
+  min_duration_minutes: number | null
 }): DaySchedule {
   return {
     slotMinutes: entry.slot_minutes ?? calendarConfig.slotMinutes,
     openMinutes: entry.opens_at === null ? null : parseClockMinutes(entry.opens_at),
     closeMinutes: entry.closes_at === null ? null : parseClockMinutes(entry.closes_at),
     coherenceIssue: entry.coherence_issue,
+    minDurationMinutes: entry.min_duration_minutes,
   }
 }
 
@@ -284,6 +312,7 @@ export function buildWeekSchedule(
     opens_at: string | null
     closes_at: string | null
     coherence_issue: string | null
+    min_duration_minutes: number | null
   }[],
   timeZone: string,
 ): WeekSchedule {
@@ -301,6 +330,12 @@ export function buildWeekSchedule(
  * fallback when no real `WeekSchedule` prop is supplied (matching the old
  * `config ?? calendarConfig` default), and this module's own test suite,
  * whose fixtures still think in one `CalendarConfig` for a whole week.
+ *
+ * `minDurationMinutes` is always `null` here rather than carried through from
+ * `config`: every caller of this function is a uniform, no-rules fallback
+ * (the shipped default, or a test fixture built before this field existed),
+ * never a real per-date resolution — a real minimum duration only ever
+ * reaches a `DaySchedule` through `buildWeekSchedule`'s wire parsing.
  */
 export function uniformWeekSchedule(config: CalendarConfig): WeekSchedule {
   const day: DaySchedule = {
@@ -308,6 +343,7 @@ export function uniformWeekSchedule(config: CalendarConfig): WeekSchedule {
     openMinutes: config.openMinutes,
     closeMinutes: config.closeMinutes,
     coherenceIssue: null,
+    minDurationMinutes: null,
   }
   return { timeZone: config.timeZone, forDate: () => day }
 }
@@ -320,6 +356,7 @@ export function calendarConfigForDay(schedule: WeekSchedule, dateKey: string): C
     openMinutes: day.openMinutes,
     closeMinutes: day.closeMinutes,
     timeZone: schedule.timeZone,
+    minDurationMinutes: day.minDurationMinutes,
   }
 }
 
