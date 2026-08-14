@@ -16,13 +16,17 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  buildWeekSchedule,
   calendarConfig,
+  calendarConfigForDay,
   formatSlotLabel,
   isSlotOutOfHours,
   slotStart,
   slotStartMinutes,
+  slotsPerClick,
   slotsPerDay,
   slotsPerDayFor,
+  uniformWeekSchedule,
   type CalendarConfig,
 } from './config'
 import { SYSTEM_TIME_ZONE, zonedParts } from './timezone'
@@ -40,6 +44,7 @@ const DEFAULT: CalendarConfig = {
   openMinutes: null,
   closeMinutes: null,
   timeZone: SYSTEM_TZ,
+  minDurationMinutes: null,
 }
 
 /** The same slot size, with hours matching the grid's old hardcoded window. */
@@ -48,6 +53,7 @@ const NINE_TO_FIVE: CalendarConfig = {
   openMinutes: 9 * 60,
   closeMinutes: 17 * 60,
   timeZone: SYSTEM_TZ,
+  minDurationMinutes: null,
 }
 
 /** The same day, at a finer granularity — the documented future change. */
@@ -223,6 +229,86 @@ describe('isSlotOutOfHours', () => {
     const config = { ...DEFAULT, openMinutes: 9 * 60 + 15, closeMinutes: 17 * 60 }
     expect(isSlotOutOfHours(18, config)).toBe(true)
     expect(isSlotOutOfHours(19, config)).toBe(false)
+  })
+
+  it('greys a slot whose row alone is in hours but whose widened click unit would cross closing', () => {
+    // 16:30-17:00 (slot 33) is bookable on its own — this is the same row
+    // "greys everything from closing onward" above proves is *not*
+    // out-of-hours at slotMinutes width. With a 60-minute minimum (two
+    // 30-minute slots), the click it anchors resolves to 16:30-17:30, which
+    // runs a full 30 minutes past the 17:00 close the backend's
+    // `AvailabilityHoursRule` enforces — offering it would be exactly the
+    // denial this task exists to prevent, just via the hours rule instead of
+    // the minimum-duration one.
+    const config: CalendarConfig = { ...NINE_TO_FIVE, minDurationMinutes: 60 }
+    expect(slotsPerClick(config)).toBe(2)
+    expect(isSlotOutOfHours(33, config)).toBe(true)
+  })
+
+  it('leaves that same row bookable when no minimum is configured', () => {
+    // The negative control: nothing about slot 33 itself changed — only
+    // configuring a minimum that widens its click unit past closing does.
+    expect(isSlotOutOfHours(33, NINE_TO_FIVE)).toBe(false)
+  })
+
+  it('does not grey a row whose widened click unit still lands inside hours', () => {
+    // 09:00-09:30 (slot 18) widened by the same 60-minute minimum resolves
+    // to 09:00-10:00, well inside 09:00-17:00 — the minimum alone must not
+    // grey a row that was always going to be fine.
+    const config: CalendarConfig = { ...NINE_TO_FIVE, minDurationMinutes: 60 }
+    expect(isSlotOutOfHours(18, config)).toBe(false)
+  })
+})
+
+describe('minDurationMinutes parsing and defaults', () => {
+  it('is null on the shipped default config', () => {
+    expect(calendarConfig.minDurationMinutes).toBeNull()
+  })
+
+  it('parses a resolved minimum duration from the wire shape', () => {
+    const schedule = buildWeekSchedule(
+      [
+        {
+          date: '2026-07-20',
+          slot_minutes: 30,
+          opens_at: null,
+          closes_at: null,
+          coherence_issue: null,
+          min_duration_minutes: 60,
+        },
+      ],
+      SYSTEM_TZ,
+    )
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBe(60)
+    expect(calendarConfigForDay(schedule, '2026-07-20').minDurationMinutes).toBe(60)
+  })
+
+  it('defaults an unenforced minimum duration to null, not an invented floor', () => {
+    const schedule = buildWeekSchedule(
+      [
+        {
+          date: '2026-07-20',
+          slot_minutes: 30,
+          opens_at: null,
+          closes_at: null,
+          coherence_issue: null,
+          min_duration_minutes: null,
+        },
+      ],
+      SYSTEM_TZ,
+    )
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+  })
+
+  it('resolves a date this WeekSchedule was never built for to null, the shipped default', () => {
+    const schedule = buildWeekSchedule([], SYSTEM_TZ)
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+  })
+
+  it('uniformWeekSchedule always resolves to no minimum, regardless of the config it is built from', () => {
+    const withMinimum: CalendarConfig = { ...DEFAULT, minDurationMinutes: 60 }
+    const schedule = uniformWeekSchedule(withMinimum)
+    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
   })
 })
 

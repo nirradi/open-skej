@@ -40,7 +40,7 @@
  * parameter, so that "this week" means the Space's today, not the viewer's.
  */
 
-import { calendarConfig, slotStart, type CalendarConfig } from '../config'
+import { calendarConfig, slotStart, slotsPerClick, type CalendarConfig } from '../config'
 import { zonedCalendarDate, zonedParts } from '../timezone'
 
 /** Days in a rendered week. Not configurable — a week view shows a week. */
@@ -248,14 +248,28 @@ export function formatClockTime(value: Date, timeZone: string): string {
   return `${hh}:${mm}`
 }
 
-/** The half-open interval `[start, end)` a slot occupies. */
+/**
+ * The half-open interval `[start, end)` a click starting at slot `index`
+ * would submit.
+ *
+ * Spans exactly one slot when `config.minDurationMinutes` is `null` (no
+ * floor governs the date) or already fits in one — otherwise `end` extends
+ * across `slotsPerClick(config)` slots, the smallest whole number that
+ * reaches the minimum (`config.ts`). Whole slots, not the raw minute count:
+ * a `slot_alignment` row may also govern the date, and the booking's end has
+ * to land on its grid too, so rounding up to the nearest slot boundary is
+ * what keeps a click from trading one denial for another (`config.ts`'s "the
+ * click unit honours the minimum duration"). `isSlotOutOfHours` widens by the
+ * identical `slotsPerClick(config)` for the same reason, so the two cannot
+ * disagree about what one click means.
+ */
 export function slotInterval(
   day: Date,
   index: number,
   config: CalendarConfig = calendarConfig,
 ): { start: Date; end: Date } {
   const start = slotStart(day, index, config)
-  return { start, end: new Date(start.getTime() + config.slotMinutes * 60 * 1000) }
+  return { start, end: new Date(start.getTime() + slotsPerClick(config) * config.slotMinutes * 60 * 1000) }
 }
 
 /**
