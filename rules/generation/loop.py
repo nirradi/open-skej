@@ -49,7 +49,7 @@ from rules.sandbox import (
     SandboxResult,
 )
 
-from .errors import RuleRejectedError, SuiteRejectedError
+from .errors import RuleContractError, RuleRejectedError, SuiteRejectedError
 from .generator import generate_rule
 from .harness import run_candidate
 from .llm import LLMClient
@@ -87,7 +87,11 @@ class AttemptOutcome(str, Enum):
     """How one attempt ended. Exactly one of these means the candidate is verified."""
 
     PASSED = "passed"
-    #: The Generator's source did not survive the safety validator.
+    #: The Generator's source did not survive a pre-execution gate — the safety validator, or the
+    #: parameter contract (``generation.param_contract``). One label for both because the remedy is
+    #: the same one either way: the Generator is asked to correct the source it just wrote. Which
+    #: gate refused is in the attempt's ``failure`` text, which is the first line the summary
+    #: prints.
     RULE_REJECTED = "rule_rejected"
     #: The Tester's answer was not a usable pytest module.
     TESTS_REJECTED = "tests_rejected"
@@ -259,6 +263,17 @@ def _attempt(
             model=model,
             previous_source=previous_source,
             failure=failure,
+        )
+    except RuleContractError as exc:
+        # Caught before `RuleRejectedError`, its own base class, so the feedback names the gate
+        # that actually refused. Reporting a parameter-unit mistake as a safety rejection would
+        # send the model looking for an unsafe construct it never wrote — the same misdiagnosis
+        # `TESTS_FAILED` caused when every failure it labelled was the Tester's own fixture.
+        return Attempt(
+            number=number,
+            outcome=AttemptOutcome.RULE_REJECTED,
+            rule_source=exc.source,
+            failure=f"The rule's parameter contract is wrong: {exc.reason}",
         )
     except RuleRejectedError as exc:
         return Attempt(

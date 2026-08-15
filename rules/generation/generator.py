@@ -6,8 +6,19 @@ markdown fence the model usually wraps code in, and runs the result through
 ``rules.safety.validate_source`` **before returning it** — nothing leaves this module unvalidated,
 so no caller can write an unchecked candidate to disk by forgetting a step.
 
+**Two gates run here, not one.** ``validate_source`` decides whether the source is safe to execute;
+``param_contract.param_contract_findings`` decides whether it matches the values it will actually be
+handed — every parameter arrives as a plain integer, and a duration arrives as an integer number of
+minutes. The second is not a safety question and is enforced here anyway, because the failure it
+catches lands further from its cause than any other in this package: a rule taking a ``timedelta``
+for a parameter the wire delivers as an ``int`` raises inside ``_build_canon`` and takes an entire
+Space off line (``ops/pending/bugs/generated-rule-duration-params-deny-every-booking.md``). Both
+gates raise ``RuleRejectedError``, so the loop retries either; the second raises the
+``RuleContractError`` subclass so the loop can name which gate refused.
+
 Rejection is a value the retry loop needs, not an accident: ``RuleRejectedError`` carries the
-validator's own message, which is what the loop feeds back to the model as the reason to try again.
+rejecting gate's own message, which is what the loop feeds back to the model as the reason to try
+again.
 
 **Nothing generated is imported by anything.** The output is a string, reviewed by a human and
 committed through a PR before it becomes code the booking API runs. That is what keeps a prompt
@@ -25,8 +36,12 @@ import re
 
 from rules.safety import UnsafeRuleError, validate_source
 
-from .errors import RuleRejectedError
+from .errors import RuleContractError, RuleRejectedError
 from .llm import LLMClient
+from .param_contract import (
+    describe_param_contract_findings,
+    param_contract_findings,
+)
 
 __all__ = [
     "generate_rule",
@@ -104,6 +119,18 @@ even though only the window was called changeable. A number still sitting as a l
 `evaluate` is a parameter you failed to lift. Validate the arguments in `__init__` and raise \
 ValueError on a nonsensical one. Do not call `super().__init__()` — see constraint 6.
 
+   EVERY ARGUMENT ARRIVES AS A PLAIN INTEGER, AND A DURATION ARRIVES AS A NUMBER OF MINUTES. An \
+admin configures your rule through a web form and the value is stored as JSON, so an argument is \
+never a `timedelta`, never a `time` and never a `date` — it is an `int`. A duration is a count of \
+MINUTES: 90, not `timedelta(minutes=90)`. A time of day is minutes from the venue's own local \
+midnight: 540, not 09:00. CONVERT IT YOURSELF, IN `__init__`, and keep the converted value: \
+`self.max_duration = timedelta(minutes=max_duration)`. Compare against that, never against the raw \
+argument. `if max_duration <= timedelta(0)`, `max_duration.total_seconds()`, or a default of \
+`timedelta(days=7)` all raise the moment a venue adds your rule, and EVERY booking in that venue \
+is then refused until an admin removes it. Validate the raw argument as the number it is — \
+`if max_duration <= 0` — and name it for its unit if that helps you keep the two apart: \
+`max_duration_minutes` reads as what it is. A check enforces this before your source is accepted.
+
 4. EVERY DATETIME IS UTC; LOCAL QUESTIONS ARE ALREADY ANSWERED FOR YOU. Every datetime you see is \
 UTC, timezone-aware, with a zero offset; this is enforced at construction, so you may rely on it \
 absolutely. Never convert a timezone and never write DST handling — you have no zone to convert \
@@ -156,26 +183,31 @@ could trivially split into two separate bookings, wants the run.
 Write it the way this hand-written rule is written — this is the reference:
 
 class MaxDurationRule(BaseRule):
-    \"\"\"Bookings may not run longer than ``max_duration``. The bound is inclusive.\"\"\"
+    \"\"\"Bookings may not run longer than ``max_duration_minutes``. The bound is inclusive.\"\"\"
 
-    def __init__(self, max_duration):
-        if max_duration <= timedelta(0):
-            raise ValueError(f"max_duration must be positive; got {max_duration!r}")
-        self.max_duration = max_duration
+    def __init__(self, max_duration_minutes):
+        if max_duration_minutes <= 0:
+            raise ValueError(
+                f"max_duration_minutes must be positive; got {max_duration_minutes!r}"
+            )
+        self.max_duration_minutes = max_duration_minutes
+        self.max_duration = timedelta(minutes=max_duration_minutes)
 
     def evaluate(self, request, context):
         if request.duration > self.max_duration:
-            limit_minutes = int(self.max_duration.total_seconds() // 60)
             return RuleResult.deny(
-                f"Bookings can be at most {limit_minutes} minutes long. "
+                f"Bookings can be at most {self.max_duration_minutes} minutes long. "
                 "Please shorten it and try again."
             )
         return RuleResult.allow()
 
-Note what that deny string does NOT do: it does not say "at most 2 hours". The bound is a \
-parameter, so the copy is built from the parameter — a rule whose message names a number its \
-`__init__` was given is a rule that lies the moment a venue configures a different one. A \
-duration rendered this way is still legal copy under constraint 7; a clock time never is.
+Note the two things that rule does. The argument is validated as the integer it arrives as \
+(`<= 0`, not `<= timedelta(0)`) and converted once, in `__init__`, to the `timedelta` the \
+comparison in `evaluate` needs — constraint 3. And the deny string does NOT say "at most 2 hours": \
+the bound is a parameter, so the copy is built from the parameter, because a rule whose message \
+names a number its `__init__` was given is a rule that lies the moment a venue configures a \
+different one. A duration rendered this way is still legal copy under constraint 7; a clock time \
+never is.
 
 A rule that reads a LOCAL notion reads it from `context.local` and never converts anything itself \
 — and its deny copy still names no clock time (constraint 7):
@@ -199,12 +231,12 @@ class NotBeforeRule(BaseRule):
 A rule about consecutive play (constraint 8) reads `context.run`, never `request.duration`:
 
 class MaxConsecutivePlayRule(BaseRule):
-    \"\"\"A back-to-back run of bookings, across every Resource, may not exceed ``max_run``.\"\"\"
+    \"\"\"A back-to-back run of bookings, across every Resource, may not exceed ``max_run_minutes``.\"\"\"
 
-    def __init__(self, max_run):
-        if max_run <= timedelta(0):
-            raise ValueError(f"max_run must be positive; got {max_run!r}")
-        self.max_run = max_run
+    def __init__(self, max_run_minutes):
+        if max_run_minutes <= 0:
+            raise ValueError(f"max_run_minutes must be positive; got {max_run_minutes!r}")
+        self.max_run = timedelta(minutes=max_run_minutes)
 
     def evaluate(self, request, context):
         if context.run.duration > self.max_run:
@@ -272,6 +304,17 @@ def generate_rule(
         # The validator's message names the construct and its line. It is passed through verbatim:
         # that detail is exactly what lets the model fix the candidate on the next attempt.
         raise RuleRejectedError(str(exc), source=source) from exc
+
+    # Two gates, not one, and they answer different questions. `validate_source` asks whether this
+    # source is safe to execute at all; `param_contract_findings` asks whether it matches the
+    # values it will actually be constructed with. A rule can be perfectly safe and still take a
+    # `timedelta` for a parameter the wire delivers as an integer of minutes — and that one is the
+    # more damaging of the two, because it fails at *build* time inside a live Space's canon rather
+    # than at write time (`param_contract`'s module docstring). Both raise `RuleRejectedError`, so
+    # the loop retries both and hands the reason back verbatim either way.
+    findings = param_contract_findings(source)
+    if findings:
+        raise RuleContractError(describe_param_contract_findings(findings), source=source)
 
     return source
 

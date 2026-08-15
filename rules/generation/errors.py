@@ -15,6 +15,7 @@ __all__ = [
     "GenerationError",
     "LLMCallError",
     "RuleRejectedError",
+    "RuleContractError",
     "SuiteRejectedError",
     "ManifestRejectedError",
 ]
@@ -60,6 +61,24 @@ class RuleRejectedError(GenerationError):
         super().__init__(reason)
         self.reason = reason
         self.source = source
+
+
+class RuleContractError(RuleRejectedError):
+    """The source is *safe* and still unusable: it does not match the values it will be handed.
+
+    A subclass rather than a sibling, because the retry loop's handling is identical — this is a
+    candidate the Generator is asked to correct, carrying its own source and its own reason, and a
+    caller that catches ``RuleRejectedError`` must catch this too or the defect it names walks
+    straight past. What the separate type buys is that the loop can *say which gate* rejected the
+    candidate: reporting a parameter-unit mistake as "the safety validator rejected the source"
+    would be the same misreading that cost this project a full benchmark round when every Tester
+    fixture failure was reported as the rule being wrong (``rule-engine.md``, "Every failure the
+    first run recorded was the Tester's").
+
+    Raised only by ``generator.generate_rule``, from ``param_contract.param_contract_findings`` —
+    see that module for the contract and for why it is enforced here rather than at the manifest
+    call.
+    """
 
 
 class SuiteRejectedError(GenerationError):

@@ -12,15 +12,18 @@ import pytest
 import benchmark
 from benchmark import (
     GOLDEN_EXAMPLES,
+    ArtifactExpectation,
     BenchmarkCheckpoint,
     BenchmarkReport,
     BenchmarkStatus,
     ExampleReport,
+    GoldenExample,
     ModelReport,
     RecordingClient,
     build_arg_parser,
     build_client,
     build_example_report,
+    check_artifact,
     resolve_examples,
     resolve_models,
     run_benchmark,
@@ -44,6 +47,16 @@ from generation.loop import Attempt, AttemptOutcome, LoopResult
 
 def _attempt(outcome, **kwargs):
     return Attempt(number=1, outcome=outcome, **kwargs)
+
+
+def _examples(*descriptions, expects=()):
+    """``GoldenExample``s for the run-plumbing tests, declaring no expectation by default.
+
+    Those tests are about which examples run, get reused from a checkpoint, or get skipped — not
+    about what the artifacts contain. Handing them examples with no expectations keeps each one
+    measuring the thing it names; the artifact axis has its own tests further down.
+    """
+    return [GoldenExample(description, tuple(expects)) for description in descriptions]
 
 
 def test_a_verified_result_reports_verified_and_succeeded():
@@ -270,7 +283,7 @@ class _AlwaysBrokenClient:
 
 def test_a_call_error_on_the_first_example_skips_every_later_one():
     reports = run_model(
-        ["max 1 hour", "only on weekends", "max 2 times a week"],
+        _examples("max 1 hour", "only on weekends", "max 2 times a week"),
         client=_AlwaysBrokenClient(),
         model="qwen2.5:1.5b",
         retries=0,
@@ -288,7 +301,7 @@ def test_a_call_error_on_the_first_example_skips_every_later_one():
 
 
 def test_a_call_error_report_carries_no_attempts_or_tokens():
-    reports = run_model(["max 1 hour"], client=_AlwaysBrokenClient(), model="m", retries=0)
+    reports = run_model(_examples("max 1 hour"), client=_AlwaysBrokenClient(), model="m", retries=0)
 
     report = reports[0]
     assert report.attempts == 0
@@ -308,13 +321,13 @@ def test_resolve_examples_defaults_to_all_five_in_order():
 
 
 def test_resolve_examples_filters_case_insensitively():
-    assert resolve_examples(["WEEKENDS"]) == ["only on weekends"]
+    assert [e.description for e in resolve_examples(["WEEKENDS"])] == ["only on weekends"]
 
 
 def test_resolve_examples_multiple_filters_are_unioned_without_duplicates():
     # "max" matches two descriptions and is processed first, so both land before "weekends"'s
     # single match; resolve_examples preserves match order, not GOLDEN_EXAMPLES order.
-    result = resolve_examples(["max", "weekends"])
+    result = [example.description for example in resolve_examples(["max", "weekends"])]
     assert result == ["max 1 hour", "max 2 times a week", "only on weekends"]
 
 
@@ -323,8 +336,8 @@ def test_an_unmatched_filter_names_the_available_descriptions():
         resolve_examples(["no such constraint"])
     message = str(excinfo.value)
     assert "no such constraint" in message
-    for description in GOLDEN_EXAMPLES:
-        assert description in message
+    for example in GOLDEN_EXAMPLES:
+        assert example.description in message
 
 
 def test_resolve_models_uses_the_explicit_list_when_given():
@@ -760,7 +773,7 @@ def test_run_model_returns_a_cached_example_without_touching_the_client():
     cached = _example("max 1 hour")
 
     reports = run_model(
-        ["max 1 hour"],
+        _examples("max 1 hour"),
         client=_AlwaysBrokenClient(),
         model="m",
         retries=0,
@@ -782,7 +795,7 @@ def test_run_model_calls_on_example_only_for_freshly_computed_reports(monkeypatc
     recorded = []
 
     reports = run_model(
-        ["max 1 hour", "only on weekends"],
+        _examples("max 1 hour", "only on weekends"),
         client=_AlwaysBrokenClient(),
         model="m",
         retries=0,
@@ -804,7 +817,7 @@ def test_run_model_resuming_past_a_recorded_call_error_skips_without_recontactin
     monkeypatch.setattr(benchmark, "run_generation_loop", fail_if_called)
 
     reports = run_model(
-        ["max 1 hour", "only on weekends"],
+        _examples("max 1 hour", "only on weekends"),
         client=_AlwaysBrokenClient(),
         model="m",
         retries=0,
@@ -850,7 +863,7 @@ def test_run_benchmark_with_a_checkpoint_skips_examples_already_recorded(tmp_pat
         client_name="ollama",
         client=_AlwaysBrokenClient(),
         models=["m"],
-        descriptions=["max 1 hour", "only on weekends"],
+        examples=_examples("max 1 hour", "only on weekends"),
         retries=0,
         seed=0,
         temperature=0.0,

@@ -32,17 +32,23 @@ from rules.sandbox import SandboxOutcome, SandboxResult
 # Candidates the fake Generator can return
 # --------------------------------------------------------------------------------------------
 
+#: Note the constructor: an integer number of minutes, converted once, in ``__init__``. That is the
+#: parameter contract every candidate this loop accepts must honour
+#: (``generation.param_contract``), and this fixture used to be written the other way — taking a
+#: bare ``timedelta``, exactly as the Generator's own reference class used to. A fixture that
+#: breaks the contract teaches it wrong twice: once to whoever reads this file, and once to the
+#: check, which would never see a passing candidate here.
 GOOD_RULE = textwrap.dedent('''\
     from datetime import timedelta
 
 
     class MaxDurationRule(BaseRule):
-        """Bookings may not run longer than ``max_duration``. Inclusive bound."""
+        """Bookings may not run longer than ``max_duration_minutes``. Inclusive bound."""
 
-        def __init__(self, max_duration):
-            if max_duration <= timedelta(0):
-                raise ValueError("max_duration must be positive")
-            self.max_duration = max_duration
+        def __init__(self, max_duration_minutes):
+            if max_duration_minutes <= 0:
+                raise ValueError("max_duration_minutes must be positive")
+            self.max_duration = timedelta(minutes=max_duration_minutes)
 
         def evaluate(self, request, context):
             if request.duration > self.max_duration:
@@ -75,7 +81,7 @@ TESTS = textwrap.dedent("""\
     )
 
     NOW = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
-    LIMIT = timedelta(hours=2)
+    LIMIT_MINUTES = 120
 
 
     def D(year, month, day):
@@ -111,16 +117,16 @@ TESTS = textwrap.dedent("""\
 
 
     def test_within_the_limit_passes():
-        assert MaxDurationRule(LIMIT).evaluate(booking(1), context()).passed
+        assert MaxDurationRule(LIMIT_MINUTES).evaluate(booking(1), context()).passed
 
 
     def test_over_the_limit_is_refused():
-        assert not MaxDurationRule(LIMIT).evaluate(booking(3), context()).passed
+        assert not MaxDurationRule(LIMIT_MINUTES).evaluate(booking(3), context()).passed
 
 
     def test_fails_closed_on_input_it_cannot_evaluate():
         try:
-            result = MaxDurationRule(LIMIT).evaluate(object(), context())
+            result = MaxDurationRule(LIMIT_MINUTES).evaluate(object(), context())
         except Exception:
             return
         assert not result.passed

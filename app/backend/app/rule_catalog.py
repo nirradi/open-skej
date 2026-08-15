@@ -12,7 +12,8 @@ is nothing but ORM.
 
 **Hoisting** is the load path: turning one `generated_rule_types` row's stored bytecode back into a
 constructible `RuleType`, re-proving at every load the safety properties that were true when the
-row was written (`.claude/rules/rule-engine.md`, "AI generation loop"). A row that fails any step of
+row was written — and the parameter contract, which for the rows written before that check existed
+was never proved at all (`.claude/rules/rule-engine.md`, "AI generation loop"). A row that fails any step of
 `hoist` is not a state this catalog can serve — it is logged loudly and left out of the map, so a
 `space_rules` row naming it denies with `RULE_ERROR_MESSAGE` through the fail-closed path
 `_build_canon` already has for an unregistered type, rather than 500ing the process that tried to
@@ -34,6 +35,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from generation.harness import ENGINE_NAMES
+from generation.param_contract import describe_param_contract_findings, param_contract_findings
 from rules import REGISTRY, BaseRule, ParamKind, RuleParam, RuleType, UnsafeRuleError, interfaces
 from rules import validate_source as validate_rule_source
 from rules.safety import ALLOWED_IMPORTS, SAFE_BUILTINS
@@ -296,20 +298,32 @@ class RuleCatalog:
            bytecode gives up the property that the executed artifact is provably the validated
            one; re-parsing the source here — about a millisecond — is what is left of that
            guarantee once bytecode, not source, is what actually runs.
-        2. **`sha256(row.human_code) == row.source_sha256`.** If the stored source has been edited
+        2. **`param_contract_findings(row.human_code)` is empty.** The parameter contract, checked
+           at load for the same reason the safety validator is: the rows already in this table were
+           written before `generate_rule` enforced it, and one of them taking a `timedelta` for a
+           parameter the wire delivers as an `int` is what took whole Spaces off line
+           (`ops/pending/bugs/generated-rule-duration-params-deny-every-booking.md`). This does not
+           *restore* service for such a Space — a row naming an unavailable type still denies, by
+           design, because skipping it would silently drop a constraint the Space had configured
+           (see this module's docstring). What it changes is that the fault is now named once, at
+           reload, against the row that has it, instead of surfacing as a bare `TypeError` inside
+           `_build_canon` the next time somebody tries to book. A migration is deliberately not
+           attempted: the repair for a rule whose source is wrong is regenerating it, which is an
+           admin's decision about their own venue and not something a load path may make for them.
+        3. **`sha256(row.human_code) == row.source_sha256`.** If the stored source has been edited
            since it was compiled, the bytecode about to run is not bytecode for the source that was
            just re-validated in step 1 — the two must describe the same artifact.
-        3. **`row.bytecode_magic == importlib.util.MAGIC_NUMBER.hex()`.** `marshal`'s format is not
+        4. **`row.bytecode_magic == importlib.util.MAGIC_NUMBER.hex()`.** `marshal`'s format is not
            stable across interpreter versions; a mismatch means this row was compiled by a Python
            this process is not running, and `deferred/generated-rule-bytecode-recompile.md` is the
            hand-run repair for it, not a fallback here.
-        4. **`marshal.loads` the bytecode, then `exec` it** in `_restricted_namespace()` — never
+        5. **`marshal.loads` the bytecode, then `exec` it** in `_restricted_namespace()` — never
            the real builtins. See that function for what it binds and why the list is not simply
            `SAFE_BUILTINS`.
-        5. **Exactly one `BaseRule` subclass in the resulting namespace.** Zero means the source
+        6. **Exactly one `BaseRule` subclass in the resulting namespace.** Zero means the source
            defined no rule at all; two or more means this catalog cannot know which one a
            `space_rules` row naming this type would mean.
-        6. **Build a `RuleType`** from the row's own columns. `needs_local_resolution=False`
+        7. **Build a `RuleType`** from the row's own columns. `needs_local_resolution=False`
            always: a generated rule reads `context.local` directly and never needs a constructor
            argument resolved against the Space's zone — that is the entire point of `LocalFrame`
            existing before this feature did. `is_single=False`: advisory only, and neither reading
@@ -324,6 +338,13 @@ class RuleCatalog:
                 f"generated_rule_types row {row.id} ({row.rule_type!r}) failed validate_source: "
                 f"{exc}"
             ) from exc
+
+        contract_findings = param_contract_findings(row.human_code)
+        if contract_findings:
+            raise HoistError(
+                f"generated_rule_types row {row.id} ({row.rule_type!r}) breaks the parameter "
+                f"contract: {describe_param_contract_findings(contract_findings)}"
+            )
 
         if hashlib.sha256(row.human_code.encode("utf-8")).hexdigest() != row.source_sha256:
             raise HoistError(

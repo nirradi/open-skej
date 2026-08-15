@@ -151,6 +151,9 @@ enforced on every load, not once at authoring time:
 * **The AST validator runs at write time *and* at every load.** `validate_source` re-parses the
   stored `human_code` each time a row is hoisted (`app/backend/app/rule_catalog.py`), and a row whose
   source no longer validates is not hoisted whatever its stored blob says.
+* **The parameter contract runs at every load too**, and for a different reason: the rows already in
+  the table were written before it was enforced anywhere. `hoist` refuses a row whose rule treats a
+  constructor parameter as a `timedelta` — see "Every parameter arrives as an integer" below.
 * **The adversarial suite passed in the sandbox before the row existed.** Nothing reaches the table
   that did not survive the generation loop's own test run.
 * **Execution happens in a restricted namespace**, never the real builtins — see below.
@@ -782,6 +785,49 @@ caller can hold unvalidated candidate source. A rejection raises `RuleRejectedEr
 validator's message verbatim — it names the construct and its line, which is exactly what the retry
 loop hands back, and paraphrasing would cost the model the detail that lets it fix the candidate.
 
+### Every parameter arrives as an integer, and a duration arrives as minutes
+
+**`space_rules.params` is JSONB, so a rule parameter can only ever be a JSON scalar.** `ParamKind`
+has two members and both are `int` underneath; the write-boundary validator rejects anything whose
+`type()` is not `int`. A duration is therefore an integer count of **minutes**, and a time of day an
+integer count of minutes from local midnight. **Converting that into the type the rule's logic wants
+is the rule's own job, in `__init__`** — `app.rule_catalog`'s `build` hands params over verbatim and
+performs no unit-aware coercion, unlike the canon's hand-written build functions in
+`rules/rules/registry.py`, which convert for the class.
+
+That asymmetry is what made this the first real bug found against a generated rule: the contract was
+written down in exactly one docstring, the system prompt's reference classes took `timedelta`
+arguments, and a model copying the house style produced a rule whose `__init__` raised `TypeError`
+the moment a venue added it — which, through the fail-closed path above, refused **every booking in
+that Space** until an admin removed the rule.
+
+Three changes hold it now, and they are deliberately not one:
+
+* **The system prompt teaches it** (constraint 3), and its three worked examples convert in
+  `__init__` rather than demonstrating the trap. A test asserts the prompt's own examples pass the
+  check its candidates are held to — otherwise a model following the house style would be rejected
+  for following it, and would spend its whole retry budget doing so.
+* **`generation.param_contract` enforces it inside `generate_rule`**, so a rejection is *retryable*
+  and the finding goes back to the model verbatim. It is a static AST pass — no execution, no model
+  call — reporting a parameter compared against a `timedelta`, read for `.total_seconds()`/`.days`/
+  `.seconds`, or defaulted to `timedelta(...)`. It tracks `self.x` aliases assigned in `__init__`
+  **and duration-valued locals**, because the second half of the reported defect was a rule
+  totalling time into `total` and comparing the parameter against that. It is conservative by
+  design: a name it cannot resolve to one kind is dropped, since a false positive costs a retry the
+  model did not need. `RuleContractError` subclasses `RuleRejectedError` so the loop retries it like
+  any rejection while still naming which gate refused.
+* **`hoist` checks it again at load**, which is the only gate a row written before any of this
+  existed still passes through. This does not restore service for such a Space — an unavailable rule
+  still refuses, by design — but the fault is now named once, against the row that has it, instead
+  of surfacing as a bare `TypeError` the next time somebody books. No migration is attempted: the
+  repair is regenerating the rule, which is an admin's decision about their own venue.
+
+**Why not at the manifest call, where `_cross_check_params` already inspects the signature.** That
+check compares parameter *names* and a rejection there is terminal by design — the artifact has
+already survived its adversarial suite, and regenerating it to fix a *description* would throw that
+away. A parameter-unit mistake is in the artifact itself and is precisely what one correction turn
+fixes, so it belongs at the retryable gate.
+
 **The system prompt states every constraint the validator enforces**, because enforcement without
 instruction means every candidate fails and the retry budget is spent rediscovering a rule that could
 have been stated once. Two of them are counter-intuitive and were observed failing against a live
@@ -1049,7 +1095,8 @@ a policy invented inside a task is one nobody agreed to — but the decision now
 
 `rules/benchmark.py` is a CLI feeding five golden examples ("max 1 hour", "only on weekends", "max 2
 times a week", …) through the generation loop and reporting what happened, as JSON and as a terminal
-summary. It exists to tune the system prompts before any of this is wired to the web UI — prompt
+summary. A `GoldenExample` is a description **and the expectations the rule written for it must
+meet** — see "two axes" below. It exists to tune the system prompts before any of this is wired to the web UI — prompt
 changes are judged by its numbers, not by inspection. `--client ollama|google|claude-cli` and a
 repeatable `--model` are what let one invocation compare backends and models side by side.
 
@@ -1066,6 +1113,29 @@ attempt 1 and `TESTS_FAILED` on attempt 1 say different things about which const
 prompt a model broke — the dunder ban, the free-name rule, the datetime import — and which one broke
 is what tunes the prompt. A single success-rate number erases exactly that, so every attempt's
 outcome is kept in order.
+
+**A report has two axes: how the run ended, and what it produced.** `BenchmarkStatus` is the first,
+and was for a long time the only one — every one of its four values is a fact about the loop. So a
+rule that validated, survived its own adversarial suite and matched `inspect.signature` scored
+`VERIFIED` whatever was in it, and the parameter-contract defect above is exactly that: two golden
+examples are duration-shaped, both reported `VERIFIED`, and the rules behind them would have taken a
+Space off line. **A new golden example would not have caught it** — what was missing was never
+another constraint to try, it was something recorded about the answer.
+
+`ArtifactExpectation` is the second axis. Each `GoldenExample` declares what must be true of the
+rule written for it (`PARAMS_HONOUR_THEIR_UNITS`, declared by all five; `TAKES_A_PARAMETER`, by the
+four whose constraint names a number), and `ExampleReport.artifact_failures` records the ones that
+are not. `succeeded` requires **both** axes, while `status` keeps its documented meaning — a run can
+report `VERIFIED` with `succeeded=False`, and any other arrangement puts the two facts back into the
+one bit that let this slip. The five descriptions and their order are unchanged, because appending
+or reordering re-baselines every run ever recorded.
+
+**Both checks are `ast` over the produced source, so they cost no model call.** That is the property
+standing practice asks for by name: an assertion that costs a call is one nobody can afford to add,
+which is why this axis was missing for as long as it was. It also makes the assertions unit-testable
+without spending a day's quota to watch one fail. A checkpoint written before these fields existed
+still resumes, but its examples were never checked against any expectation — start a fresh
+`--checkpoint` path when the artifact expectations are what a run is measuring.
 
 **Token usage comes from a recording wrapper around the `LLMClient`, not from a change to the loop.**
 `run_generation_loop` returns strings and discards each `LLMResponse`; threading metadata out of it

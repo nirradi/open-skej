@@ -24,6 +24,17 @@ to persist every prompt and completion a generation job makes (`.claude/rules/ru
 copy. ``responses`` on it stays exactly the shape this module always used, so nothing below this
 line changed beyond the import.
 
+**A report has two axes: how the run ended, and what it produced.** ``BenchmarkStatus`` is the
+first and was for a long time the only one, which meant a rule that validated, survived its own
+adversarial suite and matched ``inspect.signature`` scored ``VERIFIED`` whatever was in it — and the
+first real bug against a generated rule was one of those, a duration parameter typed as a
+``timedelta`` that took a whole Space off line while the benchmark reported 1/1
+(``ops/pending/bugs/rule-bugs-close-with-a-benchmark-case.md``). ``ArtifactExpectation`` is the
+second axis: each ``GoldenExample`` declares what must be true of the rule written for it, and
+``ExampleReport.artifact_failures`` records the ones that are not. The checks are ``ast`` over the
+produced source, so they cost no model call and no quota — an assertion that cost a call is one
+nobody could afford to add, which is exactly why this axis was missing for so long.
+
 **An ``LLMCallError`` aborts the rest of that model's run, not just the example it hit.** The
 loop's own docstring says the same error is not retried within one example: an unreachable daemon
 or an unpulled model id is not fixed by a different prompt. The same reasoning applies one level up
@@ -59,9 +70,13 @@ from generation.llm import (
     read_google_api_key,
 )
 from generation.loop import MAX_RETRIES, LoopResult, run_generation_loop
+from generation.param_contract import constructor_params, param_contract_findings
 
 __all__ = [
     "GOLDEN_EXAMPLES",
+    "GoldenExample",
+    "ArtifactExpectation",
+    "check_artifact",
     "DEFAULT_OLLAMA_MODEL",
     "DEFAULT_GOOGLE_MODEL",
     "BenchmarkStatus",
@@ -82,15 +97,109 @@ __all__ = [
     "main",
 ]
 
+
+class ArtifactExpectation(str, Enum):
+    """Something that must be true of the *rule a run produced*, not of how the run ended.
+
+    ``BenchmarkStatus`` has four values and every one of them is a fact about the loop: it
+    validated, it gave up, the backend broke, it never ran. None of them says anything about what
+    is in the artifact, so a candidate that validates, survives its own adversarial suite and
+    matches ``inspect.signature`` scores ``VERIFIED`` whatever it actually contains — and the first
+    real bug against a generated rule was exactly that kind
+    (``ops/pending/bugs/rule-bugs-close-with-a-benchmark-case.md``). These are the second axis: the
+    checks each example declares, evaluated against the source the loop handed back.
+
+    Both members below are read from the produced source with ``ast``, so a run costs no extra
+    model call to evaluate them — the property that standing practice asks for by name, because an
+    assertion that costs a call is one nobody can afford to add.
+    """
+
+    #: No constructor parameter is used as if it were a ``timedelta``
+    #: (``generation.param_contract``). Declared by **every** example, including the ones with no
+    #: duration in them: a rule may reach for the wrong type for any parameter, and a check that
+    #: only ran where a defect was expected would not be a check.
+    PARAMS_HONOUR_THEIR_UNITS = "params_honour_their_units"
+
+    #: ``__init__`` takes at least one argument. Declared by the examples whose constraint names a
+    #: number, which is the only thing that makes the number configurable: "max 1 hour" answered by
+    #: a class hardcoding ``timedelta(hours=1)`` scores ``VERIFIED`` and is useless to the second
+    #: venue that adds it.
+    TAKES_A_PARAMETER = "takes_a_parameter"
+
+
+@dataclass(frozen=True)
+class GoldenExample:
+    """One golden constraint, and what the rule written for it must look like.
+
+    Splitting the expectation out per example rather than applying one blanket set is what lets
+    "only on weekends" legitimately produce a rule with no parameters while "max 1 hour" may not.
+    """
+
+    description: str
+    expects: tuple[ArtifactExpectation, ...]
+
+
 #: The golden set, in this order. Fixed rather than configurable: a benchmark that measured a
 #: different set of constraints each run could not compare one prompt revision against the next.
-GOLDEN_EXAMPLES: tuple[str, ...] = (
-    "max 1 hour",
-    "only on weekends",
-    "max 2 times a week",
-    "no more than 3 hours total per day",
-    "at most 2 bookings on the same day",
+#:
+#: **The five descriptions are unchanged and in their original order** — appending or reordering
+#: re-baselines every run ever recorded, and this stream had no reason to pay that: the defect it
+#: closes is invisible in a *prompt*, not absent from the set. Two of these ("max 1 hour", "no more
+#: than 3 hours total per day") are duration-shaped and scored ``VERIFIED`` while producing rules
+#: that took an entire Space off line. What was missing was never another constraint to try; it was
+#: something recorded about the answer. That is ``expects``.
+GOLDEN_EXAMPLES: tuple[GoldenExample, ...] = (
+    GoldenExample(
+        "max 1 hour",
+        (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS, ArtifactExpectation.TAKES_A_PARAMETER),
+    ),
+    GoldenExample(
+        "only on weekends",
+        (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS,),
+    ),
+    GoldenExample(
+        "max 2 times a week",
+        (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS, ArtifactExpectation.TAKES_A_PARAMETER),
+    ),
+    GoldenExample(
+        "no more than 3 hours total per day",
+        (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS, ArtifactExpectation.TAKES_A_PARAMETER),
+    ),
+    GoldenExample(
+        "at most 2 bookings on the same day",
+        (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS, ArtifactExpectation.TAKES_A_PARAMETER),
+    ),
 )
+
+
+def check_artifact(
+    rule_source: str | None, expects: Sequence[ArtifactExpectation]
+) -> tuple[str, ...]:
+    """Every declared expectation ``rule_source`` does not meet, as one sentence each.
+
+    ``()`` when the source meets all of them **and** when there is no source at all: a run that
+    gave up produced no artifact, and reporting an absent artifact as one that failed its
+    assertions would double-count the same failure under two headings. ``status`` already says the
+    loop gave up.
+
+    Pure and free — ``ast`` over a string, no model call, no execution — which is what makes it
+    affordable to run on every example of every run.
+    """
+    if not rule_source or not rule_source.strip():
+        return ()
+
+    failures: list[str] = []
+    for expectation in expects:
+        if expectation is ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS:
+            failures.extend(param_contract_findings(rule_source))
+        elif expectation is ArtifactExpectation.TAKES_A_PARAMETER:
+            if not constructor_params(rule_source):
+                failures.append(
+                    "the rule takes no constructor parameter, so the number this constraint "
+                    "names is hardcoded and no other venue can configure it"
+                )
+    return tuple(failures)
+
 
 #: Re-exported, not defined here. These lived in this module and nowhere else, which made a
 #: benchmark run the only caller in the project that could pick a client-appropriate model: this
@@ -123,6 +232,19 @@ class ExampleReport:
     this task. ``RULE_REJECTED`` on attempt 1 and ``TESTS_FAILED`` on attempt 1 are different
     findings about which constraint in the system prompt a model broke, and collapsing them into a
     single success/failure bit is exactly the information a success-rate number erases.
+
+    ``param_names`` and ``artifact_failures`` are the second axis, and the reason they exist is
+    that every field above them describes the *run*. ``param_names`` is what the produced
+    ``__init__`` actually takes; ``artifact_failures`` is every expectation the example declared
+    that the artifact does not meet (``ArtifactExpectation``). Both are empty for a run that
+    produced nothing.
+
+    **``succeeded`` requires both axes**, which is deliberately not the same thing as
+    ``status is VERIFIED`` any more. ``status`` keeps its documented meaning — how the loop ended —
+    and a run whose loop verified an artifact that then failed its own assertions reports
+    ``VERIFIED`` with ``succeeded=False``. Any other arrangement puts the two facts back into one
+    bit, which is the arrangement that let a Space-wide outage score 1/1
+    (``ops/pending/bugs/rule-bugs-close-with-a-benchmark-case.md``).
     """
 
     description: str
@@ -139,6 +261,14 @@ class ExampleReport:
     llm_duration_ms: int | None
     wall_ms: float
     last_failure: str | None
+    param_names: tuple[str, ...] = ()
+    artifact_failures: tuple[str, ...] = ()
+
+    @property
+    def artifact_ok(self) -> bool:
+        """Whether every expectation this example declared held. Vacuously true when the loop
+        produced no artifact to check — ``status`` is what reports that."""
+        return not self.artifact_failures
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +286,8 @@ class ExampleReport:
             "llm_duration_ms": self.llm_duration_ms,
             "wall_ms": self.wall_ms,
             "last_failure": self.last_failure,
+            "param_names": list(self.param_names),
+            "artifact_failures": list(self.artifact_failures),
         }
 
     @classmethod
@@ -163,8 +295,15 @@ class ExampleReport:
         """The inverse of ``to_dict``, for reading a checkpoint back off disk.
 
         Every field round-trips through JSON unchanged except ``status`` (a string in the file,
-        the ``BenchmarkStatus`` enum here) and ``outcomes`` (a list in the file, a tuple here) —
-        the same two conversions ``to_dict`` made going the other way.
+        the ``BenchmarkStatus`` enum here) and the three list-shaped ones (lists in the file,
+        tuples here) — the same conversions ``to_dict`` made going the other way.
+
+        ``param_names`` and ``artifact_failures`` default to empty when the file does not carry
+        them, so a checkpoint written before those fields existed still resumes. That is a
+        one-directional courtesy and not a promise the numbers are comparable: an old checkpoint's
+        examples were never checked against any expectation, and the resumed run's ``succeeded``
+        counts mix two definitions. Start a fresh ``--checkpoint`` path when the artifact
+        expectations are what a run is measuring.
         """
         return cls(
             description=data["description"],
@@ -181,6 +320,8 @@ class ExampleReport:
             llm_duration_ms=data["llm_duration_ms"],
             wall_ms=data["wall_ms"],
             last_failure=data["last_failure"],
+            param_names=tuple(data.get("param_names", ())),
+            artifact_failures=tuple(data.get("artifact_failures", ())),
         )
 
 
@@ -402,17 +543,26 @@ def build_example_report(
     result: LoopResult,
     responses: Sequence[LLMResponse],
     wall_ms: float,
+    expects: Sequence[ArtifactExpectation] = (),
 ) -> ExampleReport:
     """Assemble an ``ExampleReport`` from a finished ``LoopResult`` and the calls it made.
 
-    Pure: no client, no clock beyond the ``wall_ms`` already measured by the caller. This is the
-    function the unit tests exercise — nothing in the test suite runs a loop or calls a model.
+    Pure: no client, no clock beyond the ``wall_ms`` already measured by the caller, and the
+    artifact checks are ``ast`` over a string. This is the function the unit tests exercise —
+    nothing in the test suite runs a loop or calls a model, which is also what makes the artifact
+    assertions testable without spending a day's model quota to see one fail.
+
+    ``expects`` defaults to none so a caller assembling a report by hand keeps the old behaviour;
+    ``run_model`` always passes the example's own declared expectations.
     """
+    artifact_failures = check_artifact(result.rule_source, expects)
     return ExampleReport(
         description=description,
         model=model,
         status=BenchmarkStatus.VERIFIED if result.succeeded else BenchmarkStatus.GAVE_UP,
-        succeeded=result.succeeded,
+        # Both axes, deliberately (see `ExampleReport`): a verified rule that fails an assertion
+        # its own example declared has not answered the question this benchmark asks.
+        succeeded=result.succeeded and not artifact_failures,
         attempts=result.attempt_count,
         retries=result.retries,
         outcomes=tuple(attempt.outcome.value for attempt in result.attempts),
@@ -423,6 +573,8 @@ def build_example_report(
         llm_duration_ms=_sum_optional(response.duration_ms for response in responses),
         wall_ms=wall_ms,
         last_failure=result.last_failure,
+        param_names=constructor_params(result.rule_source or ""),
+        artifact_failures=artifact_failures,
     )
 
 
@@ -467,7 +619,7 @@ def _skipped_report(description: str, *, model: str) -> ExampleReport:
 
 
 def run_model(
-    descriptions: Sequence[str],
+    examples: Sequence[GoldenExample],
     *,
     client: LLMClient,
     model: str,
@@ -475,7 +627,7 @@ def run_model(
     completed: Mapping[str, ExampleReport] | None = None,
     on_example: Callable[[ExampleReport], None] | None = None,
 ) -> list[ExampleReport]:
-    """Run every description in ``descriptions`` against ``model``, one loop per description.
+    """Run every example in ``examples`` against ``model``, one loop per example.
 
     ``output_dir=None`` on every call: a benchmark is not a source of artifacts for a human to
     review, and five examples times several models writing candidate directories would bury the
@@ -495,7 +647,8 @@ def run_model(
     aborted = False
     completed = completed or {}
 
-    for description in descriptions:
+    for example in examples:
+        description = example.description
         cached = completed.get(description)
         if cached is not None:
             reports.append(cached)
@@ -530,6 +683,7 @@ def run_model(
                     result=result,
                     responses=recording.responses,
                     wall_ms=wall_ms,
+                    expects=example.expects,
                 )
 
         reports.append(report)
@@ -544,7 +698,7 @@ def run_benchmark(
     client_name: str,
     client: LLMClient,
     models: Sequence[str],
-    descriptions: Sequence[str],
+    examples: Sequence[GoldenExample],
     retries: int,
     seed: int | None,
     temperature: float | None,
@@ -567,7 +721,7 @@ def run_benchmark(
             model=model,
             examples=tuple(
                 run_model(
-                    descriptions,
+                    examples,
                     client=client,
                     model=model,
                     retries=retries,
@@ -594,23 +748,27 @@ def run_benchmark(
     )
 
 
-def resolve_examples(filters: Sequence[str] | None) -> list[str]:
-    """The golden descriptions to run: all five, or those matching every ``--example`` filter.
+def resolve_examples(filters: Sequence[str] | None) -> list[GoldenExample]:
+    """The golden examples to run: all five, or those matching every ``--example`` filter.
 
     An unmatched filter raises rather than silently running nothing — a prompt-tuning session
     re-running one example against a slow local model wants to know it mistyped the filter, not to
     read a report with a mysteriously absent example in it.
+
+    Returns the whole ``GoldenExample``, not just its description, because an example run in
+    isolation must still be judged against the expectations it declares — a filtered run that
+    quietly dropped them would report the one number this benchmark is least able to trust.
     """
     if not filters:
         return list(GOLDEN_EXAMPLES)
 
-    selected: list[str] = []
+    selected: list[GoldenExample] = []
     for needle in filters:
         matches = [
-            description for description in GOLDEN_EXAMPLES if needle.lower() in description.lower()
+            example for example in GOLDEN_EXAMPLES if needle.lower() in example.description.lower()
         ]
         if not matches:
-            available = ", ".join(repr(description) for description in GOLDEN_EXAMPLES)
+            available = ", ".join(repr(example.description) for example in GOLDEN_EXAMPLES)
             raise ValueError(f"no golden example matches {needle!r}. Available: {available}")
         for match in matches:
             if match not in selected:
@@ -781,8 +939,12 @@ def print_summary(report: BenchmarkReport) -> None:
         for example in model_report.examples:
             outcome_seq = " -> ".join(example.outcomes) if example.outcomes else "(none)"
             print(f"  [{example.status.value:>10}] {example.description!r}: {outcome_seq}")
-            if not example.succeeded and example.last_failure:
+            if example.last_failure and example.status is not BenchmarkStatus.VERIFIED:
                 print(f"      last: {_first_line(example.last_failure)}")
+            # Printed even under a VERIFIED status, and that is the whole point of the second
+            # axis: an artifact failure is precisely the finding a status line cannot carry.
+            for failure in example.artifact_failures:
+                print(f"      artifact: {_first_line(failure)}")
         print(
             f"  {model_report.success_count}/{model_report.total} succeeded"
             f" | llm_calls={model_report.llm_calls}"
@@ -799,7 +961,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        descriptions = resolve_examples(args.examples)
+        examples = resolve_examples(args.examples)
     except ValueError as exc:
         parser.error(str(exc))
         return 2  # pragma: no cover - parser.error always raises SystemExit first
@@ -839,7 +1001,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         client_name=args.client,
         client=client,
         models=models,
-        descriptions=descriptions,
+        examples=examples,
         retries=args.retries,
         seed=seed,
         temperature=temperature,
