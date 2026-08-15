@@ -28,13 +28,18 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 
-import { listResources, previewSpace, requestAccess } from '../api'
-import type { AccessRequest, ApiOk, PreviewStatus, Resource, SpacePreview } from '../api'
+import { getSpace, listResources, previewSpace, requestAccess } from '../api'
+import type { AccessRequest, ApiOk, PreviewStatus, Resource, Space, SpacePreview } from '../api'
 import { AuthModeContext, SessionContext } from '../auth'
 import type { AuthMode, Session, SessionStatus } from '../auth'
 import { SpacePage } from './SpacePage'
 
-vi.mock('../api', () => ({ previewSpace: vi.fn(), requestAccess: vi.fn(), listResources: vi.fn() }))
+vi.mock('../api', () => ({
+  previewSpace: vi.fn(),
+  requestAccess: vi.fn(),
+  listResources: vi.fn(),
+  getSpace: vi.fn(),
+}))
 
 const PUBLIC_ID = 'aBcDeFgHiJkLmNoPqRsTuV'
 
@@ -60,6 +65,19 @@ function makePreview(overrides: Partial<SpacePreview> = {}): SpacePreview {
 
 function ok<T>(data: T): ApiOk<T> {
   return { outcome: 'ok', data }
+}
+
+function makeSpace(overrides: Partial<Space> = {}): Space {
+  return {
+    public_id: PUBLIC_ID,
+    name: 'Tennis Court',
+    description: 'The one by the car park',
+    timezone: 'UTC',
+    created_at: '2026-07-01T00:00:00Z',
+    archived_at: null,
+    my_role: 'member',
+    ...overrides,
+  }
 }
 
 const CREATED_REQUEST: AccessRequest = {
@@ -161,6 +179,10 @@ beforeEach(() => {
   // not the single-Resource redirect, which gets its own describe block and
   // its own override to one Resource.
   vi.mocked(listResources).mockResolvedValue(ok([RESOURCE, RESOURCE_2]))
+  // A plain member by default — the `/admin` entry point's own describe block
+  // overrides this per case, and every other suite here is about the
+  // Resource picker, not the role fetch this component now also makes.
+  vi.mocked(getSpace).mockResolvedValue(ok(makeSpace()))
 })
 
 afterEach(() => {
@@ -303,6 +325,51 @@ describe('the four statuses', () => {
   })
 })
 
+describe('the /admin entry point', () => {
+  beforeEach(() => {
+    vi.mocked(previewSpace).mockResolvedValue(ok(makePreview({ status: 'member' })))
+  })
+
+  it('renders for an owner', async () => {
+    vi.mocked(getSpace).mockResolvedValue(ok(makeSpace({ my_role: 'owner' })))
+    renderRoute()
+
+    const link = await screen.findByTestId('admin-link')
+    expect(link.getAttribute('href')).toBe('/admin')
+  })
+
+  it('renders for an admin', async () => {
+    vi.mocked(getSpace).mockResolvedValue(ok(makeSpace({ my_role: 'admin' })))
+    renderRoute()
+
+    expect(await screen.findByTestId('admin-link')).toBeTruthy()
+  })
+
+  it('does not render for a plain member', async () => {
+    vi.mocked(getSpace).mockResolvedValue(ok(makeSpace({ my_role: 'member' })))
+    renderRoute()
+
+    await screen.findByTestId('space-name')
+    expect(screen.queryByTestId('admin-link')).toBeNull()
+  })
+
+  it('renders no link while the role fetch is pending', async () => {
+    vi.mocked(getSpace).mockReturnValue(new Promise(() => {}))
+    renderRoute()
+
+    await screen.findByTestId('space-name')
+    expect(screen.queryByTestId('admin-link')).toBeNull()
+  })
+
+  it('renders no link when the role fetch fails', async () => {
+    vi.mocked(getSpace).mockResolvedValue({ outcome: 'failed', message: 'The network went away.' })
+    renderRoute()
+
+    await screen.findByTestId('space-name')
+    expect(screen.queryByTestId('admin-link')).toBeNull()
+  })
+})
+
 describe('a Space with exactly one active Resource', () => {
   beforeEach(() => {
     vi.mocked(previewSpace).mockResolvedValue(ok(makePreview({ status: 'member' })))
@@ -310,6 +377,15 @@ describe('a Space with exactly one active Resource', () => {
   })
 
   it("navigates straight to that Resource's calendar instead of rendering the picker", async () => {
+    renderWithResourceRoute([`/s/${PUBLIC_ID}`], 0)
+
+    const calendar = await screen.findByTestId('resource-calendar')
+    expect(calendar.textContent).toBe(`${PUBLIC_ID}/${RESOURCE.id}`)
+    expect(screen.queryByTestId('resource-list')).toBeNull()
+  })
+
+  it('still redirects when the caller is an admin — this task does not change that', async () => {
+    vi.mocked(getSpace).mockResolvedValue(ok(makeSpace({ my_role: 'admin' })))
     renderWithResourceRoute([`/s/${PUBLIC_ID}`], 0)
 
     const calendar = await screen.findByTestId('resource-calendar')

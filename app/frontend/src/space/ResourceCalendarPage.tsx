@@ -322,12 +322,32 @@ export function ResourceCalendarPage() {
         </Link>
       )}
 
-      <h1
-        className="mt-2 text-2xl font-semibold text-slate-900"
-        data-testid="resource-calendar-heading"
-      >
-        {header ? `${header.space.name} — ${header.resource?.name ?? 'Resource'}` : 'Calendar'}
-      </h1>
+      <div className="mt-2 flex items-center justify-between gap-4">
+        <h1
+          className="text-2xl font-semibold text-slate-900"
+          data-testid="resource-calendar-heading"
+        >
+          {header ? `${header.space.name} — ${header.resource?.name ?? 'Resource'}` : 'Calendar'}
+        </h1>
+        {/*
+          This is the entry point for the single-Resource venue: `SpacePage`
+          redirects straight here when a Space holds exactly one active
+          Resource, so that venue's admin never sees `SpaceMemberView`'s own
+          link at all. `header.space.my_role` is already fetched for
+          `canCancelAnyone` above, so this costs no additional request. As
+          with that flag, this is a convenience only — `require_space_role`
+          decides what `/admin` actually lets an admin do.
+        */}
+        {canCancelAnyone && (
+          <Link
+            to="/admin"
+            className="text-sm font-medium text-slate-600 hover:underline"
+            data-testid="admin-link"
+          >
+            Manage this Space
+          </Link>
+        )}
+      </div>
 
       <div className="mt-6 flex flex-col gap-6 lg:flex-row lg:items-start">
         <div className="min-w-0 flex-1">

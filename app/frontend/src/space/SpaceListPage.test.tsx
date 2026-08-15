@@ -86,4 +86,32 @@ describe('SpaceListPage', () => {
     const error = await screen.findByTestId('space-list-error')
     expect(error.textContent).toContain('The network went away.')
   })
+
+  describe('the /admin entry point', () => {
+    it('renders for an owner', async () => {
+      vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'owner' })]))
+
+      renderPage()
+
+      const link = await screen.findByTestId('admin-link')
+      expect(link.getAttribute('href')).toBe('/admin')
+    })
+
+    it('renders for an admin', async () => {
+      vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'admin' })]))
+
+      renderPage()
+
+      expect(await screen.findByTestId('admin-link')).toBeTruthy()
+    })
+
+    it('does not render for a plain member', async () => {
+      vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'member' })]))
+
+      renderPage()
+
+      await screen.findByTestId('space-list')
+      expect(screen.queryByTestId('admin-link')).toBeNull()
+    })
+  })
 })

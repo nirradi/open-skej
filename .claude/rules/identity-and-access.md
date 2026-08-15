@@ -485,6 +485,17 @@ and naming the wrong one is worse than naming none. The diagnosis goes to the co
 An admin dashboard for Space creation, share links, and member management. Role menus offer only
 roles at or below the actor's own, which is a convenience — the server's 403 is the boundary.
 
+**`/admin` is reached from three screens, never typed cold.** The Space list (`/`, the post-login
+destination every signed-in user lands on), a Space page (`/s/{public_id}`), and a Resource calendar
+(`/s/{public_id}/resources/{id}`) each carry a link onto it, shown only to a caller whose `my_role` on
+the relevant Space is `admin` or `owner`. The calendar page carries its own rather than relying on the
+Space page's, because a Space with exactly one active Resource redirects straight past the Space page
+to that Resource's calendar and never renders it at all — the one venue most likely to need the link
+would otherwise never see one. As with every role-gated control on this dashboard, the check is a
+convenience that decides what renders, never what is allowed: `require_space_role` is what actually
+governs the console once a caller is on it, so a role read gone stale hides a link at worst, and never
+stands in for the 403 the server would still return.
+
 **`SpaceRulesPage` carries a rule-authoring panel alongside the generic rule editor, admin+.** An
 admin types a booking constraint in plain English and submits it; the panel does not hold a
 request open for the minutes generation takes, it holds a job id and polls

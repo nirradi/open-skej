@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 
-import { listResources, type Resource, type SpacePreview } from '../api'
+import { getSpace, listResources, type Resource, type Space, type SpacePreview } from '../api'
 import { messageFor } from '../ui/messages'
 import { NotFoundCard, PAGE_CLASS, SpaceAccessGate } from './SpaceAccessGate'
 
@@ -61,9 +61,21 @@ type ResourceLoad =
  * already excludes archived Resources unless `includeArchived` is passed, which
  * it is not here, so the one Resource counted is already the one active Resource
  * — no second filter is added on top of it.
+ *
+ * `preview` (from `SpaceAccessGate`) carries no role — `SpacePreview` is what a
+ * cold link-holder sees and stops at `status`, never `my_role`. So this
+ * component makes its own `getSpace` call, member+ and already inside the gate
+ * that just confirmed membership, purely to decide whether to offer the
+ * `/admin` link. While that call is pending or fails, no link is shown: a
+ * member who never sees "Manage this Space" has lost nothing, while an admin
+ * shown it on a stale guess could be sent at a console that then 403s them —
+ * the smaller failure is the one this renders. As everywhere else this role is
+ * read, it is a convenience only; `require_space_role` is what actually
+ * decides what `/admin` lets an admin do.
  */
 function SpaceMemberView({ publicId, preview }: { publicId: string; preview: SpacePreview }) {
   const [load, setLoad] = useState<ResourceLoad>(null)
+  const [space, setSpace] = useState<Space | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -83,6 +95,25 @@ function SpaceMemberView({ publicId, preview }: { publicId: string; preview: Spa
     }
   }, [publicId])
 
+  useEffect(() => {
+    let cancelled = false
+
+    void getSpace(publicId).then((result) => {
+      if (cancelled) return
+      if (result.outcome === 'ok') {
+        setSpace(result.data)
+      }
+      // A failed fetch leaves `space` at `null`, which renders no link — see
+      // this component's own docstring for why that is the right default.
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [publicId])
+
+  const canManage = space !== null && (space.my_role === 'admin' || space.my_role === 'owner')
+
   if (load?.kind === 'ok' && load.resources.length === 1) {
     // `replace`, not push: a pushed entry leaves `/s/{publicId}` behind it in
     // history, so Back returns to a Space page that immediately redirects
@@ -93,9 +124,20 @@ function SpaceMemberView({ publicId, preview }: { publicId: string; preview: Spa
   return (
     <main className={PAGE_CLASS}>
       <div className="w-full max-w-md">
-        <h1 className="text-2xl font-semibold text-slate-900" data-testid="space-name">
-          {preview.name}
-        </h1>
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold text-slate-900" data-testid="space-name">
+            {preview.name}
+          </h1>
+          {canManage && (
+            <Link
+              to="/admin"
+              className="text-sm font-medium text-slate-600 hover:underline"
+              data-testid="admin-link"
+            >
+              Manage this Space
+            </Link>
+          )}
+        </div>
         {preview.description ? (
           <p className="mt-2 text-sm text-slate-600" data-testid="space-description">
             {preview.description}

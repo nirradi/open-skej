@@ -20,6 +20,18 @@ const PAGE_CLASS = 'min-h-screen bg-slate-50 p-8 text-slate-800'
  * `listSpaces()` is memberships, not a directory — see its own docstring. A
  * Space this user has no relationship with is not filtered out of the
  * response, it is absent from the database's answer entirely.
+ *
+ * **`/admin` is linked from here once, not per row.** `Space.my_role` travels
+ * on every entry, so this is the one screen every signed-in admin or owner is
+ * guaranteed to reach — the fact this whole task exists to fix, since
+ * previously nothing in the app pointed at the console at all. The console
+ * itself opens on the first Space in `listSpaces` order regardless of which
+ * row sent you there, so a link per row would promise something a click on it
+ * would not deliver; one link, shown whenever any Space here makes the caller
+ * at least an admin, is what the destination actually supports. As with every
+ * role-gated control in this app, this is a convenience and never a security
+ * boundary — `require_space_role` decides what the console actually lets you
+ * do once you are on it.
  */
 export function SpaceListPage() {
   const [load, setLoad] = useState<Load>(null)
@@ -62,10 +74,25 @@ export function SpaceListPage() {
     )
   }
 
+  const canManageASpace = load.spaces.some(
+    (space) => space.my_role === 'admin' || space.my_role === 'owner',
+  )
+
   return (
     <main className={PAGE_CLASS}>
       <div className="mx-auto max-w-md">
-        <h1 className="text-2xl font-semibold text-slate-900">Your Spaces</h1>
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold text-slate-900">Your Spaces</h1>
+          {canManageASpace && (
+            <Link
+              to="/admin"
+              className="text-sm font-medium text-slate-600 hover:underline"
+              data-testid="admin-link"
+            >
+              Manage a Space
+            </Link>
+          )}
+        </div>
 
         {load.spaces.length === 0 ? (
           <p className="mt-4 text-sm text-slate-600" data-testid="space-list-empty">
