@@ -13,8 +13,9 @@ is nothing but ORM.
 **Hoisting** is the load path: turning one `generated_rule_types` row's stored bytecode back into a
 constructible `RuleType`, re-proving at every load the safety properties that were true when the
 row was written — and the parameter contract, which for the rows written before that check existed
-was never proved at all (`.claude/rules/rule-engine.md`, "AI generation loop"). A row that fails any step of
-`hoist` is not a state this catalog can serve — it is logged loudly and left out of the map, so a
+was never proved at all (`.claude/rules/rule-engine.md`, "AI generation loop"). A row that fails
+any step of `hoist` is not a state this catalog can serve — it is logged loudly and left out of the
+map, so a
 `space_rules` row naming it denies with `RULE_ERROR_MESSAGE` through the fail-closed path
 `_build_canon` already has for an unregistered type, rather than 500ing the process that tried to
 load it.
