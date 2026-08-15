@@ -43,8 +43,10 @@ const COMMON_TIMEZONES = [
  *
  * ## Not a general configuration surface
  *
- * No Resource create/archive, no Space rename — those live elsewhere or
- * nowhere yet.
+ * This panel itself still only edits the timezone. Resource create lives on
+ * this same `/admin` page instead, as its own panel (`ResourcesPanel`) —
+ * not here, because a Resource's identity has nothing to do with the venue's
+ * clock. Space rename lives elsewhere or nowhere yet.
  *
  * ## Authorization
  *

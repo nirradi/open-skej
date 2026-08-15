@@ -6,6 +6,7 @@ export {
   cancelResourceBooking,
   clearSessionLost,
   createInvitation,
+  createResource,
   createResourceBooking,
   createRuleDraft,
   createSpace,

@@ -28,7 +28,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 
-import { listAccessRequests, listInvitations, listMembers, listSpaces } from '../api'
+import { listAccessRequests, listInvitations, listMembers, listResources, listSpaces } from '../api'
 import { AdminPage } from './AdminPage'
 import { failed, makeMember, makeSpace, ok } from './fixtures'
 
@@ -60,6 +60,8 @@ vi.mock('../api', () => ({
   createInvitation: vi.fn(),
   revokeInvitation: vi.fn(),
   archiveSpace: vi.fn(),
+  listResources: vi.fn(),
+  createResource: vi.fn(),
 }))
 
 /**
@@ -77,6 +79,7 @@ beforeEach(() => {
   vi.mocked(listMembers).mockResolvedValue(ok([makeMember()]))
   vi.mocked(listAccessRequests).mockResolvedValue(ok([]))
   vi.mocked(listInvitations).mockResolvedValue(ok([]))
+  vi.mocked(listResources).mockResolvedValue(ok([]))
 })
 
 afterEach(() => {
@@ -139,6 +142,7 @@ describe('AdminPage', () => {
     expect(await screen.findByTestId('members-panel')).toBeTruthy()
     expect(await screen.findByTestId('invitations-panel')).toBeTruthy()
     expect(await screen.findByTestId('space-schedule-panel')).toBeTruthy()
+    expect(await screen.findByTestId('resources-panel')).toBeTruthy()
     expect(await screen.findByTestId('archive-panel')).toBeTruthy()
   })
 
@@ -155,6 +159,7 @@ describe('AdminPage', () => {
     expect(screen.queryByTestId('requests-panel')).toBeNull()
     expect(screen.queryByTestId('invitations-panel')).toBeNull()
     expect(screen.queryByTestId('space-schedule-panel')).toBeNull()
+    expect(screen.queryByTestId('resources-panel')).toBeNull()
     expect(screen.queryByTestId('archive-panel')).toBeNull()
   })
 
@@ -169,6 +174,7 @@ describe('AdminPage', () => {
     expect(vi.mocked(listMembers)).not.toHaveBeenCalled()
     expect(vi.mocked(listAccessRequests)).not.toHaveBeenCalled()
     expect(vi.mocked(listInvitations)).not.toHaveBeenCalled()
+    expect(vi.mocked(listResources)).not.toHaveBeenCalled()
   })
 
   it('does not offer archiving to an admin who is not the owner', async () => {
@@ -196,7 +202,11 @@ describe('AdminPage', () => {
     vi.mocked(listSpaces).mockResolvedValue(
       ok([
         makeSpace({ public_id: 'sp_live', name: 'Court A' }),
-        makeSpace({ public_id: 'sp_old', name: 'Court B', archived_at: '2026-07-20T09:00:00.000Z' }),
+        makeSpace({
+          public_id: 'sp_old',
+          name: 'Court B',
+          archived_at: '2026-07-20T09:00:00.000Z',
+        }),
       ]),
     )
 
