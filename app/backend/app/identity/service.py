@@ -51,7 +51,7 @@ from app.rules_stub import SpaceRuleConfig, SpaceRuleRow
 # Resource even though it could.
 FIRST_RESOURCE_NAME = "Main"
 
-# The default operating hours and slot interval a freshly created Space gets, so
+# The default operating hours and session length a freshly created Space gets, so
 # it is immediately bookable rather than requiring an admin to visit the config
 # UI before anyone can book. Minutes from local midnight, matching
 # `availability_hours`'s stored shape (`rules/rules/registry.py`) — not a
@@ -59,7 +59,7 @@ FIRST_RESOURCE_NAME = "Main"
 # `context.local` and nothing here converts them.
 _DEFAULT_OPENS_AT_MINUTES = 9 * 60
 _DEFAULT_CLOSES_AT_MINUTES = 17 * 60
-_DEFAULT_SLOT_MINUTES = 60
+_DEFAULT_SESSION_MINUTES = 60
 
 
 class SpaceArchivedError(Exception):
@@ -73,8 +73,8 @@ class InvalidOperatingHoursError(Exception):
     1440``.
 
     Rejected here, at the write boundary, for the same reason
-    ``slot_alignment``'s own boundary check mirrors
-    ``SlotAlignmentRule.__init__`` right below it in
+    ``session_length``'s own boundary check mirrors
+    ``SessionLengthRule.__init__`` right below it in
     ``_validate_rule_params``: a row that fails this range would still be
     accepted by the database (``params`` is a bag of JSON, not a checked
     shape), only to fail when ``RuleType.build`` constructs the rule at
@@ -111,7 +111,7 @@ class InvalidRuleParamsError(Exception):
 
     Covers every shape failure ``_validate_rule_params`` checks: a missing
     required parameter, an unknown key, a wrong-kind or out-of-bounds value,
-    and (for ``slot_alignment`` alone) a ``slot_minutes`` that does not
+    and (for ``session_length`` alone) a ``session_minutes`` that does not
     divide 1440. ``message`` is the ready-to-serve 422 detail, naming the
     specific offending parameter — the router has no schema knowledge of its
     own to build one from, so this exception carries the finished sentence
@@ -302,7 +302,7 @@ def create_space(
     produces an empty Space even though the schema could represent one. If any
     write fails, none of them survives.
 
-    The Space gets default operating hours and a default slot interval, as
+    The Space gets default operating hours and a default session length, as
     ``space_rules`` rows rather than columns on ``Space`` itself (task 6.6),
     so it is bookable immediately rather than requiring an admin visit to the
     config UI first — the auto-created Resource itself carries none, since a
@@ -329,8 +329,8 @@ def create_space(
     session.add(
         SpaceRule(
             space_id=space.id,
-            rule_type="slot_alignment",
-            params={"slot_minutes": _DEFAULT_SLOT_MINUTES},
+            rule_type="session_length",
+            params={"session_minutes": _DEFAULT_SESSION_MINUTES},
         )
     )
     session.commit()
@@ -459,8 +459,8 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
     :class:`InvalidRuleParamsError` naming the specific parameter — an
     unknown key, a missing required one, or one present but the wrong kind
     or below its declared ``minimum``. Two rule-type-specific checks follow
-    the per-parameter loop: ``slot_alignment.slot_minutes`` must divide
-    1440, mirroring ``SlotAlignmentRule.__init__``'s own booking-time check
+    the per-parameter loop: ``session_length.session_minutes`` must divide
+    1440, mirroring ``SessionLengthRule.__init__``'s own booking-time check
     (``rules/rules/registry.py``'s own docstring names this API boundary as
     where that would eventually be enforced); and ``availability_hours``
     rejects an ``opens_at_minutes``/``closes_at_minutes`` pair outside
@@ -510,18 +510,18 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
                     f"Parameter {param.name!r} must be at least {param.minimum}"
                 )
 
-    if rule_type_id == "slot_alignment":
-        slot_minutes = params.get("slot_minutes")
-        if isinstance(slot_minutes, int) and slot_minutes > 0 and 1440 % slot_minutes != 0:
+    if rule_type_id == "session_length":
+        session_minutes = params.get("session_minutes")
+        if isinstance(session_minutes, int) and session_minutes > 0 and 1440 % session_minutes != 0:
             raise InvalidRuleParamsError(
-                "Parameter 'slot_minutes' must divide 1440 (a whole number of slots per day);"
-                f" got {slot_minutes!r}"
+                "Parameter 'session_minutes' must divide 1440 (a whole number of sessions per"
+                f" day); got {session_minutes!r}"
             )
 
     if rule_type_id == "availability_hours":
         # Mirrors `AvailabilityHoursRule.__init__` (`rules/rules/canon.py`)
-        # exactly, the same way the `slot_alignment` block above mirrors
-        # `SlotAlignmentRule.__init__`. `opens_at_minutes >= 0` is already
+        # exactly, the same way the `session_length` block above mirrors
+        # `SessionLengthRule.__init__`. `opens_at_minutes >= 0` is already
         # guaranteed by that parameter's own declared `minimum=0` in the loop
         # above, so only the upper bound and the pairwise relationship need
         # checking here.

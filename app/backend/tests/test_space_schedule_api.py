@@ -101,7 +101,7 @@ def space_a(session: Session, alice: User) -> Space:
     """Alice's Space. She is its owner and its only member.
 
     ``service.create_space`` seeds it with an unscoped 09:00-17:00
-    ``availability_hours`` row and a 60-minute ``slot_alignment`` row (task
+    ``availability_hours`` row and a 60-minute ``session_length`` row (task
     6.6), so every date this Space's schedule is asked about resolves to
     that one ordinary configuration unless a test adds more rows.
     """
@@ -128,25 +128,26 @@ def test_member_reads_the_seeded_default_schedule(api: Api, alice: User, space_a
     for entry in body:
         assert entry["opens_at"] == "09:00:00"
         assert entry["closes_at"] == "17:00:00"
-        assert entry["slot_minutes"] == 60
+        assert entry["session_minutes"] == 60
+        # The seeded `session_length` row is anchored on the seeded Space's own resolved
+        # opening minute (09:00 = 540), never local midnight — the whole point of this type
+        # replacing `slot_alignment` (`ops/pending/bugs/grid-from-hours-and-min-duration.md`).
+        assert entry["anchor_minutes"] == 9 * 60
         assert entry["coherence_issue"] is None
-        # The seeded Space holds no `min_duration` row (only `availability_hours` and
-        # `slot_alignment`, `identity-and-access.md`), so this field resolves to `None` too.
-        assert entry["min_duration_minutes"] is None
 
 
-def test_min_duration_reaches_the_wire(
+def test_a_custom_session_length_reaches_the_wire(
     api: Api, session: Session, alice: User, space_a: Space
 ) -> None:
-    session.add(
-        SpaceRule(
-            space_id=space_a.id,
-            rule_type="min_duration",
-            params={"min_duration_minutes": 45},
-            applies_to=None,
-            enabled=True,
+    """Replaces the seeded 60-minute row's own params, rather than adding a second
+    ``session_length`` row — two matching rows combine by LCM (`test_rules_stub.py`'s job to
+    cover), which this test is not about."""
+    rule = session.execute(
+        select(SpaceRule).where(
+            SpaceRule.space_id == space_a.id, SpaceRule.rule_type == "session_length"
         )
-    )
+    ).scalar_one()
+    rule.params = {"session_minutes": 45}
     session.commit()
 
     response = api.as_user(alice).get(
@@ -155,7 +156,8 @@ def test_min_duration_reaches_the_wire(
 
     assert response.status_code == 200
     entry = response.json()[0]
-    assert entry["min_duration_minutes"] == 45
+    assert entry["session_minutes"] == 45
+    assert entry["anchor_minutes"] == 9 * 60
 
 
 def test_a_space_with_no_rules_at_all_resolves_to_fully_unconfigured(
@@ -175,9 +177,9 @@ def test_a_space_with_no_rules_at_all_resolves_to_fully_unconfigured(
     entry = response.json()[0]
     assert entry["opens_at"] is None
     assert entry["closes_at"] is None
-    assert entry["slot_minutes"] is None
+    assert entry["session_minutes"] is None
+    assert entry["anchor_minutes"] is None
     assert entry["coherence_issue"] is None
-    assert entry["min_duration_minutes"] is None
 
 
 # --- from/days validation --------------------------------------------------

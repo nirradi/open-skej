@@ -83,11 +83,11 @@ function uniformScheduleEntries(
 ): DayScheduleRead[] {
   return Array.from({ length: days }, (_, i) => ({
     date: toDateKey(addDays(from, i)),
-    slot_minutes: null,
+    session_minutes: null,
     opens_at: null,
     closes_at: null,
     coherence_issue: null,
-    min_duration_minutes: null,
+    anchor_minutes: null,
     ...overrides,
   }))
 }
@@ -244,7 +244,7 @@ describe('scoping the calendar and the panels', () => {
 describe("the Space's schedule", () => {
   it("greys the grid outside the Space's configured hours", async () => {
     vi.mocked(getSpaceSchedule).mockImplementation(async (_publicId, from, days) =>
-      ok(uniformScheduleEntries(from, days, { slot_minutes: 30, opens_at: '09:00:00', closes_at: '17:00:00' })),
+      ok(uniformScheduleEntries(from, days, { session_minutes: 30, opens_at: '09:00:00', closes_at: '17:00:00' })),
     )
     // Next week's Monday, not this one — this test cares about the
     // out-of-hours reason, not the past one, and this week's Monday may
@@ -307,11 +307,11 @@ describe('the week in the URL', () => {
    */
   const fetchStart = (weekStartCarrier: Date) =>
     dayBounds(weekStartCarrier, {
-      slotMinutes: 30,
+      sessionMinutes: 30,
       openMinutes: null,
       closeMinutes: null,
       timeZone: SPACE.timezone,
-      minDurationMinutes: null,
+      anchorMinutes: 0,
     }).start
 
   it('renders the week named by `?week=`, not the current one', async () => {

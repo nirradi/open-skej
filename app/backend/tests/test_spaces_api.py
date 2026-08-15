@@ -915,7 +915,7 @@ def test_space_read_carries_no_schedule_or_rule_parameter_fields(
     for field in (
         "opens_at",
         "closes_at",
-        "slot_minutes",
+        "session_minutes",
         "max_duration_minutes",
         "booking_horizon_days",
         "max_bookings_per_week",
@@ -932,7 +932,7 @@ def test_patching_a_schedule_field_is_silently_ignored(
     rather than erroring or reaching a column that no longer exists.
     """
     response = api.as_user(alice).patch(
-        f"/spaces/{space_a.public_id}", json={"opens_at": "07:00", "slot_minutes": 30}
+        f"/spaces/{space_a.public_id}", json={"opens_at": "07:00", "session_minutes": 30}
     )
 
     assert response.status_code == 200, response.text

@@ -2,7 +2,7 @@
  * Tests for the calendar configuration module.
  *
  * The central claim this file defends is the one in `config.ts`'s own docblock:
- * changing `slotMinutes` must require no other edit anywhere. That is a promise
+ * changing `sessionMinutes` must require no other edit anywhere. That is a promise
  * about the *derived* helpers, so most of these tests drive them with an
  * explicit config rather than the module default — a regression that hardcodes
  * a 30-minute assumption somewhere in the arithmetic then fails here rather
@@ -20,13 +20,12 @@ import {
   calendarConfig,
   calendarConfigForDay,
   formatSlotLabel,
+  gridOffsetMinutes,
   isSlotOutOfHours,
   slotStart,
   slotStartMinutes,
-  slotsPerClick,
   slotsPerDay,
   slotsPerDayFor,
-  uniformWeekSchedule,
   type CalendarConfig,
 } from './config'
 import { SYSTEM_TIME_ZONE, zonedParts } from './timezone'
@@ -40,24 +39,24 @@ const SYSTEM_TZ = SYSTEM_TIME_ZONE
 
 /** No hours restriction, 30-minute slots — the shipped default. */
 const DEFAULT: CalendarConfig = {
-  slotMinutes: 30,
+  sessionMinutes: 30,
   openMinutes: null,
   closeMinutes: null,
   timeZone: SYSTEM_TZ,
-  minDurationMinutes: null,
+  anchorMinutes: 0,
 }
 
 /** The same slot size, with hours matching the grid's old hardcoded window. */
 const NINE_TO_FIVE: CalendarConfig = {
-  slotMinutes: 30,
+  sessionMinutes: 30,
   openMinutes: 9 * 60,
   closeMinutes: 17 * 60,
   timeZone: SYSTEM_TZ,
-  minDurationMinutes: null,
+  anchorMinutes: 0,
 }
 
 /** The same day, at a finer granularity — the documented future change. */
-const TEN_MINUTE: CalendarConfig = { ...DEFAULT, slotMinutes: 10 }
+const TEN_MINUTE: CalendarConfig = { ...DEFAULT, sessionMinutes: 10 }
 
 describe('the shipped defaults', () => {
   it('are 30-minute slots with no hours restriction', () => {
@@ -115,9 +114,9 @@ describe('the config pivot: 30 to 10 minutes changes nothing but the config', ()
     // The real invariant behind "the grid spans the full day": the last
     // slot's start plus one slot length must equal 24:00 exactly, at any
     // granularity.
-    for (const config of [DEFAULT, TEN_MINUTE, { ...DEFAULT, slotMinutes: 15 }]) {
+    for (const config of [DEFAULT, TEN_MINUTE, { ...DEFAULT, sessionMinutes: 15 }]) {
       const lastStart = slotStartMinutes(slotsPerDayFor(config) - 1, config)
-      expect(lastStart + config.slotMinutes).toBe(24 * 60)
+      expect(lastStart + config.sessionMinutes).toBe(24 * 60)
     }
   })
 })
@@ -231,84 +230,87 @@ describe('isSlotOutOfHours', () => {
     expect(isSlotOutOfHours(19, config)).toBe(false)
   })
 
-  it('greys a slot whose row alone is in hours but whose widened click unit would cross closing', () => {
-    // 16:30-17:00 (slot 33) is bookable on its own — this is the same row
-    // "greys everything from closing onward" above proves is *not*
-    // out-of-hours at slotMinutes width. With a 60-minute minimum (two
-    // 30-minute slots), the click it anchors resolves to 16:30-17:30, which
-    // runs a full 30 minutes past the 17:00 close the backend's
-    // `AvailabilityHoursRule` enforces — offering it would be exactly the
-    // denial this task exists to prevent, just via the hours rule instead of
-    // the minimum-duration one.
-    const config: CalendarConfig = { ...NINE_TO_FIVE, minDurationMinutes: 60 }
-    expect(slotsPerClick(config)).toBe(2)
-    expect(isSlotOutOfHours(33, config)).toBe(true)
+  it('greys a slot whose own session would cross closing', () => {
+    // 16:30-17:00 is bookable on its own at a 30-minute session length. At a
+    // 60-minute one the session anchored there resolves to 16:30-17:30, which
+    // runs past the 17:00 close the backend's `AvailabilityHoursRule`
+    // enforces, so the grid must not offer it.
+    const config: CalendarConfig = { ...NINE_TO_FIVE, sessionMinutes: 60, anchorMinutes: 30 }
+    expect(slotStartMinutes(16, config)).toBe(16 * 60 + 30)
+    expect(isSlotOutOfHours(16, config)).toBe(true)
   })
 
-  it('leaves that same row bookable when no minimum is configured', () => {
-    // The negative control: nothing about slot 33 itself changed — only
-    // configuring a minimum that widens its click unit past closing does.
+  it('leaves that same row bookable at a session length that fits inside hours', () => {
+    // The negative control: nothing about 16:30 itself changed — only a
+    // session length that runs it past closing does.
     expect(isSlotOutOfHours(33, NINE_TO_FIVE)).toBe(false)
   })
 
-  it('does not grey a row whose widened click unit still lands inside hours', () => {
-    // 09:00-09:30 (slot 18) widened by the same 60-minute minimum resolves
-    // to 09:00-10:00, well inside 09:00-17:00 — the minimum alone must not
-    // grey a row that was always going to be fine.
-    const config: CalendarConfig = { ...NINE_TO_FIVE, minDurationMinutes: 60 }
-    expect(isSlotOutOfHours(18, config)).toBe(false)
+  it('does not grey a session that still lands inside hours', () => {
+    // 09:00-10:00 at a 60-minute session length is well inside 09:00-17:00.
+    const config: CalendarConfig = { ...NINE_TO_FIVE, sessionMinutes: 60, anchorMinutes: 9 * 60 }
+    expect(isSlotOutOfHours(9, config)).toBe(false)
   })
 })
 
-describe('minDurationMinutes parsing and defaults', () => {
-  it('is null on the shipped default config', () => {
-    expect(calendarConfig.minDurationMinutes).toBeNull()
+describe('anchorMinutes parsing and the anchored grid', () => {
+  it('is zero on the shipped default config', () => {
+    expect(calendarConfig.anchorMinutes).toBe(0)
   })
 
-  it('parses a resolved minimum duration from the wire shape', () => {
+  it('parses a resolved anchor from the wire shape', () => {
     const schedule = buildWeekSchedule(
       [
         {
           date: '2026-07-20',
-          slot_minutes: 30,
-          opens_at: null,
-          closes_at: null,
+          session_minutes: 60,
+          opens_at: '09:15:00',
+          closes_at: '17:00:00',
           coherence_issue: null,
-          min_duration_minutes: 60,
+          anchor_minutes: 9 * 60 + 15,
         },
       ],
       SYSTEM_TZ,
     )
-    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBe(60)
-    expect(calendarConfigForDay(schedule, '2026-07-20').minDurationMinutes).toBe(60)
+    expect(schedule.forDate('2026-07-20').anchorMinutes).toBe(555)
+    expect(calendarConfigForDay(schedule, '2026-07-20').anchorMinutes).toBe(555)
   })
 
-  it('defaults an unenforced minimum duration to null, not an invented floor', () => {
+  it('defaults an unenforced anchor to midnight, not an invented opening time', () => {
     const schedule = buildWeekSchedule(
       [
         {
           date: '2026-07-20',
-          slot_minutes: 30,
+          session_minutes: null,
           opens_at: null,
           closes_at: null,
           coherence_issue: null,
-          min_duration_minutes: null,
+          anchor_minutes: null,
         },
       ],
       SYSTEM_TZ,
     )
-    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+    expect(schedule.forDate('2026-07-20').anchorMinutes).toBe(0)
   })
 
-  it('resolves a date this WeekSchedule was never built for to null, the shipped default', () => {
+  it('resolves a date this WeekSchedule was never built for to the shipped default', () => {
     const schedule = buildWeekSchedule([], SYSTEM_TZ)
-    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+    expect(schedule.forDate('2026-07-20').anchorMinutes).toBe(0)
   })
 
-  it('uniformWeekSchedule always resolves to no minimum, regardless of the config it is built from', () => {
-    const withMinimum: CalendarConfig = { ...DEFAULT, minDurationMinutes: 60 }
-    const schedule = uniformWeekSchedule(withMinimum)
-    expect(schedule.forDate('2026-07-20').minDurationMinutes).toBeNull()
+  it('offsets the grid to the anchor when the opening time is not a whole number of sessions from midnight', () => {
+    const config: CalendarConfig = { ...DEFAULT, sessionMinutes: 60, anchorMinutes: 9 * 60 + 15 }
+    expect(gridOffsetMinutes(config)).toBe(15)
+    expect(slotStartMinutes(0, config)).toBe(15)
+    expect(slotStartMinutes(9, config)).toBe(9 * 60 + 15)
+    // One whole session is lost off the end of the day, never half-rendered.
+    expect(slotsPerDayFor(config)).toBe(23)
+  })
+
+  it('is exactly the midnight grid when the anchor already lands on it', () => {
+    const config: CalendarConfig = { ...DEFAULT, sessionMinutes: 60, anchorMinutes: 9 * 60 }
+    expect(gridOffsetMinutes(config)).toBe(0)
+    expect(slotStartMinutes(0, config)).toBe(0)
+    expect(slotsPerDayFor(config)).toBe(24)
   })
 })
-

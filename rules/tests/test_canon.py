@@ -24,9 +24,8 @@ from rules.canon import (
     BookingHorizonRule,
     MaxConsecutiveDurationRule,
     MaxDurationRule,
-    MinDurationRule,
     NotInThePastRule,
-    SlotAlignmentRule,
+    SessionLengthRule,
     default_canon,
 )
 from rules.controller import evaluate_request
@@ -34,6 +33,7 @@ from rules.interfaces import (
     BookingRequest,
     CalendarContext,
     Context,
+    LocalFrame,
     RuleResult,
     RunContext,
     UserContext,
@@ -289,124 +289,146 @@ def test_a_non_positive_max_consecutive_duration_is_rejected_at_construction():
         MaxConsecutiveDurationRule(max_duration=timedelta(0))
 
 
-# --- MinDurationRule ------------------------------------------------------------------
+# --- SessionLengthRule ------------------------------------------------------------------
+#
+# Replaces both `MinDurationRule` and `SlotAlignmentRule`
+# (`ops/pending/bugs/grid-from-hours-and-min-duration.md`): a booking whose start and end both land
+# on the grid is already at least one session long, so the floor those two rules used to enforce
+# together falls out for free.
 
 
-def test_exactly_min_duration_is_allowed():
-    """The bound is inclusive: exactly the minimum passes, the same convention `MaxDurationRule`
-    states for its own bound."""
-    rule = MinDurationRule(min_duration=timedelta(minutes=30))
-    assert rule.evaluate(hours_from(NOW, hours=0.5), context()) == RuleResult.allow()
-
-
-def test_one_second_under_min_duration_is_denied():
-    rule = MinDurationRule(min_duration=timedelta(minutes=30))
-    result = rule.evaluate(
-        request(NOW, NOW + timedelta(minutes=30) - timedelta(seconds=1)), context()
-    )
-    assert not result.passed
-
-
-def test_the_min_duration_denial_copy_is_exact():
-    """Pinned the same way ``test_the_max_duration_denial_copy_is_exact`` is: the exact text is
-    contract even though nothing outside this package currently asserts it verbatim, because
-    rewording it later is exactly as easy to do by accident."""
-    rule = MinDurationRule(min_duration=timedelta(minutes=30))
-    result = rule.evaluate(request(NOW, NOW + timedelta(minutes=10)), context())
-    assert result.fail_reason == (
-        "Bookings must be at least 30 minutes long, and this one is 10 minutes."
-        " Please lengthen it and try again."
-    )
-
-
-@pytest.mark.parametrize(
-    "duration, rendered",
-    [
-        (timedelta(hours=1), "1 hour"),
-        (timedelta(minutes=45), "45 minutes"),
-        (timedelta(hours=1, minutes=30), "1 hour and 30 minutes"),
-    ],
-)
-def test_min_duration_durations_are_rendered_the_way_a_person_says_them(duration, rendered):
-    rule = MinDurationRule(min_duration=duration)
-    under = rule.evaluate(request(NOW, NOW + duration - timedelta(minutes=1)), context())
-    assert f"at least {rendered} long" in (under.fail_reason or "")
-
-
-def test_a_non_positive_min_duration_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        MinDurationRule(min_duration=timedelta(0))
-
-
-# --- SlotAlignmentRule ----------------------------------------------------------------
-
-#: Midnight on the reference day, in UTC — the shape the adapter always hands this rule: the
-#: Space's own local midnight for the booking's date, already converted to UTC.
-MIDNIGHT = datetime(2026, 7, 20, tzinfo=timezone.utc)
-
-
-def slot_rule(slot_minutes: int = 30, anchor: datetime = MIDNIGHT) -> SlotAlignmentRule:
-    return SlotAlignmentRule(slot_minutes=slot_minutes, anchor=anchor)
+def session_rule(session_minutes: int = 30, anchor_minutes: int = 0) -> SessionLengthRule:
+    return SessionLengthRule(session_minutes=session_minutes, anchor_minutes=anchor_minutes)
 
 
 def test_a_start_and_end_both_on_the_grid_is_allowed():
-    assert slot_rule().evaluate(request(at(10, 0), at(10, 30)), context()).passed
+    assert (
+        session_rule()
+        .evaluate(
+            request(at(10, 0), at(10, 30)), context(frame_for=at(10, 0), frame_end=at(10, 30))
+        )
+        .passed
+    )
 
 
 def test_an_off_grid_start_is_denied():
-    result = slot_rule().evaluate(request(at(10, 7), at(10, 30)), context())
+    result = session_rule().evaluate(
+        request(at(10, 7), at(10, 30)), context(frame_for=at(10, 7), frame_end=at(10, 30))
+    )
     assert not result.passed
-    assert "30-minute grid" in (result.fail_reason or "")
+    assert "30-minute sessions" in (result.fail_reason or "")
+    assert "does not start on a session boundary" in (result.fail_reason or "")
 
 
 def test_an_off_grid_end_with_an_otherwise_aligned_start_is_denied():
-    """Both bounds are checked: an aligned start does not excuse an off-grid end."""
-    result = slot_rule().evaluate(request(at(10, 0), at(10, 22)), context())
+    """Both bounds are checked independently: an aligned start does not excuse an off-grid end."""
+    result = session_rule().evaluate(
+        request(at(10, 0), at(10, 22)), context(frame_for=at(10, 0), frame_end=at(10, 22))
+    )
     assert not result.passed
+    assert "does not end on a session boundary" in (result.fail_reason or "")
 
 
-def test_a_booking_starting_and_ending_several_slots_later_is_allowed():
-    """The exact boundary case: both bounds fall on slot lines several slots apart, not just one."""
-    assert slot_rule().evaluate(request(at(10, 0), at(11, 30)), context()).passed
-
-
-def test_the_denial_copy_names_the_grid_size():
-    result = slot_rule(slot_minutes=45).evaluate(request(at(10, 0), at(10, 20)), context())
-    assert not result.passed
-    assert "45-minute grid" in (result.fail_reason or "")
-
-
-def test_a_slot_minutes_that_does_not_divide_a_day_is_rejected_at_construction():
-    """1440 must be a whole number of slots; 7 does not divide it."""
-    with pytest.raises(ValueError):
-        SlotAlignmentRule(slot_minutes=7, anchor=MIDNIGHT)
-
-
-def test_a_non_positive_slot_minutes_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        SlotAlignmentRule(slot_minutes=0, anchor=MIDNIGHT)
-
-
-def test_a_naive_anchor_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        SlotAlignmentRule(slot_minutes=30, anchor=datetime(2026, 7, 20))
-
-
-def test_a_non_utc_anchor_offset_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        SlotAlignmentRule(
-            slot_minutes=30, anchor=datetime(2026, 7, 20, tzinfo=timezone(timedelta(hours=2)))
+def test_a_booking_starting_and_ending_several_sessions_later_is_allowed():
+    """The exact boundary case: both bounds fall on session lines several sessions apart, not just
+    one."""
+    assert (
+        session_rule()
+        .evaluate(
+            request(at(10, 0), at(11, 30)), context(frame_for=at(10, 0), frame_end=at(11, 30))
         )
+        .passed
+    )
 
 
-def test_the_grid_is_anchored_on_the_supplied_instant_not_on_utc_midnight():
+def test_the_denial_copy_names_the_session_length():
+    result = session_rule(session_minutes=45).evaluate(
+        request(at(10, 0), at(10, 20)), context(frame_for=at(10, 0), frame_end=at(10, 20))
+    )
+    assert not result.passed
+    assert "45-minute sessions" in (result.fail_reason or "")
+
+
+def test_a_session_minutes_that_does_not_divide_a_day_is_rejected_at_construction():
+    """1440 must be a whole number of sessions; 7 does not divide it."""
+    with pytest.raises(ValueError):
+        SessionLengthRule(session_minutes=7, anchor_minutes=0)
+
+
+def test_a_non_positive_session_minutes_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        SessionLengthRule(session_minutes=0, anchor_minutes=0)
+
+
+def test_an_anchor_minutes_outside_a_single_local_day_is_rejected_at_construction():
+    with pytest.raises(ValueError):
+        SessionLengthRule(session_minutes=30, anchor_minutes=1440)
+    with pytest.raises(ValueError):
+        SessionLengthRule(session_minutes=30, anchor_minutes=-1)
+
+
+def test_the_grid_is_anchored_on_opening_time_not_on_local_midnight():
     """A non-midnight anchor still defines a valid grid — the rule never assumes its anchor is
-    00:00."""
-    offset_anchor = MIDNIGHT + timedelta(minutes=15)
-    rule = slot_rule(slot_minutes=30, anchor=offset_anchor)
+    minute 0, which is the whole point of replacing `SlotAlignmentRule` (always anchored on local
+    midnight) with a rule anchored on the venue's own opening time."""
+    rule = session_rule(session_minutes=30, anchor_minutes=15)
 
-    assert rule.evaluate(request(at(10, 15), at(10, 45)), context()).passed
-    assert not rule.evaluate(request(at(10, 0), at(10, 30)), context()).passed
+    assert rule.evaluate(
+        request(at(10, 15), at(10, 45)), context(frame_for=at(10, 15), frame_end=at(10, 45))
+    ).passed
+    assert not rule.evaluate(
+        request(at(10, 0), at(10, 30)), context(frame_for=at(10, 0), frame_end=at(10, 30))
+    ).passed
+
+
+def test_a_start_before_the_anchor_still_lands_on_the_extended_grid():
+    """Python's `%` is non-negative for a negative left operand, so a booking that starts before
+    the venue's own opening time still lines up with the grid if it is congruent to the anchor
+    modulo the session length — the rule never treats "before the anchor" as a special case."""
+    rule = session_rule(session_minutes=60, anchor_minutes=9 * 60)  # opens at 09:00
+
+    on_grid = request(at(8, 0), at(9, 0))
+    assert rule.evaluate(on_grid, context(frame_for=at(8, 0), frame_end=at(9, 0))).passed
+
+    off_grid = request(at(8, 15), at(9, 0))
+    assert not rule.evaluate(off_grid, context(frame_for=at(8, 15), frame_end=at(9, 0))).passed
+
+
+def test_the_rule_reads_only_the_local_frame_never_the_requests_own_utc_clock():
+    """A venue off UTC resolves a local frame that can disagree with the request's raw UTC clock —
+    the whole reason this rule, like `AvailabilityHoursRule`, reads `context.local` and never
+    touches `request.start_at` / `request.end_at` directly. The request below has a UTC start
+    (13:07) that is off a 30-minute grid; a rule reading it directly would deny. The local frame
+    handed alongside it — as an adapter for a venue comfortably off UTC might resolve it — reports
+    local midnight instead, which is on the grid, and that is what the rule allows against."""
+    rule = session_rule(session_minutes=30, anchor_minutes=0)
+
+    off_grid_utc_request = request(
+        datetime(2026, 7, 20, 13, 7, tzinfo=timezone.utc),
+        datetime(2026, 7, 20, 13, 37, tzinfo=timezone.utc),
+    )
+    local_frame = LocalFrame(
+        day_start=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        day_end=datetime(2026, 7, 22, tzinfo=timezone.utc),
+        week_start=datetime(2026, 7, 20, tzinfo=timezone.utc),
+        week_end=datetime(2026, 7, 27, tzinfo=timezone.utc),
+        month_start=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        month_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        weekday=1,
+        start_minutes=0,
+        end_minutes=30,
+    )
+    ctx = Context(
+        user=UserContext(user_id=USER),
+        calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
+        local=local_frame,
+        run=RunContext(
+            start_at=off_grid_utc_request.start_at,
+            end_at=off_grid_utc_request.end_at,
+            booking_count=1,
+        ),
+    )
+    assert rule.evaluate(off_grid_utc_request, ctx).passed
 
 
 # --- AvailabilityHoursRule ----------------------------------------------------------

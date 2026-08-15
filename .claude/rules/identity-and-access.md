@@ -128,7 +128,7 @@ on the Space, and every court in it shares that one configuration. Creating a Sp
 its first Resource**, so a fresh venue is never a dead end and no primary flow meets an empty state;
 the schema can represent a Space with no Resource, but nothing in the product produces one. It also
 seeds **two `space_rules` rows** — an unscoped `availability_hours` (09:00–17:00) and an unscoped
-`slot_alignment` (60 minutes) — for the same reason: a venue is bookable on arrival rather than one an
+`session_length` (60 minutes) — for the same reason: a venue is bookable on arrival rather than one an
 admin must visit the rules page to make usable. Those two and nothing else, so every limit a venue has
 not asked for stays absent. A Space genuinely meant to enforce no hours holds no such row and has to
 have the seeded one deleted — which is what `sandbox_seed` does to Space A, since "not enforced" is
@@ -203,12 +203,12 @@ is Space-scoped and reads or writes one Space's own `space_rules` rows directly:
 against the row's own registered type's schema at the boundary — an unknown `rule_type`, a missing
 required parameter, an unknown parameter, or one of the wrong kind or below its declared `minimum`
 is refused with **422** naming the specific parameter, so a later admin form can attach the message
-to the right field rather than a generic complaint. `slot_alignment`'s `slot_minutes` must divide
+to the right field rather than a generic complaint. `session_length`'s `session_minutes` must divide
 1440, enforced here rather than left to surface only at booking time. `availability_hours` carries
 the range check above — `opens_at_minutes` and `closes_at_minutes` failing `0 <= opens_at_minutes <
 1440` or `opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440` is a **422**, mirroring
-`AvailabilityHoursRule`'s own constructor bound exactly as `slot_alignment`'s check mirrors
-`SlotAlignmentRule`'s. A `PATCH` naming only one of `opens_at_minutes`/`closes_at_minutes` resolves
+`AvailabilityHoursRule`'s own constructor bound exactly as `session_length`'s check mirrors
+`SessionLengthRule`'s. A `PATCH` naming only one of `opens_at_minutes`/`closes_at_minutes` resolves
 the effective pair against what the row already has stored, rather than failing "missing required" on
 a bound the caller never meant to touch. A rule id that names nothing, or names a row
 in another Space, gets the identical **404** on `PATCH`/`DELETE` — the same 404-not-403 treatment a
@@ -385,23 +385,28 @@ redirect above replaces, and the two differing is what stops Back walking into t
 
 **The grid's layout is resolved by the server, per date, and the frontend only renders it.**
 `GET /spaces/{public_id}/schedule?from=&days=` (`app.rules_stub.resolve_day_schedule`) reports, for
-every date in the requested range, the slot size, the operating window, and the minimum booking
-duration a booking on that date would actually be judged against — the flat-AND of that date's own
+every date in the requested range, the session length, the operating window, and the grid anchor a
+booking on that date would actually be judged against — the flat-AND of that date's own
 matching `space_rules` rows (every matching row of a type combines rather than one being picked,
 exactly as the engine itself combines rules), in the Space's own local wall clock.
-`DayScheduleRead.min_duration_minutes` is a plain minute count, not a wall-clock `time`: it names a
-duration, not a point on the clock, so it is the one field on this response the server never folds
-through the minutes-to-wire-time conversion the other three go through. This exists because a rule's
-`applies_to`
-(`rule-engine.md`) can narrow it to particular weekdays or dates, so a Space no longer has one slot
-size or one operating window good for the whole week — a single `CalendarConfig` covering the whole
-week cannot express "Tuesdays are different". The frontend never re-derives this resolution
+`DayScheduleRead.session_minutes` and `anchor_minutes` are plain minute counts, not wall-clock
+`time`s: one names a duration and the other a point measured from local midnight, so neither is
+folded through the minutes-to-wire-time conversion `opens_at` / `closes_at` go through.
+`anchor_minutes` is that date's own resolved opening time, reported rather than left for the client
+to derive from `opens_at` — which rows govern a date is the server's question alone. This exists
+because a rule's `applies_to`
+(`rule-engine.md`) can narrow it to particular weekdays or dates, so a Space no longer has one
+session length or one operating window good for the whole week — a single `CalendarConfig` covering
+the whole week cannot express "Tuesdays are different". The frontend never re-derives this resolution
 itself: a second implementation of "which rules govern this date" in TypeScript is exactly the
 duplication `DEFERRED.md` item 13 warns against, since the engine must stay the sole validator and
-the grid stays advisory. A week's own days can resolve to different slot sizes; the grid's shared time
-axis renders at the finest slot size configured anywhere in the visible week, and each day lays out
-its own rows at its own resolved size and is greyed against its own resolved window, never a
-Space-wide value.
+the grid stays advisory. A week's own days can resolve to different session lengths and different
+anchors; the grid's shared time axis renders at the finest session length configured anywhere in the
+visible week, and each day lays out its own rows at its own resolved length, offset to its own
+anchor, and is greyed against its own resolved window, never a Space-wide value. A day whose anchor
+does not agree with the shared axis renders rows that do not sit flush with it — the same
+degradation a day whose session length is coarser than the axis already shows, and reconciling the
+two is deferred with the rest of the week-axis work.
 
 The grid always renders the whole day regardless of what any date resolves to — there are no
 compile-time slot or opening-hour constants, because an admin edits the rules behind this endpoint
@@ -425,15 +430,17 @@ what a slot means without translating. A per-viewer clock was considered and rej
 two members read different times for the same slot, and it makes the operating window wrap midnight
 for anyone far enough from the venue.
 
-**A day whose resolved hours don't land on its own slot grid gets an advisory note, never a
-blocked calendar.** Two matching `availability_hours` rows can intersect to a window whose bounds
-don't land on the intersected `slot_alignment` grid; `resolve_day_schedule` reports this as that
-date's own `coherence_issue` rather than refusing to describe the date at all — every resolved slot
-size already divides a day evenly (the LCM of two divisors of 1440 always divides 1440), so there is
-always some grid to draw. The calendar surfaces it as a small note in that date's own header and
-changes nothing else about that day: greying already keeps the grid from ever offering a slot outside
-the window, aligned or not, so a misaligned bound is wasted capacity for an admin to notice and tidy
-up, not a booking put at risk. This coherence check runs server-side, per date, inside
+**A resolved session length longer than the resolved operating window gets an advisory note, never a
+blocked calendar.** A real (non-zero-width) window paired with a session length that exceeds its own
+length means nothing on that date could ever be booked at all, which `resolve_day_schedule` reports
+as that date's own `coherence_issue` rather than refusing to describe the date. The calendar
+surfaces it as a small note in that date's own header and changes nothing else about that day.
+This is the **only** coherence case there is, and a misaligned bound is not another one: the grid is
+anchored on the opening time itself, so an opening time cannot miss a grid built on it, and a closing
+time leaving a tail too short for one more session is ordinary wasted capacity rather than a
+misconfiguration worth reporting.
+
+This check runs server-side, per date, inside
 `resolve_day_schedule` rather than at boot — it once threw at import time, which was right for a
 constant nobody could mistype and is wrong for data an admin typed: one bad Space would white-screen
 the app for everyone, including the members of every other Space. That reasoning still holds one
@@ -441,15 +448,6 @@ level up: a `/schedule` request that fails outright (the server unreachable, not
 issue) is the one case left that still degrades to a notice replacing the *whole* calendar — with no
 resolved schedule at all there is nothing honest to render as a grid — and even then it is scoped to
 that Space's own calendar, never a page that takes the rest of the app down with it.
-
-**A resolved minimum duration longer than the resolved operating window is the same kind of advisory
-note, for the same reason.** A real (non-zero-width) window paired with a minimum duration that
-exceeds its own length means nothing on that date could ever be booked at all, which
-`resolve_day_schedule` reports as `coherence_issue` exactly as it does the slot-grid case, and checks
-only once that case has cleared — the two never fire together. A minimum duration that is merely not
-a multiple of the slot size is deliberately **not** this case: the calendar's click unit rounds up to
-the smallest whole number of slots that reaches the minimum, so that mismatch costs nothing and is
-never flagged as broken.
 
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of

@@ -74,11 +74,8 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
             {"opens_at_minutes": opens_at_minutes, "closes_at_minutes": closes_at_minutes},
         )
 
-    if rule_kwargs.get("slot_minutes") is not None:
-        add("slot_alignment", {"slot_minutes": rule_kwargs["slot_minutes"]})
-
-    if rule_kwargs.get("min_duration_minutes") is not None:
-        add("min_duration", {"min_duration_minutes": rule_kwargs["min_duration_minutes"]})
+    if rule_kwargs.get("session_minutes") is not None:
+        add("session_length", {"session_minutes": rule_kwargs["session_minutes"]})
 
     if rule_kwargs.get("max_duration_minutes") is not None:
         add("max_duration", {"max_duration_minutes": rule_kwargs["max_duration_minutes"]})
@@ -193,36 +190,52 @@ def test_max_duration_unset_allows_a_booking_the_default_would_deny():
     assert result.allowed
 
 
-def test_booking_shorter_than_min_duration_is_denied():
-    """``min_duration`` has no reference constant in ``rules_stub`` — unlike ``max_duration`` it is
-    never part of ``DEFAULT_CANON`` (``rules/rules/canon.py``), so there is nothing for a module-
-    level constant here to mirror. The literal below is this test's own configuration, not a
+def test_booking_off_the_session_grid_is_denied():
+    """``session_length`` has no reference constant in ``rules_stub`` — unlike ``max_duration`` it
+    is never part of ``DEFAULT_CANON`` (``rules/rules/canon.py``), so there is nothing for a
+    module-level constant here to mirror. The literal below is this test's own configuration, not a
     reference default."""
-    floor = _config(min_duration_minutes=30)
+    grid = _config(session_minutes=30)
 
-    result = evaluate(request(at(10), at(10, 10)), floor)
+    result = evaluate(request(at(10, 7), at(10, 37)), grid)
 
     assert not result.allowed
-    assert "30 minutes" in result.message
+    assert "30-minute sessions" in result.message
 
 
-def test_booking_of_exactly_min_duration_is_allowed():
-    """The floor is inclusive: exactly 30 minutes is fine, one second under is not."""
-    floor = _config(min_duration_minutes=30)
+def test_a_booking_on_the_session_grid_is_allowed():
+    grid = _config(session_minutes=30)
     start = at(10)
 
-    assert evaluate(request(start, start + timedelta(minutes=30)), floor).allowed
-    assert not evaluate(
-        request(start, start + timedelta(minutes=30) - timedelta(seconds=1)), floor
-    ).allowed
+    assert evaluate(request(start, start + timedelta(minutes=30)), grid).allowed
 
 
-def test_min_duration_unset_allows_a_booking_a_configured_floor_would_deny():
-    """A Space with no ``min_duration`` row enforces no floor at all — mirroring
-    ``test_max_duration_unset_allows_a_booking_the_default_would_deny`` for the opposite bound."""
-    result = evaluate(request(at(10), at(10, 1)), NULL_CONFIG)
+def test_session_length_unset_allows_a_booking_a_configured_grid_would_deny():
+    """A Space with no ``session_length`` row enforces no grid at all — mirroring
+    ``test_max_duration_unset_allows_a_booking_the_default_would_deny`` for a different bound."""
+    result = evaluate(request(at(10), at(10, 7)), NULL_CONFIG)
 
     assert result.allowed
+
+
+def test_session_length_with_no_hours_anchors_on_local_midnight():
+    """Decision 2 (``ops/pending/bugs/grid-from-hours-and-min-duration.md``): a session grid with
+    no ``availability_hours`` row to anchor on falls back to local midnight — today's
+    ``slot_alignment`` behaviour, observable end to end through ``evaluate`` and not just at
+    ``resolve_day_schedule``'s own resolution."""
+    grid_only = _config(session_minutes=30)
+
+    assert evaluate(request(at(10), at(10, 30)), grid_only).allowed
+    assert not evaluate(request(at(10, 7), at(10, 37)), grid_only).allowed
+
+
+def test_session_length_anchors_on_the_configured_opening_time_not_midnight():
+    """The grid moves with the venue's own opening time rather than always sitting on local
+    midnight — the entire point of ``session_length`` replacing ``slot_alignment``."""
+    anchored = _config(opens_at_minutes=9 * 60 + 15, closes_at_minutes=17 * 60, session_minutes=60)
+
+    assert evaluate(request(at(9, 15), at(10, 15)), anchored).allowed
+    assert not evaluate(request(at(10), at(11)), anchored).allowed
 
 
 def test_booking_starting_before_opening_is_denied():
@@ -1209,20 +1222,11 @@ def _hours_row(
     )
 
 
-def _slot_row(row_id: int, minutes: int, applies_to: dict | None = None) -> SpaceRuleRow:
+def _session_row(row_id: int, minutes: int, applies_to: dict | None = None) -> SpaceRuleRow:
     return SpaceRuleRow(
         id=row_id,
-        rule_type="slot_alignment",
-        params={"slot_minutes": minutes},
-        applies_to=applies_to,
-    )
-
-
-def _min_duration_row(row_id: int, minutes: int, applies_to: dict | None = None) -> SpaceRuleRow:
-    return SpaceRuleRow(
-        id=row_id,
-        rule_type="min_duration",
-        params={"min_duration_minutes": minutes},
+        rule_type="session_length",
+        params={"session_minutes": minutes},
         applies_to=applies_to,
     )
 
@@ -1233,25 +1237,26 @@ def test_resolve_day_schedule_with_no_rows_is_fully_unconfigured():
     schedule = resolve_day_schedule(config, MONDAY)
 
     assert schedule == DaySchedule(
-        slot_minutes=None,
+        session_minutes=None,
+        anchor_minutes=None,
         opens_at=None,
         closes_at=None,
         coherence_issue=None,
-        min_duration_minutes=None,
     )
 
 
 def test_resolve_day_schedule_with_one_matching_row_of_each_type():
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0)), _slot_row(2, 30)),
+        rules=(_hours_row(1, time(9, 0), time(17, 0)), _session_row(2, 30)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
 
     assert schedule.opens_at == time(9, 0)
     assert schedule.closes_at == time(17, 0)
-    assert schedule.slot_minutes == 30
+    assert schedule.session_minutes == 30
+    assert schedule.anchor_minutes == 9 * 60
     assert schedule.coherence_issue is None
 
 
@@ -1283,7 +1288,7 @@ def test_two_disjoint_availability_rows_intersect_to_nothing():
     assert schedule.coherence_issue is None
 
 
-def test_two_slot_alignment_rows_resolve_to_their_lcm_not_their_minimum():
+def test_two_session_length_rows_resolve_to_their_lcm_not_their_minimum():
     """A 20-minute row and a 30-minute row together require a 60-minute grid.
 
     The minimum (20) would let a booking land on :20 or :40, which the
@@ -1292,47 +1297,58 @@ def test_two_slot_alignment_rows_resolve_to_their_lcm_not_their_minimum():
     """
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_slot_row(1, 20), _slot_row(2, 30)),
+        rules=(_session_row(1, 20), _session_row(2, 30)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
 
-    assert schedule.slot_minutes == 60
+    assert schedule.session_minutes == 60
 
 
-def test_no_min_duration_row_resolves_to_none():
+def test_no_session_length_row_resolves_session_minutes_and_anchor_to_none():
     """The "not configured" convention every other field on `DaySchedule` uses — and, since task
     8.4, the tolerance `app.rules_stub._resolve_run` reads for its gap tolerance: `None` here
-    becomes `0` there."""
+    becomes `0` there. An `availability_hours` row alone resolves no anchor either: there is no
+    grid to anchor when nothing configures one."""
     config = SpaceRuleConfig(timezone="UTC", rules=(_hours_row(1, time(9, 0), time(17, 0)),))
 
-    assert resolve_day_schedule(config, MONDAY).min_duration_minutes is None
+    schedule = resolve_day_schedule(config, MONDAY)
+    assert schedule.session_minutes is None
+    assert schedule.anchor_minutes is None
 
 
-def test_one_min_duration_row_resolves_to_its_own_value():
-    config = SpaceRuleConfig(timezone="UTC", rules=(_min_duration_row(1, 30),))
-
-    assert resolve_day_schedule(config, MONDAY).min_duration_minutes == 30
-
-
-def test_two_min_duration_rows_resolve_to_the_larger_not_the_smaller():
-    """Satisfying two floors at once means clearing the higher one — the mirror image of the
-    availability intersection above (there, satisfying both means the narrower overlap)."""
+def test_anchor_minutes_follows_the_resolved_opening_minute():
+    """The whole point of `session_length` replacing `slot_alignment`
+    (`ops/pending/bugs/grid-from-hours-and-min-duration.md`): the grid is anchored on the venue's
+    own opening time, not always local midnight."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_min_duration_row(1, 30), _min_duration_row(2, 45)),
+        rules=(_hours_row(1, time(9, 30), time(17, 0)), _session_row(2, 60)),
     )
 
-    assert resolve_day_schedule(config, MONDAY).min_duration_minutes == 45
+    assert resolve_day_schedule(config, MONDAY).anchor_minutes == 9 * 60 + 30
 
 
-def test_a_min_duration_row_scoped_away_does_not_apply():
+def test_anchor_minutes_falls_back_to_local_midnight_with_no_availability_hours_row():
+    """Decision 2: a session grid with no opening hours to anchor on falls back to local midnight
+    (`anchor_minutes = 0`) — today's `slot_alignment` behaviour, stated explicitly rather than
+    inherited."""
+    config = SpaceRuleConfig(timezone="UTC", rules=(_session_row(1, 30),))
+
+    schedule = resolve_day_schedule(config, MONDAY)
+    assert schedule.session_minutes == 30
+    assert schedule.anchor_minutes == 0
+
+
+def test_a_session_length_row_scoped_away_does_not_apply():
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_min_duration_row(1, 60, applies_to={"weekdays": [1, 3]}),),  # Tue/Thu, not Monday
+        rules=(_session_row(1, 60, applies_to={"weekdays": [1, 3]}),),  # Tue/Thu, not Monday
     )
 
-    assert resolve_day_schedule(config, MONDAY).min_duration_minutes is None
+    schedule = resolve_day_schedule(config, MONDAY)
+    assert schedule.session_minutes is None
+    assert schedule.anchor_minutes is None
 
 
 def test_a_row_scoped_to_a_non_matching_weekday_is_excluded():
@@ -1379,27 +1395,17 @@ def test_a_disabled_row_is_never_resolved():
     assert schedule.closes_at is None
 
 
-def test_coherence_issue_when_hours_do_not_land_on_the_slot_grid():
-    """09:15 opening on a 30-minute grid never lands on a boundary."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 15), time(17, 0)), _slot_row(2, 30)),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.coherence_issue is not None
-    assert "30-minute slot boundary" in schedule.coherence_issue
-
-
-def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_slot_rule():
-    """ "Closed all day" plus a slot-alignment row must not also report incoherence."""
+def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_session_row():
+    """ "Closed all day" plus a session-length row must not report incoherence — there is no real
+    window for the session length to exceed, and an opening time can never miss a grid built on
+    itself (decision 4: both slot-boundary coherence cases `slot_alignment` needed are gone along
+    with it)."""
     config = SpaceRuleConfig(
         timezone="UTC",
         rules=(
             _hours_row(1, time(9, 0), time(12, 0)),
             _hours_row(2, time(14, 0), time(18, 0)),
-            _slot_row(3, 45),
+            _session_row(3, 45),
         ),
     )
 
@@ -1409,24 +1415,24 @@ def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_slot_rule():
     assert schedule.coherence_issue is None
 
 
-def test_coherence_issue_when_min_duration_exceeds_the_operating_window():
-    """A 90-minute floor against a one-hour window means nothing on the date is bookable."""
+def test_coherence_issue_when_session_length_exceeds_the_operating_window():
+    """A 90-minute session against a one-hour window means nothing on the date is bookable."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(10, 0)), _min_duration_row(2, 90)),
+        rules=(_hours_row(1, time(9, 0), time(10, 0)), _session_row(2, 90)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
 
     assert schedule.coherence_issue is not None
-    assert "Minimum duration" in schedule.coherence_issue
+    assert "Session length" in schedule.coherence_issue
 
 
-def test_min_duration_equal_to_the_window_is_not_a_coherence_issue():
+def test_session_length_equal_to_the_window_is_not_a_coherence_issue():
     """The bound is inclusive, the same convention every duration rule in the canon shares."""
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(10, 0)), _min_duration_row(2, 60)),
+        rules=(_hours_row(1, time(9, 0), time(10, 0)), _session_row(2, 60)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
@@ -1434,68 +1440,15 @@ def test_min_duration_equal_to_the_window_is_not_a_coherence_issue():
     assert schedule.coherence_issue is None
 
 
-def test_min_duration_shorter_than_the_window_sets_no_issue():
+def test_session_length_shorter_than_the_window_sets_no_issue():
     config = SpaceRuleConfig(
         timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0)), _min_duration_row(2, 30)),
+        rules=(_hours_row(1, time(9, 0), time(17, 0)), _session_row(2, 30)),
     )
 
     schedule = resolve_day_schedule(config, MONDAY)
 
     assert schedule.coherence_issue is None
-
-
-def test_min_duration_not_a_multiple_of_the_slot_size_is_not_a_coherence_issue():
-    """8.3 rounds the click up to cover it; this is not an error, unlike the two grid-alignment
-    cases above."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(
-            _hours_row(1, time(9, 0), time(17, 0)),
-            _slot_row(2, 30),
-            _min_duration_row(3, 45),
-        ),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.coherence_issue is None
-
-
-def test_a_zero_width_window_is_never_a_min_duration_coherence_issue():
-    """ "Closed all day" plus a minimum duration must not report incoherence either — there is no
-    real window for the minimum to exceed."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(
-            _hours_row(1, time(9, 0), time(12, 0)),
-            _hours_row(2, time(14, 0), time(18, 0)),
-            _min_duration_row(3, 90),
-        ),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.opens_at == schedule.closes_at
-    assert schedule.coherence_issue is None
-
-
-def test_a_slot_grid_issue_takes_precedence_over_a_min_duration_window_issue():
-    """Both conditions can hold at once; the two are mutually exclusive in what fires, and the
-    existing grid-alignment case is checked first (`resolve_day_schedule`'s own docstring)."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(
-            _hours_row(1, time(9, 15), time(10, 0)),
-            _slot_row(2, 30),
-            _min_duration_row(3, 90),
-        ),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.coherence_issue is not None
-    assert "slot boundary" in schedule.coherence_issue
 
 
 # --- _resolve_run (task 8.4) -----------------------------------------------------------
@@ -1556,7 +1509,7 @@ def test_a_booking_neither_abutting_nor_within_tolerance_is_excluded():
 
 def test_a_five_minute_gap_joins_when_the_tolerance_covers_it():
     """The clause `max-duration-cannon.md`'s decision 3 attaches: a gap shorter than a Space's own
-    configured minimum duration is dead space nobody could ever book, so it must not fracture the
+    configured session length is dead space nobody could ever book, so it must not fracture the
     run and hand every run-based rule a free escape hatch."""
     req = _erequest(at(10), at(11))
     adjoining = _erecord(at(11, 5), at(12, 5))
@@ -1569,9 +1522,9 @@ def test_a_five_minute_gap_joins_when_the_tolerance_covers_it():
 
 
 def test_the_same_five_minute_gap_does_not_join_with_no_tolerance():
-    """A Space configuring no `min_duration` gets `tolerance == timedelta(0)` — exact abutment,
+    """A Space configuring no `session_length` gets `tolerance == timedelta(0)` — exact abutment,
     `max-duration-cannon.md`'s original decision 3, unchanged for a Space that never opted into a
-    floor at all."""
+    session grid at all."""
     req = _erequest(at(10), at(11))
     adjoining = _erecord(at(11, 5), at(12, 5))
 

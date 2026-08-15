@@ -4,7 +4,7 @@
  * The calendar loads and the grid it draws matches the configured slot size.
  *
  * The expected slot count is imported from `app/frontend/src/config.ts` rather
- * than written as `34`. The plan's promise is that changing `slotMinutes` from
+ * than written as `34`. The plan's promise is that changing `sessionMinutes` from
  * 30 to 10 re-renders correctly with no other edit; a hardcoded 34 here would
  * turn keeping that promise into a test failure, which is precisely backwards.
  */

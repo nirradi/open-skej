@@ -26,8 +26,11 @@ Translations that happen here and nowhere else:
   distinct timezone translation, per rule type, resolved fresh for every
   booking's own date rather than once at write time (``CLAUDE.md``,
   "Conversion happens at the boundary, per date, never once at write time"):
-  a ``slot_alignment`` row's ``anchor`` resolves to the Space's own local
-  midnight via ``_local_midnight_utc``; and the day/week/month counting rules'
+  a ``session_length`` row's ``anchor_minutes`` resolves to that date's own
+  resolved ``availability_hours`` opening minute, falling back to local
+  midnight (0) when no such row governs the date — see ``resolve_day_schedule``,
+  which resolves this once and is reused rather than resolved a second way;
+  and the day/week/month counting rules'
   ``[window_start, window_end)`` resolve from the local day/week/month via
   ``_local_day_bounds`` / ``_local_week_bounds`` / ``_local_month_bounds``, the
   identical local day also serving ``max_duration_per_day`` (task 8.7). See
@@ -47,7 +50,7 @@ Translations that happen here and nowhere else:
   not: not "when is this", but "how much of this user's own history does this
   booking belong to". It resolves the contiguous, cross-Resource span of
   bookings ``request`` sits in — transitively, and closing a gap up to that
-  date's own resolved minimum duration — and hands it over as ``Context.run``.
+  date's own resolved session length — and hands it over as ``Context.run``.
   A rule that wants to judge the whole run rather than the one request reads
   it there; every rule that does not is unaffected by its existence.
 * **The counting rules' tolerance.** ``_resolve_for_row`` (task 8.6, extended by task 8.7) resolves
@@ -361,9 +364,8 @@ def _local_date(instant: datetime, tz_name: str) -> date:
 def _local_midnight_utc(day: date, tz_name: str) -> datetime:
     """The UTC instant at which ``day`` begins in ``tz_name``.
 
-    The counting rules' boundaries and ``slot_alignment``'s anchor are both
-    built from this and nothing else, so a week, a month, or a slot grid all
-    start when the *venue's* day starts rather than at UTC midnight. On the
+    The counting rules' boundaries are built from this and nothing else, so a week, a month, or a
+    local day all start when the *venue's* day starts rather than at UTC midnight. On the
     handful of dates a zone's DST transition falls at or near local midnight,
     ``zoneinfo`` resolves the nonexistent or repeated instant by PEP 495 —
     accepted rather than special-cased: a second code path for a few hours a
@@ -523,21 +525,30 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
     Takes the whole ``config`` rather than just its ``timezone`` since task 8.6: the three counting
     rows (day, week, month) also need a gap ``tolerance``, and resolving one needs
     ``resolve_day_schedule(config, on_date)`` — the same resolution ``evaluate``'s own
-    ``_resolve_run`` call already reads a minimum duration from, for the identical reason
+    ``_resolve_run`` call already reads a session length from, for the identical reason
     (``rules.frequency``'s module docstring). ``max_duration_per_day`` (task 8.7) needs only the
     window and no tolerance at all — it sums raw history entries rather than merging them into
-    runs, so ``resolve_day_schedule`` is not consulted for it.
+    runs, so ``resolve_day_schedule`` is not consulted for it. A ``session_length`` row's own
+    ``anchor_minutes`` is resolved the identical way — reusing ``resolve_day_schedule`` rather than
+    a second implementation of "what opening minute governs this date" (``CLAUDE.md``, "the engine
+    stays the sole validator").
 
     Raises ``KeyError``/``TypeError``/``ValueError`` for a row whose
     ``params`` do not have what this resolution needs (a missing
-    ``slot_minutes``, a value of the wrong type) — ``_build_canon`` treats
+    ``session_minutes``, a value of the wrong type) — ``_build_canon`` treats
     that identically to a failure inside ``RuleType.build`` itself, since both
     are "this row's stored params no longer satisfy its type's schema".
     """
     tz_name = config.timezone
 
-    if row.rule_type == "slot_alignment":
-        return {"anchor": _local_midnight_utc(on_date, tz_name)}
+    if row.rule_type == "session_length":
+        # This row itself already matched `on_date` — `_build_canon` filters on `enabled` and
+        # `row_applies` before ever calling this function — so `resolve_day_schedule`'s identical
+        # filtering always finds at least one matching `session_length` row here too, and its own
+        # `anchor_minutes` is never `None`.
+        anchor_minutes = resolve_day_schedule(config, on_date).anchor_minutes
+        assert anchor_minutes is not None
+        return {"anchor_minutes": anchor_minutes}
 
     if row.rule_type in ("max_bookings_per_day", "max_bookings_per_week", "max_bookings_per_month"):
         if row.rule_type == "max_bookings_per_day":
@@ -546,7 +557,7 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
             window_start, window_end = _local_week_bounds(on_date, tz_name)
         else:
             window_start, window_end = _local_month_bounds(on_date, tz_name)
-        tolerance_minutes = resolve_day_schedule(config, on_date).min_duration_minutes or 0
+        tolerance_minutes = resolve_day_schedule(config, on_date).session_minutes or 0
         return {
             "window_start": window_start,
             "window_end": window_end,
@@ -653,33 +664,33 @@ class DaySchedule:
     Built by ``resolve_day_schedule`` for ``GET /spaces/{public_id}/schedule``
     (task 6.9), the endpoint the calendar UI reads instead of re-deriving
     rule semantics itself: the engine stays the sole validator, so a second
-    implementation of "what hours/slot size govern this date" in TypeScript
-    is exactly the duplication ``DEFERRED.md`` item 13 warns against.
+    implementation of "what hours/session length govern this date" in
+    TypeScript is exactly the duplication ``DEFERRED.md`` item 13 warns
+    against.
 
-    ``slot_minutes`` / ``opens_at`` / ``closes_at`` / ``min_duration_minutes`` are ``None`` when no
-    enabled, date-matching row of that type governs this date at all — the
-    same "not enforced" convention ``SpaceRuleConfig`` and the frontend's
-    ``CalendarConfig`` already use. ``coherence_issue`` is set only when a
-    *real* (non-zero-width) resolved window's bounds do not land on the
-    resolved slot grid; see ``resolve_day_schedule`` for why a zero-width
-    window is not one of these cases.
-
-    ``min_duration_minutes`` is resolved here rather than beside the one
-    other reader that needs it: ``app.rules_stub._resolve_run`` sizes its own
-    gap tolerance from the identical resolution, and a second implementation
-    of "what minimum duration governs this date" here would be exactly the
-    drift this codebase's docs keep warning about. It is reported on the wire
-    by ``DayScheduleRead``, alongside its own coherence case against the
-    operating window (below) — the frontend's own ``CalendarConfig`` does not
-    read it yet, since rendering a click unit that honours it is separate,
-    larger UI work.
+    ``session_minutes`` / ``opens_at`` / ``closes_at`` are ``None`` when no enabled,
+    date-matching row of that type governs this date at all — the same "not
+    enforced" convention ``SpaceRuleConfig`` and the frontend's
+    ``CalendarConfig`` already use. ``anchor_minutes`` is ``None`` under the
+    identical condition as ``session_minutes`` — there is no grid to anchor
+    when no ``session_length`` row governs the date at all — and otherwise
+    the date's own resolved opening minute (``opens_at_minutes``), falling
+    back to local midnight (``0``) when no ``availability_hours`` row governs
+    the date either
+    (``ops/pending/bugs/grid-from-hours-and-min-duration.md``, decision 2).
+    It is resolved here rather than beside the two other readers that need
+    it — ``app.rules_stub._resolve_for_row``'s own ``session_length`` branch,
+    and ``_resolve_run``'s gap tolerance below, which reads ``session_minutes``
+    from this same resolution — because a second implementation of "what
+    opening minute anchors this date's grid" would be exactly the drift this
+    codebase's docs keep warning about.
     """
 
-    slot_minutes: int | None
+    session_minutes: int | None
+    anchor_minutes: int | None
     opens_at: time | None
     closes_at: time | None
     coherence_issue: str | None
-    min_duration_minutes: int | None
 
 
 def _minutes_to_wire_time(minutes: int | None) -> time | None:
@@ -703,14 +714,12 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
     Mirrors ``_build_canon``'s own filtering (``row.enabled`` and
     ``row_applies``) but stays local rather than resolving to UTC — this
     endpoint's whole point is to report the Space's own wall-clock hours and
-    slot size, which is what the calendar grid draws itself from — there is no
-    instant to judge here, only a calendar date to describe. Unlike
-    ``_build_canon`` this never
-    touches ``REGISTRY`` or ``RuleType.build``: an ``availability_hours``
-    row's ``opens_at_minutes``/``closes_at_minutes`` and a ``slot_alignment``
-    row's local ``slot_minutes`` are read directly off ``params``, with no
-    anchor to resolve — the anchor is always the date's own local midnight,
-    which is irrelevant to what this endpoint reports.
+    session length, which is what the calendar grid draws itself from —
+    there is no instant to judge here, only a calendar date to describe.
+    Unlike ``_build_canon`` this never touches ``REGISTRY`` or
+    ``RuleType.build``: an ``availability_hours`` row's
+    ``opens_at_minutes``/``closes_at_minutes`` and a ``session_length`` row's
+    local ``session_minutes`` are read directly off ``params``.
 
     **Every matching row of a type must hold simultaneously** — "the engine
     stays a flat AND of deny predicates" (``ops/plans/stream-6-plan.md``,
@@ -736,43 +745,34 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
       state this zero-width normalisation exists to flag for a *genuine*
       empty intersection — and wrongly report a real 18:00–02:00 window as
       closed all day even with only one matching row.
-    * ``slot_alignment`` — the **LCM** of every matching row's own
-      ``slot_minutes``: a date must land on a multiple of *every* matching
+    * ``session_length`` — the **LCM** of every matching row's own
+      ``session_minutes``: a date must land on a multiple of *every* matching
       row's own grid simultaneously, and being divisible by the LCM is
       exactly that (not the minimum, which does not make every row's grid a
-      subset of it). Every individually stored ``slot_minutes`` already
-      divides 1440 (``SlotAlignmentRule.__init__``), so the LCM of any two
+      subset of it). Every individually stored ``session_minutes`` already
+      divides 1440 (``SessionLengthRule.__init__``), so the LCM of any two
       such divisors also divides 1440 — this can never itself produce an
       incoherent day length.
-    * ``min_duration`` — the **maximum** of every matching row's own
-      ``min_duration_minutes``: satisfying two floors at once means clearing
-      the higher one, the mirror image of the availability intersection
-      above (there, satisfying two windows at once means the narrower
-      overlap; here, it means the larger floor). Unlike the other two types
-      this is read directly off ``params`` with no comparison against the
-      slot grid — it has its own coherence case against the operating window
-      instead, below.
 
     No matching row of a type at all resolves to ``None`` for it, matching
     ``SpaceRuleConfig``'s and the frontend's ``CalendarConfig``'s "not
-    configured" shape.
+    configured" shape. ``anchor_minutes`` follows ``session_minutes``: it is
+    ``None`` under the identical condition, and otherwise the resolved
+    ``opens_at_minutes`` above (before it is normalised to a zero-width
+    window's own value or converted to the wire's ``time`` shape) — or ``0``
+    when no ``availability_hours`` row governs the date either
+    (``ops/pending/bugs/grid-from-hours-and-min-duration.md``, decision 2).
+    An admin's own opening time is what anchors the session grid, not local
+    midnight, which is the entire reason this type replaces the old
+    always-midnight ``slot_alignment``.
 
-    ``coherence_issue`` fires in either of two, mutually exclusive cases, the
-    second checked only once the first has cleared:
-
-    1. A **real** (non-zero-width) resolved window *and* a resolved slot size
-       whose boundaries do not land on it — mirroring ``config.ts``'s own
-       ``coherenceIssue`` wording. A zero-width "closed all day" window is
-       never flagged: there is no grid to misalign with nothing bookable in
-       it.
-    2. A real resolved window *and* a resolved minimum duration longer than
-       the window itself — nothing on that date could ever clear the
-       minimum, so the window is bookable in name only. This is checked only
-       when case 1 did not already fire, and only against the window's own
-       length, never against the slot grid: a minimum duration that is
-       merely not a multiple of the slot size is not an error here at all —
-       the calendar's click unit rounds up to cover it (task 8.3) — so this
-       case fires on *length*, never on divisibility.
+    ``coherence_issue`` fires in one case only: a **real** (non-zero-width) resolved window paired
+    with a resolved session length longer than the window itself — nothing on that date could ever
+    clear a single session, so the window is bookable in name only. The two slot-boundary cases
+    this endpoint used to check (an opening or closing time missing the grid) no longer apply: the
+    grid is now anchored on the opening time itself, so an opening time can never miss a grid built
+    on it, and a closing time leaving a short unusable tail at the end of the day is normal here,
+    not an error (``ops/pending/bugs/grid-from-hours-and-min-duration.md``, decision 4).
 
     **The wire shape is unchanged and a same-day window renders exactly as before** —
     ``DaySchedule.opens_at``/``closes_at`` are still ``time | None``, and the only kind of window
@@ -801,15 +801,15 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
         opens_at_minutes = None
         closes_at_minutes = None
 
-    slot_rows = [row for row in matching if row.rule_type == "slot_alignment"]
-    slot_minutes = (
-        math.lcm(*(int(row.params["slot_minutes"]) for row in slot_rows)) if slot_rows else None
+    session_rows = [row for row in matching if row.rule_type == "session_length"]
+    session_minutes = (
+        math.lcm(*(int(row.params["session_minutes"]) for row in session_rows))
+        if session_rows
+        else None
     )
-
-    duration_rows = [row for row in matching if row.rule_type == "min_duration"]
-    min_duration_minutes = (
-        max(int(row.params["min_duration_minutes"]) for row in duration_rows)
-        if duration_rows
+    anchor_minutes = (
+        (opens_at_minutes if opens_at_minutes is not None else 0)
+        if session_minutes is not None
         else None
     )
 
@@ -818,29 +818,17 @@ def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
         opens_at_minutes is not None
         and closes_at_minutes is not None
         and closes_at_minutes != opens_at_minutes
-        and slot_minutes is not None
+        and session_minutes is not None
+        and session_minutes > closes_at_minutes - opens_at_minutes
     ):
-        if opens_at_minutes % slot_minutes != 0:
-            coherence_issue = f"Opening time must land on a {slot_minutes}-minute slot boundary."
-        elif closes_at_minutes % slot_minutes != 0:
-            coherence_issue = f"Closing time must land on a {slot_minutes}-minute slot boundary."
-
-    if (
-        coherence_issue is None
-        and opens_at_minutes is not None
-        and closes_at_minutes is not None
-        and closes_at_minutes != opens_at_minutes
-        and min_duration_minutes is not None
-        and min_duration_minutes > closes_at_minutes - opens_at_minutes
-    ):
-        coherence_issue = "Minimum duration must not exceed the length of the operating window."
+        coherence_issue = "Session length must not exceed the length of the operating window."
 
     return DaySchedule(
-        slot_minutes=slot_minutes,
+        session_minutes=session_minutes,
+        anchor_minutes=anchor_minutes,
         opens_at=_minutes_to_wire_time(opens_at_minutes),
         closes_at=_minutes_to_wire_time(closes_at_minutes),
         coherence_issue=coherence_issue,
-        min_duration_minutes=min_duration_minutes,
     )
 
 
@@ -910,7 +898,7 @@ def evaluate(
 
     ``context.run`` is resolved from ``history`` and ``booking`` together by
     ``_resolve_run``, with a gap tolerance equal to this date's own resolved
-    minimum duration (``resolve_day_schedule``, zero when no ``min_duration``
+    session length (``resolve_day_schedule``, zero when no ``session_length``
     row governs the date) — see that function's docstring for why a
     tolerance is needed at all. This runs whether or not the canon reads
     history: an empty ``history`` still resolves a run, the request alone.
@@ -956,7 +944,7 @@ def evaluate(
         return RuleResult(allowed=False, message=RULE_ERROR_MESSAGE)
 
     history_records = tuple(_engine_record(entry) for entry in history)
-    tolerance_minutes = resolve_day_schedule(config, on_date).min_duration_minutes or 0
+    tolerance_minutes = resolve_day_schedule(config, on_date).session_minutes or 0
     run = _resolve_run(engine_request, history_records, timedelta(minutes=tolerance_minutes))
 
     engine_context = EngineContext(

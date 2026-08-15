@@ -205,11 +205,11 @@ describe('slotInterval', () => {
     // Slot 0 is always midnight now (the grid renders the full day); index 12
     // at 30-minute slots is 06:00.
     const config = {
-      slotMinutes: 30,
+      sessionMinutes: 30,
       openMinutes: null,
       closeMinutes: null,
       timeZone: SYSTEM_TZ,
-      minDurationMinutes: null,
+      anchorMinutes: 0,
     }
     const { start, end } = slotInterval(THIS_WEEK, 12, config)
     expect(start.getHours()).toBe(6)
@@ -219,53 +219,50 @@ describe('slotInterval', () => {
   it('follows the configured granularity', () => {
     // Index 39 at 10-minute slots, from midnight, is 06:30.
     const { start, end } = slotInterval(THIS_WEEK, 39, {
-      slotMinutes: 10,
+      sessionMinutes: 10,
       openMinutes: null,
       closeMinutes: null,
       timeZone: SYSTEM_TZ,
-      minDurationMinutes: null,
+      anchorMinutes: 0,
     })
     expect(start.getHours()).toBe(6)
     expect(start.getMinutes()).toBe(30)
     expect((end.getTime() - start.getTime()) / 60_000).toBe(10)
   })
 
-  // Task 8.3: the click unit is the smallest whole number of slots that
-  // reaches the date's resolved minimum duration.
-  describe('honouring a minimum duration', () => {
-    const config30 = (minDurationMinutes: number | null) => ({
-      slotMinutes: 30,
+  // One click is one session: the `session_length` rule requires both bounds
+  // on the grid, so there is no floor left to widen a click past.
+  describe('one click is one session', () => {
+    const config = (sessionMinutes: number, anchorMinutes = 0) => ({
+      sessionMinutes,
       openMinutes: null,
       closeMinutes: null,
       timeZone: SYSTEM_TZ,
-      minDurationMinutes,
+      anchorMinutes,
     })
 
-    it('spans one slot, unchanged, when no minimum governs the date', () => {
-      const { start, end } = slotInterval(THIS_WEEK, 12, config30(null))
+    it('spans exactly one session on a 30-minute grid', () => {
+      const { start, end } = slotInterval(THIS_WEEK, 12, config(30))
       expect((end.getTime() - start.getTime()) / 60_000).toBe(30)
     })
 
-    it('spans one slot when the minimum equals the slot size exactly', () => {
-      const { start, end } = slotInterval(THIS_WEEK, 12, config30(30))
-      expect((end.getTime() - start.getTime()) / 60_000).toBe(30)
-    })
-
-    it('spans two slots when the minimum needs exactly two', () => {
-      const { start, end } = slotInterval(THIS_WEEK, 12, config30(60))
+    it('spans exactly one session on a 60-minute grid', () => {
+      const { start, end } = slotInterval(THIS_WEEK, 6, config(60))
       expect((end.getTime() - start.getTime()) / 60_000).toBe(60)
     })
 
-    it('rounds up to the next whole slot when the minimum is not a multiple of the slot size', () => {
-      // The rounding case: a 45-minute minimum on a 30-minute grid must give
-      // a 60-minute click (two whole slots), not 45 — the end has to land on
-      // the grid too, not just clear the floor.
-      const { start, end } = slotInterval(THIS_WEEK, 12, config30(45))
+    it('starts on the grid line the anchor puts it on, not on the hour', () => {
+      // A venue opening at 09:15 with hour-long sessions: the grid runs
+      // 00:15, 01:15, ... so session 9 is 09:15 — the first session of the
+      // day starting exactly when the venue opens.
+      const { start, end } = slotInterval(THIS_WEEK, 9, config(60, 9 * 60 + 15))
+      expect(start.getHours()).toBe(9)
+      expect(start.getMinutes()).toBe(15)
       expect((end.getTime() - start.getTime()) / 60_000).toBe(60)
     })
 
-    it('leaves the start untouched, only the end widens', () => {
-      const { start } = slotInterval(THIS_WEEK, 12, config30(90))
+    it('is unshifted when the anchor already lands on the grid', () => {
+      const { start } = slotInterval(THIS_WEEK, 12, config(30, 9 * 60))
       expect(start.getHours()).toBe(6)
       expect(start.getMinutes()).toBe(0)
     })
@@ -275,11 +272,11 @@ describe('slotInterval', () => {
 describe('dayBounds', () => {
   it('spans midnight to midnight on the Space\'s own clock', () => {
     const config = {
-      slotMinutes: 30,
+      sessionMinutes: 30,
       openMinutes: null,
       closeMinutes: null,
       timeZone: SYSTEM_TZ,
-      minDurationMinutes: null,
+      anchorMinutes: 0,
     }
     const { start, end } = dayBounds(THIS_WEEK, config)
     expect(start.getTime()).toBe(slotInterval(THIS_WEEK, 0, config).start.getTime())
@@ -293,11 +290,11 @@ describe('dayBounds', () => {
     // fixed-offset day (`+ 24h`) would get this wrong; going through the
     // zone for both bounds does not.
     const config = {
-      slotMinutes: 30,
+      sessionMinutes: 30,
       openMinutes: null,
       closeMinutes: null,
       timeZone: 'Europe/Berlin',
-      minDurationMinutes: null,
+      anchorMinutes: 0,
     }
     const { start, end } = dayBounds(new Date(2026, 2, 29), config)
     expect((end.getTime() - start.getTime()) / (60 * 60 * 1000)).toBe(23)

@@ -233,8 +233,9 @@ class MaxBookingsPerWeekRule(BaseRule):
 
     ``tolerance`` is the gap ``evaluate`` closes when merging ``request`` with
     ``context.history.bookings`` into sessions — see the module docstring. It defaults to
-    ``timedelta(0)`` (exact abutment only), which is what a caller resolving no ``min_duration`` for
-    the date should pass, and what a test constructing this rule directly is usually happy to take.
+    ``timedelta(0)`` (exact abutment only), which is what a caller resolving no ``session_length``
+    for the date should pass, and what a test constructing this rule directly is usually happy to
+    take.
 
     The bound is compared directly against the merged session count, no ``+1`` — see the module
     docstring for why: the request is always one of the spans merged, so the count already accounts

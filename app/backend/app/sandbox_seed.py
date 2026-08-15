@@ -145,13 +145,13 @@ SPACE_A_TIMEZONE = "Europe/Berlin"
 # never for an hour outside a UTC-resolved window.
 # A copy-contract constant, like `SPACE_A_MAX_DURATION_MINUTES` below: the E2E
 # suite drags across slots and asserts the resulting duration in words
-# ("30 minutes", "2 hours 30 minutes"), so the grid's slot size is part of what
+# ("30 minutes", "2 hours 30 minutes"), so the grid's session length is part of what
 # those specs assert and not an implementation detail they tolerate. It was 60 —
 # the service's default for a Space that never sets one — which was invisible
 # while the grid laid itself out from a hardcoded frontend constant. Task 5.9
 # made the grid follow the Space, which turned that default into five failing
 # specs. Stated explicitly here so the two sides agree on purpose.
-SPACE_A_SLOT_MINUTES = 30
+SPACE_A_SESSION_MINUTES = 30
 # Mirrors `MAX_BOOKING_MINUTES` in `03-sad-path.spec.ts` — a copy-contract
 # constant on both sides, not a coincidence.
 SPACE_A_MAX_DURATION_MINUTES = 120
@@ -198,7 +198,7 @@ SPACE_B_TIMEZONE = "Australia/Sydney"
 # they were never the part that was fragile.
 SPACE_B_OPENS_AT_MINUTES = 9 * 60
 SPACE_B_CLOSES_AT_MINUTES = 21 * 60
-SPACE_B_SLOT_MINUTES = 30
+SPACE_B_SESSION_MINUTES = 30
 SPACE_B_MAX_DURATION_MINUTES = 90
 SPACE_B_MAX_BOOKINGS_PER_WEEK = 3
 # Its first Resource is the one `create_space` auto-creates for every fresh
@@ -345,7 +345,7 @@ def _seed_future_bookings(session: Session, resource: Resource, member: User) ->
 def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> None:
     """Set this Space's one unscoped instance of ``rule_type`` to ``params``,
     updating the row ``create_space`` seeded (``availability_hours`` and
-    ``slot_alignment`` both start with one) or adding a new one.
+    ``session_length`` both start with one) or adding a new one.
 
     Every Space this seed creates is freshly built, so "the" unscoped
     instance is unambiguous here in a way a real admin's edit — through the
@@ -416,7 +416,7 @@ def run(session: Session) -> None:
     space_a.timezone = SPACE_A_TIMEZONE
     session.commit()
     _clear_rule(session, space_a, "availability_hours")
-    _set_rule(session, space_a, "slot_alignment", {"slot_minutes": SPACE_A_SLOT_MINUTES})
+    _set_rule(session, space_a, "session_length", {"session_minutes": SPACE_A_SESSION_MINUTES})
     _set_rule(
         session,
         space_a,
@@ -464,7 +464,7 @@ def run(session: Session) -> None:
             "closes_at_minutes": SPACE_B_CLOSES_AT_MINUTES,
         },
     )
-    _set_rule(session, space_b, "slot_alignment", {"slot_minutes": SPACE_B_SLOT_MINUTES})
+    _set_rule(session, space_b, "session_length", {"session_minutes": SPACE_B_SESSION_MINUTES})
     _set_rule(
         session,
         space_b,

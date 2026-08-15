@@ -169,11 +169,6 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
             context(frame_for=NOW + timedelta(days=8)),
         ),
     },
-    "min_duration": {
-        "params": {"min_duration_minutes": 30},
-        "resolved": None,
-        "case": lambda: (request(NOW, NOW + timedelta(minutes=10)), context()),
-    },
     "max_duration": {
         "params": {"max_duration_minutes": 60},
         "resolved": None,
@@ -193,9 +188,9 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
             ),
         ),
     },
-    "slot_alignment": {
-        "params": {"slot_minutes": 30},
-        "resolved": {"anchor": datetime(2026, 7, 20, tzinfo=timezone.utc)},
+    "session_length": {
+        "params": {"session_minutes": 30},
+        "resolved": {"anchor_minutes": 0},
         "case": lambda: (
             request(
                 datetime(2026, 7, 20, 10, 7, tzinfo=timezone.utc),
