@@ -15,7 +15,7 @@
  * component's own suite.
  */
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import App from './App'
@@ -46,6 +46,12 @@ const RESOURCE_ID = 3
 
 const AUTHENTICATED_SESSION: Session = {
   status: 'authenticated',
+  login: () => {},
+  logout: () => {},
+}
+
+const UNAUTHENTICATED_SESSION: Session = {
+  status: 'unauthenticated',
   login: () => {},
   logout: () => {},
 }
@@ -422,5 +428,90 @@ describe('cancelling end to end through the app shell', () => {
     expect(summary.textContent).toContain('13:30')
     // Picking a range puts the cancel panel away.
     expect(screen.queryByTestId('cancel-panel')).toBeNull()
+  })
+})
+
+/**
+ * Task 9.2. `unknown-space-routes-render-a-blank-page.md`: an address under
+ * `/s/{public_id}` that names none of the defined routes rendered nothing at
+ * all — `document.body.textContent` was `''`. `App.tsx`'s two catch-alls
+ * (`path="/s/:publicId/*"` and `path="*"`, both `NotFoundPage`) are what
+ * this suite holds in place.
+ *
+ * This describe block renders `App` directly rather than through `renderApp`
+ * above — that helper wires up the booking flow's own mocks, none of which a
+ * routing test needs — with its own minimal render helper instead.
+ */
+describe('an unmatched route renders a not-found view, not a blank page', () => {
+  /**
+   * `listSpaces` and `previewSpace` back the two defined routes this suite
+   * also exercises as a regression check (`/` and `/s/:publicId`) — stubbed
+   * so those routes settle on their own synchronous loading state rather
+   * than reaching a real, absent server.
+   */
+  function renderAt(path: string, session: Session = AUTHENTICATED_SESSION) {
+    window.history.pushState({}, '', path)
+    vi.spyOn(api, 'listSpaces').mockResolvedValue({ outcome: 'ok', data: [] })
+    vi.spyOn(api, 'previewSpace').mockResolvedValue({
+      outcome: 'ok',
+      data: { public_id: PUBLIC_ID, name: 'Tennis Court', description: null, status: 'member' },
+    })
+    return render(
+      <AuthModeContext value={{ kind: 'sandbox' }}>
+        <SessionContext value={session}>
+          <App />
+        </SessionContext>
+      </AuthModeContext>,
+    )
+  }
+
+  it.each([
+    `/s/${PUBLIC_ID}/settings`,
+    `/s/${PUBLIC_ID}/members`,
+    `/s/${PUBLIC_ID}/admin`,
+    `/s/${PUBLIC_ID}/access-requests`,
+    '/nonsense',
+  ])('renders the not-found view, with a non-empty body, at %s', (path) => {
+    renderAt(path)
+    // The bug this closes is emptiness itself, not merely the absence of the
+    // new view — assert the symptom directly.
+    expect(document.body.textContent).not.toBe('')
+    expect(screen.getByTestId('page-not-found')).toBeTruthy()
+  })
+
+  it('offers a way back to the Space and the console when the address names one', () => {
+    renderAt(`/s/${PUBLIC_ID}/settings`)
+    const card = screen.getByTestId('page-not-found')
+    const spaceLink = within(card).getByRole('link', { name: 'Back to this Space' })
+    expect(spaceLink.getAttribute('href')).toBe(`/s/${PUBLIC_ID}`)
+    const adminLink = within(card).getByRole('link', { name: 'Open the console' })
+    expect(adminLink.getAttribute('href')).toBe('/admin')
+  })
+
+  it('offers only the way home for a top-level address that names no Space', () => {
+    renderAt('/nonsense')
+    const card = screen.getByTestId('page-not-found')
+    expect(within(card).queryByRole('link', { name: 'Back to this Space' })).toBeNull()
+    expect(within(card).queryByRole('link', { name: 'Open the console' })).toBeNull()
+    expect(within(card).getByRole('link', { name: 'Go to your Spaces' })).toBeTruthy()
+  })
+
+  it('still resolves the defined routes, not the catch-all', () => {
+    renderAt('/')
+    expect(screen.getByTestId('space-list-loading')).toBeTruthy()
+    expect(screen.queryByTestId('page-not-found')).toBeNull()
+
+    cleanup()
+
+    renderAt(`/s/${PUBLIC_ID}`)
+    expect(screen.getByTestId('space-loading')).toBeTruthy()
+    expect(screen.queryByTestId('page-not-found')).toBeNull()
+  })
+
+  it('gives a signed-out visitor the not-found view, not the login notice', () => {
+    renderAt(`/s/${PUBLIC_ID}/settings`, UNAUTHENTICATED_SESSION)
+    expect(screen.getByTestId('page-not-found')).toBeTruthy()
+    expect(screen.queryByTestId('login-controls')).toBeNull()
+    expect(screen.queryByTestId('auth-required')).toBeNull()
   })
 })

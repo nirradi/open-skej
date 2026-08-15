@@ -2,6 +2,7 @@ import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
 import { AdminPage, SpaceRulesPage } from './admin'
 import { AccountPage, PostLoginRedirect, ProtectedRoute } from './auth'
+import { NotFoundPage, SpaceNotFoundRoute } from './NotFoundPage'
 import { ResourceCalendarRoute, SpaceListPage, SpacePage } from './space'
 
 /**
@@ -116,6 +117,27 @@ function App() {
           just as often a brand-new identity as a returning one.
         */}
         <Route path="/s/:publicId" element={<SpacePage />} />
+        {/*
+          The two catch-alls, both `NotFoundPage` under different names
+          (`NotFoundPage.tsx`) — same reasoning `App.tsx`'s docstring above
+          gives for the rest of this table, applied to what happens when
+          none of it matches. React Router ranks a route by specificity
+          rather than by list order, so every static path above already
+          outranks both of these; they are placed last anyway because that
+          is the readable convention and it removes any doubt.
+
+          `/s/:publicId/*` exists only because it can say something `*`
+          alone cannot: a miss under a Space's own URL can still offer a
+          way back to that Space and to `/admin`, which is exactly what
+          `unknown-space-routes-render-a-blank-page.md` asked for. It is
+          not a second implementation of "not found" — both routes render
+          `NotFoundPage`, and `SpaceNotFoundRoute` differs only in reading
+          `publicId` off the URL to pass along. Neither is wrapped in
+          `ProtectedRoute`: a wrong address is wrong whether or not the
+          visitor is signed in.
+        */}
+        <Route path="/s/:publicId/*" element={<SpaceNotFoundRoute />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </BrowserRouter>
   )

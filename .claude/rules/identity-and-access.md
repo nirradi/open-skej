@@ -580,4 +580,23 @@ Four properties follow and are load-bearing:
 * **A denied user may ask again.** The status is rendered as a state to act from, matching the
   partial unique index that constrains pending rows only.
 
+**A not-found *page* and a not-found *Space* are two different views, making two different claims,
+and neither stands in for the other.** `App.tsx`'s catch-all — `path="*"` for any address, and
+`path="/s/:publicId/*"` for one that names a Space but none of its defined routes — renders
+`NotFoundPage`. Its claim is unambiguous: this application has no screen at this address, a fact
+that concerns nobody's access to anything. `SpaceAccessGate`'s `NotFoundCard`, above, is a narrower
+and deliberately *ambiguous* claim about one specific screen, `/s/{public_id}` and
+`/s/{public_id}/resources/{resource_id}`: "no such Space, or you can't see it" — the ambiguity is
+load-bearing, since a plain "you can't see it" would confirm the id is live. `NotFoundPage` is what
+renders for every address neither of those two routes matches, `NotFoundCard` only for one of those
+two routes failing to resolve a Space; widening either to cover the other's job would either blunt
+`NotFoundCard`'s deliberate ambiguity into a page that leaks nothing, or narrow `NotFoundPage`'s
+honest claim into one that pretends to conceal something it does not. Reached under a Space's own
+URL, `NotFoundPage` also offers a way back to that Space and to `/admin` — the one thing the
+Space-scoped route can say that a bare `path="*"` cannot — and neither checks any Space or
+membership state to decide whether to offer them: both links go through the ordinary access gate
+exactly as if the visitor had typed them, so nothing is skipped by offering them. Like every route
+above except `/s/:publicId/rules`, it is not wrapped in `ProtectedRoute`: a wrong address is wrong
+whether or not the visitor is signed in.
+
 Deployment is local only: compose plus localhost callbacks.
