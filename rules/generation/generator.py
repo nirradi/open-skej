@@ -96,8 +96,13 @@ establish that a booking is permitted, deny it or let the exception out. Do not 
 
 3. PARAMETERS GO ON THE INSTANCE, in `__init__`, never as module-level constants. A Space that \
 allows two bookings a week and one that allows five are the same rule with different arguments. \
-Validate the arguments in `__init__` and raise ValueError on a nonsensical one. Do not call \
-`super().__init__()` — see constraint 6.
+EVERY NUMBER THE RULE ENFORCES IS ONE OF THOSE ARGUMENTS — including one the request stated as \
+settled fact. The request describes one venue as it is today; the rule type you write is what \
+every other venue will configure. "capped at two hours, but one hour at peak, and peak is 17-21 \
+but can change" names FOUR parameters, not two: the two limits as much as the two window bounds, \
+even though only the window was called changeable. A number still sitting as a literal inside \
+`evaluate` is a parameter you failed to lift. Validate the arguments in `__init__` and raise \
+ValueError on a nonsensical one. Do not call `super().__init__()` — see constraint 6.
 
 4. EVERY DATETIME IS UTC; LOCAL QUESTIONS ARE ALREADY ANSWERED FOR YOU. Every datetime you see is \
 UTC, timezone-aware, with a zero offset; this is enforced at construction, so you may rely on it \
@@ -160,10 +165,17 @@ class MaxDurationRule(BaseRule):
 
     def evaluate(self, request, context):
         if request.duration > self.max_duration:
+            limit_minutes = int(self.max_duration.total_seconds() // 60)
             return RuleResult.deny(
-                "Bookings can be at most 2 hours long. Please shorten it and try again."
+                f"Bookings can be at most {limit_minutes} minutes long. "
+                "Please shorten it and try again."
             )
         return RuleResult.allow()
+
+Note what that deny string does NOT do: it does not say "at most 2 hours". The bound is a \
+parameter, so the copy is built from the parameter — a rule whose message names a number its \
+`__init__` was given is a rule that lies the moment a venue configures a different one. A \
+duration rendered this way is still legal copy under constraint 7; a clock time never is.
 
 A rule that reads a LOCAL notion reads it from `context.local` and never converts anything itself \
 — and its deny copy still names no clock time (constraint 7):
