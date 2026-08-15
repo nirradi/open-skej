@@ -222,6 +222,44 @@ describe('the header', () => {
   })
 })
 
+describe('the /admin entry point', () => {
+  // This is the trap task 9.1 exists to close: `SpacePage` redirects straight
+  // here for a single-Resource Space, so an admin of one may never see
+  // `SpaceMemberView`'s own link at all — this page has to carry its own.
+  it('renders for an admin, once the header resolves their role', async () => {
+    vi.mocked(getSpace).mockResolvedValue(ok({ ...SPACE, my_role: 'admin' }))
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    const link = await screen.findByTestId('admin-link')
+    expect(link.getAttribute('href')).toBe('/admin')
+  })
+
+  it('renders for an owner', async () => {
+    vi.mocked(getSpace).mockResolvedValue(ok({ ...SPACE, my_role: 'owner' }))
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    expect(await screen.findByTestId('admin-link')).toBeTruthy()
+  })
+
+  it('does not render for a plain member', async () => {
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    await waitFor(() =>
+      expect(screen.getByTestId('resource-calendar-heading').textContent).toBe(
+        'Tennis Court — Court 1',
+      ),
+    )
+    expect(screen.queryByTestId('admin-link')).toBeNull()
+  })
+
+  it('offers no link while the header fetch is pending', () => {
+    vi.mocked(getSpace).mockReturnValue(new Promise(() => {}))
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
+
+    expect(screen.queryByTestId('admin-link')).toBeNull()
+  })
+})
+
 describe('scoping the calendar and the panels', () => {
   it('requests bookings scoped to the Space and Resource from the route', async () => {
     renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
