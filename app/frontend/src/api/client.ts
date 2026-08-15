@@ -942,6 +942,28 @@ export async function updateResource(
 }
 
 /**
+ * `POST /spaces/{public_id}/resources/{resource_id}/archive` — admin+. Retire
+ * a Resource. There is no `DELETE`: bookings carry a `resource_id`, so a row
+ * that vanished would take a booking's meaning with it, and the row is kept
+ * — only `archived_at` is stamped — so booking history against it survives.
+ * There is also no un-archive endpoint, matching `archiveSpace`.
+ *
+ * `conflict` covers an archived Space or a Resource that is already archived,
+ * either of which rejects every mutation with a 409; `not_found` covers a
+ * Resource id that is not this Space's, indistinguishable from one that does
+ * not exist.
+ */
+export async function archiveResource(
+  publicId: string,
+  resourceId: number,
+): Promise<MutatingResult<Resource>> {
+  return mutatingRequest<Resource>(
+    `/spaces/${encodeURIComponent(publicId)}/resources/${resourceId}/archive`,
+    { method: 'POST' },
+  )
+}
+
+/**
  * `POST /spaces/{public_id}/resources` — admin+. Add a bookable calendar to
  * this Space.
  *
