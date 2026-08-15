@@ -166,7 +166,11 @@ enforce" — the bug class this schema keeps writing down. `SpaceSchedulePanel` 
 `timezone`, the one property its owner calls truly configurable and not a rule; every rule instance,
 including the six that were once columns on `spaces`, is created and edited at `/s/{public_id}/rules`
 (`SpaceRulesPage`). A Resource has no configuration to edit;
-`PATCH /spaces/{public_id}/resources/{resource_id}` renames it and nothing more.
+`PATCH /spaces/{public_id}/resources/{resource_id}` renames it and nothing more. `POST
+/spaces/{public_id}/resources`, admin+, adds one — its own panel on `/admin` (`ResourcesPanel`),
+not a second surface on `SpacePage`, for the same reason every other write on this list has one
+home: `SpacePage` is where a *member* picks a Resource to book against, and venue management
+belongs with the rest of it on the console a member never reaches.
 
 **`opens_at_minutes` and `closes_at_minutes` are stored together, in one `availability_hours` row,
 required together.** Both are `required` parameters of that rule type, so a row holding one bound
@@ -482,8 +486,9 @@ Copy for this states the fact and never the cause. A lapsed refresh token, a rev
 signing key and a changed tenant all arrive here, the person's next move is identical in all of them,
 and naming the wrong one is worse than naming none. The diagnosis goes to the console.
 
-An admin dashboard for Space creation, share links, and member management. Role menus offer only
-roles at or below the actor's own, which is a convenience — the server's 403 is the boundary.
+An admin dashboard for Space creation, share links, member management, and Resource creation
+(`ResourcesPanel`, admin+). Role menus offer only roles at or below the actor's own, which is a
+convenience — the server's 403 is the boundary.
 
 **`/admin` is reached from three screens, never typed cold.** The Space list (`/`, the post-login
 destination every signed-in user lands on), a Space page (`/s/{public_id}`), and a Resource calendar

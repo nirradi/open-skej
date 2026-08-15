@@ -942,6 +942,30 @@ export async function updateResource(
 }
 
 /**
+ * `POST /spaces/{public_id}/resources` — admin+. Add a bookable calendar to
+ * this Space.
+ *
+ * Name-only, deliberately: `ResourceCreate` carries nothing else, because a
+ * Resource is one of N indistinguishable courts and holds no configuration of
+ * its own — operating hours, slot interval and every rule limit live on the
+ * Space. There is no parent or grouping field either; resource hierarchy is
+ * out of scope for this stream.
+ *
+ * `conflict` means the Space is archived and takes no more mutations —
+ * `SpaceArchivedError` on the server. `forbidden` means the caller is a
+ * member but not an admin.
+ */
+export async function createResource(
+  publicId: string,
+  input: { name: string },
+): Promise<MutatingResult<Resource>> {
+  return mutatingRequest<Resource>(`/spaces/${encodeURIComponent(publicId)}/resources`, {
+    method: 'POST',
+    ...jsonBody(input),
+  })
+}
+
+/**
  * `GET /spaces/{public_id}/preview` — the cold link-holder view.
  *
  * The outside of the door: name, description, and the caller's own standing

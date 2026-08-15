@@ -25,6 +25,7 @@ import {
   approveAccessRequest,
   archiveSpace,
   createInvitation,
+  createResource,
   createResourceBooking,
   createSpace,
   denyAccessRequest,
@@ -556,6 +557,38 @@ describe('updateResource', () => {
     fetchMock.mockResolvedValue(jsonResponse(409, { detail }))
 
     const result = await updateResource(space.public_id, resource.id, { name: 'Nope' })
+
+    expect(result).toEqual({ outcome: 'conflict', message: detail })
+  })
+})
+
+describe('createResource', () => {
+  it('posts the name and returns the created Resource', async () => {
+    const created: Resource = { ...resource, id: 8, name: 'Court B' }
+    fetchMock.mockResolvedValue(jsonResponse(201, created))
+
+    const result = await createResource(space.public_id, { name: 'Court B' })
+
+    const { url, init } = lastRequest()
+    expect(url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/resources`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ name: 'Court B' })
+    expect(result).toEqual({ outcome: 'ok', data: created })
+  })
+
+  it('resolves a member (not admin) to forbidden', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(403, { detail: 'Forbidden.' }))
+
+    const result = await createResource(space.public_id, { name: 'Court B' })
+
+    expect(result.outcome).toBe('forbidden')
+  })
+
+  it('reports an archived Space as a conflict', async () => {
+    const detail = 'This Space is archived and can no longer be changed.'
+    fetchMock.mockResolvedValue(jsonResponse(409, { detail }))
+
+    const result = await createResource(space.public_id, { name: 'Court B' })
 
     expect(result).toEqual({ outcome: 'conflict', message: detail })
   })

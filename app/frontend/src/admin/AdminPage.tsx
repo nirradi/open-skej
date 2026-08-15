@@ -8,6 +8,7 @@ import { CreateSpaceForm } from './CreateSpaceForm'
 import { InvitationsPanel } from './InvitationsPanel'
 import { MembersPanel } from './MembersPanel'
 import { messageFor } from './messages'
+import { ResourcesPanel } from './ResourcesPanel'
 import { ShareLink } from './ShareLink'
 import { SpaceSchedulePanel } from './SpaceSchedulePanel'
 
@@ -19,13 +20,24 @@ type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: stri
  * ## What this screen is, and what it is not
  *
  * It manages **people** — members and their roles, the access-request queue,
- * invitations, and archiving — and the Space's **timezone**, the one property
- * of its schedule that stays a plain field rather than a rule instance (see
- * `SpaceSchedulePanel`). Every booking constraint — operating hours, slot
- * interval, duration and frequency caps — is a `space_rules` row, edited on
- * its own page at `/s/{public_id}/rules`, linked from here rather than
- * duplicated into this dashboard. It is not a general configuration surface —
- * no Resource create/archive lives here either.
+ * invitations, and archiving — the Space's **timezone**, the one property of
+ * its schedule that stays a plain field rather than a rule instance (see
+ * `SpaceSchedulePanel`), and its **Resources** — the bookable calendars a
+ * venue holds (`ResourcesPanel`). Every booking constraint — operating hours,
+ * slot interval, duration and frequency caps — is a `space_rules` row, edited
+ * on its own page at `/s/{public_id}/rules`, linked from here rather than
+ * duplicated into this dashboard.
+ *
+ * ## Resource management lives here, not on the Space page
+ *
+ * `POST /spaces/{public_id}/resources` is admin+, exactly like every other
+ * write this dashboard already makes — creating a Resource is venue
+ * management, not booking, and a plain member never sees the control. A
+ * second admin surface on `SpacePage` (`/s/{public_id}`) was considered and
+ * rejected: that screen is where a *member* picks a Resource to book against,
+ * and splitting venue management across two screens would mean an admin has
+ * to remember which one holds which control for no gain — everything else an
+ * admin configures is already here.
  *
  * The Space picker below is a list of *memberships*, which is a different thing
  * from a directory. `GET /spaces` returns the Spaces the caller belongs to and
@@ -158,12 +170,14 @@ export function AdminPage() {
                 {selected ? <ShareLink publicId={selected.public_id} /> : null}
               </section>
 
-              {selected ? <SpaceAdmin
-                space={selected}
-                membershipToken={membershipToken}
-                onMembershipChanged={handleMembershipChanged}
-                onSpaceChanged={handleSpaceChanged}
-              /> : null}
+              {selected ? (
+                <SpaceAdmin
+                  space={selected}
+                  membershipToken={membershipToken}
+                  onMembershipChanged={handleMembershipChanged}
+                  onSpaceChanged={handleSpaceChanged}
+                />
+              ) : null}
             </>
           )}
         </div>
@@ -228,6 +242,10 @@ function SpaceAdmin({
       />
       <InvitationsPanel space={space} />
       <SpaceSchedulePanel space={space} onSpaceChanged={onSpaceChanged} />
+      {/* Nothing else on this page reads the Resource list today, so `onChanged`
+          is a no-op — it exists so a future caller (a Resources count, a
+          single-Resource redirect check) is a wiring change, not a rewrite. */}
+      <ResourcesPanel space={space} onChanged={() => {}} />
 
       <section
         className="rounded-lg border border-slate-200 bg-white p-4"
