@@ -231,7 +231,7 @@ class NotBeforeRule(BaseRule):
 A rule about consecutive play (constraint 8) reads `context.run`, never `request.duration`:
 
 class MaxConsecutivePlayRule(BaseRule):
-    \"\"\"A back-to-back run of bookings, across every Resource, may not exceed ``max_run_minutes``.\"\"\"
+    \"\"\"A back-to-back run of bookings, across every Resource, may not exceed the cap.\"\"\"
 
     def __init__(self, max_run_minutes):
         if max_run_minutes <= 0:

@@ -113,6 +113,191 @@ def test_a_gave_up_result_carries_the_mixed_outcome_sequence_and_last_failure():
     assert report.last_failure == "the tests did not finish"
 
 
+# --------------------------------------------------------------------------------------------
+# The artifact axis — what a run produced, not how it ended
+# --------------------------------------------------------------------------------------------
+
+#: The shape that scored VERIFIED while taking a Space off line: a duration parameter the rule
+#: treats as a `timedelta`, which is an `int` by the time the adapter hands it over.
+BREAKS_THE_PARAM_CONTRACT = """\
+from datetime import timedelta
+
+
+class MaxDurationRule(BaseRule):
+    def __init__(self, max_duration):
+        if max_duration <= timedelta(0):
+            raise ValueError("max_duration must be positive")
+        self.max_duration = max_duration
+
+    def evaluate(self, request, context):
+        if request.duration > self.max_duration:
+            return RuleResult.deny("Too long.")
+        return RuleResult.allow()
+"""
+
+#: The same constraint, honouring the contract.
+HONOURS_THE_PARAM_CONTRACT = """\
+from datetime import timedelta
+
+
+class MaxDurationRule(BaseRule):
+    def __init__(self, max_duration_minutes):
+        if max_duration_minutes <= 0:
+            raise ValueError("max_duration_minutes must be positive")
+        self.max_duration = timedelta(minutes=max_duration_minutes)
+
+    def evaluate(self, request, context):
+        if request.duration > self.max_duration:
+            return RuleResult.deny("Too long.")
+        return RuleResult.allow()
+"""
+
+#: Answers "max 1 hour" by hardcoding the hour. Valid Python, passes every gate, and useless to
+#: the second venue that adds it.
+HARDCODES_THE_BOUND = """\
+from datetime import timedelta
+
+
+class MaxDurationRule(BaseRule):
+    def evaluate(self, request, context):
+        if request.duration > timedelta(hours=1):
+            return RuleResult.deny("Bookings can be at most 60 minutes long.")
+        return RuleResult.allow()
+"""
+
+
+def test_check_artifact_reports_a_parameter_treated_as_a_timedelta():
+    failures = check_artifact(
+        BREAKS_THE_PARAM_CONTRACT, [ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS]
+    )
+    assert failures
+    assert "max_duration" in failures[0]
+
+
+def test_check_artifact_passes_a_rule_that_converts_in_init():
+    expects = [ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS]
+    assert check_artifact(HONOURS_THE_PARAM_CONTRACT, expects) == ()
+
+
+def test_check_artifact_reports_a_bound_that_is_not_a_parameter():
+    failures = check_artifact(HARDCODES_THE_BOUND, [ArtifactExpectation.TAKES_A_PARAMETER])
+    assert failures
+    assert "hardcoded" in failures[0]
+
+
+def test_check_artifact_only_evaluates_the_expectations_it_is_given():
+    """A hardcoded bound is not a unit mistake, and vice versa — the two are reported separately
+    so a failing run says which property the model missed."""
+    units = [ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS]
+    parameterized = [ArtifactExpectation.TAKES_A_PARAMETER]
+    assert check_artifact(HARDCODES_THE_BOUND, units) == ()
+    assert check_artifact(BREAKS_THE_PARAM_CONTRACT, parameterized) == ()
+
+
+def test_check_artifact_is_empty_when_there_is_no_artifact():
+    """A run that gave up produced nothing, and `status` already reports that. Counting the absent
+    artifact as a failed assertion would report one failure under two headings."""
+    for source in (None, "", "   \n"):
+        assert check_artifact(source, list(ArtifactExpectation)) == ()
+
+
+def test_a_verified_run_whose_artifact_fails_its_assertions_is_not_a_success():
+    """The defect this axis exists for. The loop verified the rule — it validated, survived its own
+    adversarial suite and matched `inspect.signature` — and the rule still takes a Space off line.
+    `status` keeps saying how the run ended; `succeeded` is what stops reporting 1/1."""
+    result = LoopResult(
+        description="max 1 hour",
+        succeeded=True,
+        attempts=(_attempt(AttemptOutcome.PASSED),),
+        rule_source=BREAKS_THE_PARAM_CONTRACT,
+        model="m",
+    )
+
+    report = build_example_report(
+        "max 1 hour",
+        model="m",
+        result=result,
+        responses=[],
+        wall_ms=1.0,
+        expects=(ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS,),
+    )
+
+    assert report.status is BenchmarkStatus.VERIFIED
+    assert report.succeeded is False
+    assert report.artifact_ok is False
+    assert report.artifact_failures
+
+
+def test_a_verified_run_with_a_sound_artifact_still_succeeds():
+    result = LoopResult(
+        description="max 1 hour",
+        succeeded=True,
+        attempts=(_attempt(AttemptOutcome.PASSED),),
+        rule_source=HONOURS_THE_PARAM_CONTRACT,
+        model="m",
+    )
+
+    report = build_example_report(
+        "max 1 hour",
+        model="m",
+        result=result,
+        responses=[],
+        wall_ms=1.0,
+        expects=(
+            ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS,
+            ArtifactExpectation.TAKES_A_PARAMETER,
+        ),
+    )
+
+    assert report.succeeded is True
+    assert report.artifact_failures == ()
+    assert report.param_names == ("max_duration_minutes",)
+
+
+def test_every_golden_example_checks_its_parameters_units():
+    """Declared by all five, including the ones with no duration in them: a rule may reach for the
+    wrong type for any parameter, and a check that only ran where a defect was expected would not
+    be a check."""
+    for example in GOLDEN_EXAMPLES:
+        assert ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS in example.expects
+
+
+def test_every_golden_example_naming_a_number_requires_a_parameter():
+    """ "only on weekends" names no number and may legitimately produce a parameterless rule. The
+    other four all name one, and a rule that hardcodes it answers the prompt without answering the
+    constraint."""
+    for example in GOLDEN_EXAMPLES:
+        names_a_number = example.description != "only on weekends"
+        assert (ArtifactExpectation.TAKES_A_PARAMETER in example.expects) is names_a_number
+
+
+def test_artifact_failures_round_trip_through_the_checkpoint_format():
+    report = _example("max 1 hour")
+    assert ExampleReport.from_dict(report.to_dict()) == report
+
+    with_failures = ExampleReport.from_dict(
+        {**report.to_dict(), "artifact_failures": ["bad units"], "param_names": ["p"]}
+    )
+    assert with_failures.artifact_failures == ("bad units",)
+    assert with_failures.param_names == ("p",)
+    assert with_failures.artifact_ok is False
+
+
+def test_a_checkpoint_written_before_the_artifact_axis_still_resumes():
+    """One-directional courtesy, documented as such on `from_dict`: the old file has no such keys
+    and must not fail to load. Its numbers are not comparable, which is why that is written down
+    rather than smoothed over."""
+    legacy = _example("max 1 hour").to_dict()
+    del legacy["param_names"]
+    del legacy["artifact_failures"]
+
+    restored = ExampleReport.from_dict(legacy)
+
+    assert restored.param_names == ()
+    assert restored.artifact_failures == ()
+    assert restored.artifact_ok is True
+
+
 def test_no_recorded_responses_yields_zero_calls_and_none_metadata():
     result = LoopResult(
         description="d", succeeded=False, attempts=(_attempt(AttemptOutcome.CRASHED),)
