@@ -144,7 +144,7 @@ def member(session: Session) -> User:
 def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> None:
     """Set this Space's one unscoped instance of ``rule_type`` to ``params``.
 
-    ``create_space`` seeds an ``availability_hours`` and a ``slot_alignment``
+    ``create_space`` seeds an ``availability_hours`` and a ``session_length``
     row, so a test tightening either has to edit the row it finds rather than
     add a second instance: two instances of a type both run and AND to the
     stricter, and the seeded 60-minute grid would go on refusing a booking
@@ -286,8 +286,8 @@ def test_overlapping_booking_returns_409(
     """A partial overlap, both ends on ``space``'s (default 60-minute) grid.
 
     The second attempt used to start at a half-hour offset — off-grid now that
-    ``slot_minutes`` is enforced (task 6.5) — which would trip the new
-    ``SlotAlignmentRule`` before the overlap constraint ever ran. 10:00-12:00
+    ``session_minutes`` is enforced (task 6.5) — which would trip the new
+    ``SessionLengthRule`` before the overlap constraint ever ran. 10:00-12:00
     partially overlaps the first booking's 10:00-11:00 just as well and stays
     on the grid.
     """
@@ -304,10 +304,10 @@ def test_overlapping_booking_returns_409(
     assert response.json()["error"] == "overlap"
 
 
-# --- Slot alignment (task 6.5) --------------------------------------------------
+# --- Session length (task 6.5) --------------------------------------------------
 
 
-def test_off_grid_booking_is_refused_by_slot_alignment(
+def test_off_grid_booking_is_refused_by_session_length(
     api: Api,
     driver: PostgresBookingDriver,
     session: Session,
@@ -317,11 +317,11 @@ def test_off_grid_booking_is_refused_by_slot_alignment(
 ) -> None:
     """This exact request succeeds today; the point of task 6.5 is that it no longer does.
 
-    ``slot_minutes`` used to decline to *offer* an off-grid slot in the calendar UI while the API
-    accepted anything — the split ``rule-engine.md`` warns is only safe as long as the grid is
+    ``session_minutes`` used to decline to *offer* an off-grid slot in the calendar UI while the
+    API accepted anything — the split ``rule-engine.md`` warns is only safe as long as the grid is
     advisory and something else is the real boundary. Nothing enforced it server-side until now.
     """
-    _set_rule(session, space, "slot_alignment", {"slot_minutes": 30})
+    _set_rule(session, space, "session_length", {"session_minutes": 30})
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 7)), "end_at": iso(at(10, 22))}
@@ -339,11 +339,11 @@ def test_off_grid_booking_is_refused_by_slot_alignment(
     assert bookings == []
 
 
-def test_an_on_grid_booking_is_unaffected_by_slot_alignment(
+def test_an_on_grid_booking_is_unaffected_by_session_length(
     api: Api, session: Session, owner: User, space: Space, resource: Resource
 ) -> None:
     """The new rule only refuses what is actually off-grid."""
-    _set_rule(session, space, "slot_alignment", {"slot_minutes": 30})
+    _set_rule(session, space, "session_length", {"session_minutes": 30})
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(11))}

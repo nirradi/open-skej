@@ -17,7 +17,7 @@
  * ## Why the slot count is computed
  *
  * `5` is only "more than two hours" while a slot is 30 minutes. Deriving the
- * count from `slotMinutes` keeps the test triggering the rule it names after a
+ * count from `sessionMinutes` keeps the test triggering the rule it names after a
  * config change, instead of quietly selecting 50 minutes and asserting a denial
  * that never comes.
  */
@@ -32,7 +32,7 @@ const MAX_BOOKING_MINUTES = 120
 
 /** The shortest selection that breaks the rule, whatever a slot is worth. */
 const SLOTS_TO_EXCEED_MAX =
-  Math.floor(MAX_BOOKING_MINUTES / calendarConfig.slotMinutes) + 1
+  Math.floor(MAX_BOOKING_MINUTES / calendarConfig.sessionMinutes) + 1
 
 const FIRST_SLOT = 4
 
@@ -67,7 +67,7 @@ test('an over-long booking is denied with the engine\'s own message', async ({ p
     `Selected ${SLOTS_TO_EXCEED_MAX} slots`,
   )
 
-  const selectedMinutes = SLOTS_TO_EXCEED_MAX * calendarConfig.slotMinutes
+  const selectedMinutes = SLOTS_TO_EXCEED_MAX * calendarConfig.sessionMinutes
   await expect(page.getByTestId('booking-duration')).toHaveText(formatDurationForUi(selectedMinutes))
 
   await page.getByTestId('booking-confirm').click()

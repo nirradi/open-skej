@@ -118,7 +118,7 @@ def _clear_rules(session: Session, space: Space) -> None:
     """Delete every ``space_rules`` row for ``space``, bypassing the API.
 
     Used only by the "empty Space" test: ``service.create_space`` always
-    seeds ``availability_hours`` and ``slot_alignment`` rows so a fresh
+    seeds ``availability_hours`` and ``session_length`` rows so a fresh
     Space is immediately bookable, so a genuinely empty list needs those
     cleared first.
     """
@@ -140,10 +140,9 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
     assert rule_type_ids == [
         "not_in_the_past",
         "booking_horizon",
-        "min_duration",
         "max_duration",
         "max_consecutive_duration",
-        "slot_alignment",
+        "session_length",
         "availability_hours",
         "max_duration_per_day",
         "max_bookings_per_day",
@@ -186,32 +185,32 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
     # the run it reads is resolved from history, so the router must still be told to load it.
     assert max_consecutive_duration_entry["reads_history"] is True
 
-    min_duration_entry = next(entry for entry in body if entry["rule_type"] == "min_duration")
-    assert min_duration_entry["params"] == [
+    session_length_entry = next(entry for entry in body if entry["rule_type"] == "session_length")
+    assert session_length_entry["params"] == [
         {
-            "name": "min_duration_minutes",
+            "name": "session_minutes",
             "kind": "integer",
-            "label": "Minimum duration",
+            "label": "Session length",
             "unit": "minutes",
             "required": True,
             "minimum": 1,
         }
     ]
-    assert min_duration_entry["is_single"] is False
-    assert min_duration_entry["reads_history"] is False
+    assert session_length_entry["is_single"] is False
+    assert session_length_entry["reads_history"] is False
 
     not_in_the_past_entry = next(entry for entry in body if entry["rule_type"] == "not_in_the_past")
     assert not_in_the_past_entry["params"] == []
 
 
-def test_rule_types_serve_a_description_for_all_eleven_hand_written_types(
+def test_rule_types_serve_a_description_for_all_ten_hand_written_types(
     api: Api, alice: User
 ) -> None:
     """A picker where some entries explain themselves and others do not is worse than one where
     none do — every hand-written type carries a non-empty description over the wire."""
     body = api.as_user(alice).get("/rule-types").json()
 
-    assert len(body) == 11
+    assert len(body) == 10
     for entry in body:
         assert isinstance(entry["description"], str)
         assert entry["description"].strip()
@@ -227,7 +226,7 @@ def test_rule_types_is_reachable_by_any_authenticated_caller_with_no_space_at_al
     response = api.as_user(alice).get("/rule-types")
 
     assert response.status_code == 200
-    assert len(response.json()) == 11
+    assert len(response.json()) == 10
 
 
 # --- GET /spaces/{public_id}/rules --------------------------------------------
@@ -237,7 +236,7 @@ def test_list_space_rules_returns_the_seeded_default_rows(
     api: Api, alice: User, space_a: Space
 ) -> None:
     """A fresh Space is seeded with ``availability_hours`` and
-    ``slot_alignment`` rows (``service.create_space``) so it is immediately
+    ``session_length`` rows (``service.create_space``) so it is immediately
     bookable.
     """
     response = api.as_user(alice).get(f"/spaces/{space_a.public_id}/rules")
@@ -245,7 +244,7 @@ def test_list_space_rules_returns_the_seeded_default_rows(
     assert response.status_code == 200
     body = response.json()
     rule_types = {row["rule_type"] for row in body}
-    assert rule_types == {"availability_hours", "slot_alignment"}
+    assert rule_types == {"availability_hours", "session_length"}
     for row in body:
         assert row["enabled"] is True
         assert row["applies_to"] is None
@@ -340,15 +339,15 @@ def test_post_availability_hours_inverted_is_422(api: Api, alice: User, space_a:
     )
 
 
-def test_post_slot_alignment_not_dividing_1440_is_422(
+def test_post_session_length_not_dividing_1440_is_422(
     api: Api, alice: User, space_a: Space
 ) -> None:
-    payload = {"rule_type": "slot_alignment", "params": {"slot_minutes": 7}}
+    payload = {"rule_type": "session_length", "params": {"session_minutes": 7}}
 
     response = api.as_user(alice).post(f"/spaces/{space_a.public_id}/rules", json=payload)
 
     assert response.status_code == 422
-    assert "slot_minutes" in response.json()["detail"]
+    assert "session_minutes" in response.json()["detail"]
     assert "1440" in response.json()["detail"]
 
 

@@ -457,33 +457,35 @@ export interface SpaceRuleCreateInput {
  * `opens_at` / `closes_at` are the Space's own **local** wall-clock times
  * (`HH:MM:SS`, Python's `time` serialised by FastAPI) — this endpoint never
  * converts to UTC, since it has no instant to judge, only a calendar date to
- * describe. `null` for `slot_minutes` /
+ * describe. `null` for `session_minutes` /
  * `opens_at` / `closes_at` means the corresponding rule type is not enforced
  * on this date at all — the frontend must render that as "not configured",
  * never invent a fallback window the server did not report.
  *
  * `coherence_issue` is resolved server-side and never recomputed by the
- * client: the resolved window and slot size for *this one date*
- * genuinely conflict (an opening or closing time that does not land on the
- * resolved slot grid), or the resolved minimum duration exceeds the window
- * itself. `null` unless one of those is true — a "closed all day"
- * zero-width window is never a conflict, since there is no grid to misalign
- * with nothing bookable in it, and a minimum duration that is merely not a
- * multiple of the slot size is not a conflict either (the calendar's click
- * unit rounds up to cover it).
+ * client. Only one case remains: the resolved session length exceeds the
+ * resolved operating window, so nothing on that date could ever be booked.
+ * The two slot-boundary cases this field used to carry are gone with
+ * `slot_alignment` — the grid is anchored on the opening time itself now, so
+ * an opening time cannot miss it, and a closing time that leaves a short
+ * unusable tail is ordinary rather than a conflict. `null` unless the one
+ * remaining case is true; a "closed all day" zero-width window is never a
+ * conflict, since nothing is bookable in it to begin with.
  *
- * `min_duration_minutes` is a plain minute count, not a wall-clock string
- * like `opens_at` / `closes_at` — it is a duration, so there is no clock
- * time to render it as. `null` means no `min_duration` rule governs this
- * date at all.
+ * `session_minutes` and `anchor_minutes` are plain minute counts, not
+ * wall-clock strings like `opens_at` / `closes_at`. `anchor_minutes` is
+ * minutes from local midnight to the date's own resolved opening time — what
+ * the session grid is anchored on — and is `null` under the identical
+ * condition as `session_minutes`, since a grid that is not enforced has
+ * nothing to anchor.
  */
 export interface DayScheduleRead {
   date: string
-  slot_minutes: number | null
+  session_minutes: number | null
   opens_at: string | null
   closes_at: string | null
   coherence_issue: string | null
-  min_duration_minutes: number | null
+  anchor_minutes: number | null
 }
 
 /**

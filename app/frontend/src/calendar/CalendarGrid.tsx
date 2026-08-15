@@ -18,13 +18,13 @@
  * grid copes with this in three parts:
  *
  * 1. **One shared time axis, at the finest configured slot size in the
- *    visible week** (`finestSlotMinutes`). Every day's own slot buttons are
- *    laid out in normal document flow at *that day's own* `slotMinutes`, and
- *    since every resolved `slotMinutes` divides 1440 (guaranteed by
+ *    visible week** (`finestSessionMinutes`). Every day's own slot buttons are
+ *    laid out in normal document flow at *that day's own* `sessionMinutes`, and
+ *    since every resolved `sessionMinutes` divides 1440 (guaranteed by
  *    `resolve_day_schedule` — the LCM of divisors of 1440 always divides
  *    1440), a day's own buttons always sum to exactly the shared
  *    `dayHeight` with no absolute positioning needed to make them fit. They
- *    land flush with the axis rows only when the day's own `slotMinutes` is
+ *    land flush with the axis rows only when the day's own `sessionMinutes` is
  *    a *multiple* of the axis granularity — a 30-minute day beside a
  *    20-minute one shares a `dayHeight` but does not share row lines. That
  *    is a real readability limit of a mixed week, recorded rather than
@@ -39,7 +39,7 @@
  *
  * A day's `coherence_issue` (opening/closing time not landing on that day's
  * own resolved slot grid) is advisory only, and deliberately does not block
- * anything: `resolve_day_schedule` guarantees every resolved `slotMinutes`
+ * anything: `resolve_day_schedule` guarantees every resolved `sessionMinutes`
  * divides 1440, so a day can never fail to describe *some* grid to draw.
  * And `isSlotOutOfHours` already greys any slot that only partially
  * overlaps the open window, whether or not that window lines up with the
@@ -90,8 +90,9 @@ import type { Booking } from '../api'
 import {
   calendarConfig,
   calendarConfigForDay,
-  finestSlotMinutes,
+  finestSessionMinutes,
   formatSlotLabel,
+  gridOffsetMinutes,
   isSlotOutOfHours,
   slotStart,
   slotsPerDayFor,
@@ -258,15 +259,15 @@ export function CalendarGrid({
   // A config carrying only `resolvedSchedule.timeZone`, used everywhere only
   // the zone matters and not any one day's own hours or slot size: the
   // booking-window fetch below, week navigation bounds, "is this the current
-  // week". `slotStart`'s index 0 is always midnight regardless of
-  // `slotMinutes` (`slotStartMinutes(0, config) === 0`), so `dayBounds`
-  // through this config is correct for every day, not just the axis's own.
+  // week". Its own `anchorMinutes` is 0, so `slotStartMinutes(0, config)` is
+  // midnight here whatever any day's real anchor is, and `dayBounds` through
+  // this config is correct for every day, not just the axis's own.
   const zoneConfig: CalendarConfig = {
-    slotMinutes: 1,
+    sessionMinutes: 1,
     openMinutes: null,
     closeMinutes: null,
     timeZone: resolvedSchedule.timeZone,
-    minDurationMinutes: null,
+    anchorMinutes: 0,
   }
   const [fallbackNow] = useState(() => new Date())
   const now = nowProp ?? fallbackNow
@@ -323,24 +324,24 @@ export function CalendarGrid({
   const dateKeys = useMemo(() => days.map(toDateKey), [days])
 
   /**
-   * The shared row axis's granularity — the finest (smallest) `slotMinutes`
+   * The shared row axis's granularity — the finest (smallest) `sessionMinutes`
    * resolved for any day in the visible week (`config.ts`'s
-   * `finestSlotMinutes`; see this file's module docblock for why the finest
+   * `finestSessionMinutes`; see this file's module docblock for why the finest
    * value is what a heterogeneous week shares). A uniform week (every day
-   * resolving to the same `slotMinutes`, the common case and everything this
+   * resolving to the same `sessionMinutes`, the common case and everything this
    * suite tested before 6.9) makes this identical to that one value, so
    * `slotsPerDay` below is unchanged for every pre-6.9 assertion.
    */
-  const axisSlotMinutes = useMemo(
-    () => finestSlotMinutes(resolvedSchedule, dateKeys),
+  const axisSessionMinutes = useMemo(
+    () => finestSessionMinutes(resolvedSchedule, dateKeys),
     [resolvedSchedule, dateKeys],
   )
   const axisConfig: CalendarConfig = {
-    slotMinutes: axisSlotMinutes,
+    sessionMinutes: axisSessionMinutes,
     openMinutes: null,
     closeMinutes: null,
     timeZone: resolvedSchedule.timeZone,
-    minDurationMinutes: null,
+    anchorMinutes: 0,
   }
   const slotsPerDay = slotsPerDayFor(axisConfig)
 
@@ -356,9 +357,9 @@ export function CalendarGrid({
     // Space's week could sit before an environment-midnight `from`, or one in
     // the last few hours could sit at or after an environment-midnight `to`,
     // and either way never reach this component to be drawn at all.
-    // `zoneConfig` carries the right zone; which day's own `slotMinutes` it
+    // `zoneConfig` carries the right zone; which day's own `sessionMinutes` it
     // otherwise names is irrelevant here — `dayBounds` reads index 0, always
-    // midnight regardless of `slotMinutes`.
+    // midnight regardless of `sessionMinutes`.
     const from = dayBounds(weekStart, zoneConfig).start
     const to = dayBounds(addDays(weekStart, DAYS_PER_WEEK - 1), zoneConfig).end
 
@@ -488,7 +489,7 @@ export function CalendarGrid({
     // shorter than the minimum is clamped up to it, the same way a single
     // click is.
     const naturalEnd = new Date(
-      slotStart(day, selection.end, dayConfig).getTime() + dayConfig.slotMinutes * MS_PER_MINUTE,
+      slotStart(day, selection.end, dayConfig).getTime() + dayConfig.sessionMinutes * MS_PER_MINUTE,
     )
     const clickEnd = slotInterval(day, selection.start, dayConfig).end
     const end = naturalEnd.getTime() > clickEnd.getTime() ? naturalEnd : clickEnd
@@ -591,11 +592,11 @@ export function CalendarGrid({
   }
 
   // Shared across every day column — the row axis's own granularity, per
-  // this file's module docblock. A day whose own `slotMinutes` differs still
+  // this file's module docblock. A day whose own `sessionMinutes` differs still
   // sums to exactly `dayHeight` in normal document flow (see the docblock
   // for why), so no day column needs its own height.
   const dayHeight = slotsPerDay * SLOT_ROW_HEIGHT_PX
-  const pxPerMinute = SLOT_ROW_HEIGHT_PX / axisSlotMinutes
+  const pxPerMinute = SLOT_ROW_HEIGHT_PX / axisSessionMinutes
 
   return (
     <section className="flex flex-col gap-3" data-testid="calendar">
@@ -699,11 +700,18 @@ export function CalendarGrid({
           const dayConfig = calendarConfigForDay(resolvedSchedule, dateKey)
           const daySlotCount = slotsPerDayFor(dayConfig)
           // A day's own button height relative to the shared axis row: a day
-          // whose slotMinutes is coarser than the axis renders fewer, taller
+          // whose sessionMinutes is coarser than the axis renders fewer, taller
           // buttons that still sum to exactly `dayHeight` in normal document
           // flow (see the module docblock's "no absolute positioning needed
           // to make them fit").
-          const daySlotHeight = SLOT_ROW_HEIGHT_PX * (dayConfig.slotMinutes / axisSlotMinutes)
+          const daySlotHeight = SLOT_ROW_HEIGHT_PX * (dayConfig.sessionMinutes / axisSessionMinutes)
+          // The minutes between midnight and this day's first grid line, when
+          // its own opening time does not fall on a whole number of sessions
+          // from midnight (`config.ts`'s `gridOffsetMinutes`). Rendered as a
+          // spacer above the buttons so they still sit at the wall-clock time
+          // they name; zero — and so absent — for every day whose anchor
+          // already lands on the grid, which is the ordinary case.
+          const dayOffsetHeight = gridOffsetMinutes(dayConfig) * pxPerMinute
           // Midnight on the Space's own clock — see `bookingsByDay` above for
           // why this must not be the environment's midnight.
           const { start: dayStart } = dayBounds(day, dayConfig)
@@ -735,6 +743,7 @@ export function CalendarGrid({
               </div>
 
               <div className="relative" style={{ height: dayHeight }}>
+                {dayOffsetHeight > 0 && <div style={{ height: dayOffsetHeight }} />}
                 {Array.from({ length: daySlotCount }, (_, index) => {
                   const blocked = blockedReason(dayIndex, index)
                   const selected = isInSelection(selection, dateKey, index)

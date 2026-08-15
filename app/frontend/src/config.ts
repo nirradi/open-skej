@@ -2,18 +2,18 @@
  * The single source of truth for calendar configuration.
  *
  * Everything about how the grid is laid out derives from `CalendarConfig`.
- * Changing `slotMinutes` from 30 to 10 must require no other edit anywhere in
+ * Changing `sessionMinutes` from 30 to 10 must require no other edit anywhere in
  * the codebase — if a component ever hardcodes a slot count, a row height per
  * half-hour, or an opening hour, that is a bug in the component, not
  * something to fix by adding a second config value here.
  *
  * ## Resolved per date by the server, not a compile-time constant
  *
- * `slotMinutes` / `openMinutes` / `closeMinutes` used to mirror
+ * `sessionMinutes` / `openMinutes` / `closeMinutes` used to mirror
  * `AVAILABILITY_OPEN` / `AVAILABILITY_CLOSE`, hardcoded constants in
  * `app/backend/app/rules_stub.py`. Those constants are gone, and so is the
  * later shape that replaced them — one `CalendarConfig` built from a Space's
- * own schedule fields — because a Space no longer has one slot size or one
+ * own schedule fields — because a Space no longer has one session length or one
  * operating window good for a whole week: a rule instance's `applies_to` can
  * narrow it to particular weekdays or dates. `buildWeekSchedule` turns `GET
  * /spaces/{public_id}/schedule`'s **already resolved** per-date answer into a
@@ -41,7 +41,7 @@
  *
  * ## The grid always renders the full day
  *
- * `slotsPerDayFor` spans midnight to midnight regardless of `openMinutes` /
+ * `slotsPerDayFor` spans the whole day regardless of `openMinutes` /
  * `closeMinutes` — those two only decide which rows come back from
  * `isSlotOutOfHours` as greyed. Clipping the day to `[openMinutes,
  * closeMinutes)` was the previous shape, and it silently broke: a Space
@@ -67,15 +67,24 @@
  * read different times for the same slot, and it makes the operating window
  * wrap midnight for anyone far enough from the venue.
  *
- * ## The click unit honours the minimum duration
+ * ## The grid is anchored on the opening time, and one click is one session
  *
- * `DaySchedule.minDurationMinutes` — carried through `CalendarConfig` by
- * `calendarConfigForDay` — is a date's own resolved `min_duration` floor, and
- * it is independent of `slotMinutes`: nothing forces a Space's minimum
- * duration to be a multiple of its slot size. The click unit is the smallest
- * whole number of slots that reaches the date's minimum duration
- * (`slotInterval` in `calendar/week.ts`), so the grid cannot offer a booking
- * the floor would refuse.
+ * `sessionMinutes` and `anchorMinutes` together are the whole grid: sessions
+ * run from the venue's own opening time, in steps of the session length, which
+ * is what the server's `session_length` rule enforces on both bounds of every
+ * booking. One click is therefore exactly one session — there is no separate
+ * floor to widen it past, because a booking that starts and ends on this grid
+ * cannot be shorter than one session in the first place.
+ *
+ * `anchorMinutes` is the date's own resolved opening time, and the grid it
+ * defines extends in **both** directions from it so the full day still renders:
+ * the first row of the day sits at `anchorMinutes % sessionMinutes`
+ * (`gridOffsetMinutes`), which is `0` whenever the opening time already falls
+ * on a whole number of sessions from midnight — the ordinary case, where this
+ * is exactly the midnight-based grid it always was. A venue opening at 09:15
+ * with hour-long sessions is the case this exists for: its rows land at 00:15,
+ * 01:15, … 09:15, so the first session of the day starts when the venue opens
+ * rather than being reported as a misconfiguration.
  */
 
 import { SYSTEM_TIME_ZONE, zonedTimeToInstant } from './timezone'
@@ -83,20 +92,21 @@ import { SYSTEM_TIME_ZONE, zonedTimeToInstant } from './timezone'
 /** Minutes in an hour — named so the arithmetic below reads as intent, not magic. */
 const MINUTES_PER_HOUR = 60
 
-/** Minutes in a day. The grid always spans exactly this many. */
+/** Minutes in a day. The grid always spans it. */
 const MINUTES_PER_DAY = 24 * MINUTES_PER_HOUR
 
 export interface CalendarConfig {
   /**
-   * Selection granularity of the grid, in minutes. Governs how finely a user can
-   * pick a range — *not* how long a booking may be. Bookings are variable length;
-   * the backend's max-duration rule is what bounds them.
+   * The length of one session, in minutes — the grid's step, and exactly how
+   * much one click books. Bookings may still be longer, by dragging across
+   * several sessions; they may never be shorter, and they may never begin or
+   * end between two grid lines.
    *
-   * Must divide a day evenly, and must divide `openMinutes` / `closeMinutes`
-   * when they are set — a date whose resolved rules do not satisfy that is
-   * reported by the server as that date's own `DaySchedule.coherenceIssue`.
+   * Must divide a day evenly. A date whose resolved rules cannot be laid out
+   * coherently is reported by the server as that date's own
+   * `DaySchedule.coherenceIssue`.
    */
-  slotMinutes: number
+  sessionMinutes: number
   /**
    * Minutes since midnight on the Space's own wall clock that it opens —
    * inclusive. `null` means the Space enforces no opening bound: nothing
@@ -117,45 +127,66 @@ export interface CalendarConfig {
    */
   timeZone: string
   /**
-   * The date's own resolved `min_duration` floor, in minutes — `null` means
-   * no such rule governs this date. Read only by `slotInterval`
-   * (`calendar/week.ts`) to decide how many slots one click consumes; never
-   * how the grid itself is drawn (see the module docblock's "the click unit
-   * honours the minimum duration").
+   * Minutes since midnight that this date's session grid is anchored on — the
+   * date's own resolved opening time, or `0` when no `availability_hours` row
+   * governs it. Resolved by the server and carried through verbatim; this
+   * module never derives it from `openMinutes`, because which rows govern a
+   * date is the server's question alone (see the module docblock).
    */
-  minDurationMinutes: number | null
+  anchorMinutes: number
 }
 
 export const calendarConfig: CalendarConfig = {
-  slotMinutes: 30,
+  sessionMinutes: 30,
   openMinutes: null,
   closeMinutes: null,
   timeZone: SYSTEM_TIME_ZONE,
-  minDurationMinutes: null,
+  anchorMinutes: 0,
 }
 
-/** How many slot rows the grid renders per day, for an arbitrary config. */
+/**
+ * Minutes from midnight to the grid's first line of the day.
+ *
+ * The grid is anchored on `anchorMinutes` and steps by `sessionMinutes`, so the
+ * earliest line at or after midnight is the anchor reduced modulo the session
+ * length. This is `0` for every opening time that already falls on a whole
+ * number of sessions from midnight, which is what makes the anchored grid a
+ * strict generalisation of the midnight-based one rather than a change to it.
+ */
+export function gridOffsetMinutes(config: CalendarConfig = calendarConfig): number {
+  return config.anchorMinutes % config.sessionMinutes
+}
+
+/**
+ * How many whole sessions the grid renders for a day, for an arbitrary config.
+ *
+ * Counted from `gridOffsetMinutes` rather than from midnight: with a non-zero
+ * offset the day holds one fewer whole session, and the minutes below the first
+ * line are left unrendered rather than drawn as a short row nobody could book.
+ * A booking sitting in them is still displayed — every booking block is
+ * positioned from its own start minute, never from a row index.
+ */
 export function slotsPerDayFor(config: CalendarConfig = calendarConfig): number {
-  return Math.floor(MINUTES_PER_DAY / config.slotMinutes)
+  return Math.floor((MINUTES_PER_DAY - gridOffsetMinutes(config)) / config.sessionMinutes)
 }
 
-/** How many slot rows the grid renders per day. */
+/** How many session rows the grid renders per day. */
 export const slotsPerDay = slotsPerDayFor()
 
 /**
- * Minutes from midnight to the start of slot `index` (0-based).
+ * Minutes from midnight to the start of session `index` (0-based).
  *
  * The grid's row-to-time mapping lives here rather than in the component so that
- * a slot's identity is derived the same way everywhere it is computed. Slot 0
- * is always midnight — the full day is always rendered, whatever a Space's
- * own hours say (see the module docblock).
+ * a slot's identity is derived the same way everywhere it is computed. Session 0
+ * is the first grid line at or after midnight — the full day is always
+ * rendered, whatever a Space's own hours say (see the module docblock).
  */
 export function slotStartMinutes(index: number, config: CalendarConfig = calendarConfig): number {
-  return index * config.slotMinutes
+  return gridOffsetMinutes(config) + index * config.sessionMinutes
 }
 
 /**
- * The real instant at which slot `index` starts on the given day, resolved
+ * The real instant at which session `index` starts on the given day, resolved
  * through the Space's own `config.timeZone`.
  *
  * `day` contributes only its calendar date; its time component is discarded.
@@ -179,7 +210,21 @@ export function slotStart(day: Date, index: number, config: CalendarConfig = cal
   )
 }
 
-/** Formats a slot index as `HH:MM` for axis labels. */
+/**
+ * Midnight on `day`, on the Space's own clock.
+ *
+ * Resolved the same way `slotStart` resolves a session's own instant, through
+ * `zonedTimeToInstant` and the Space's `timeZone`, so a day's bounds and its
+ * sessions can never disagree about which instant midnight was. It takes its
+ * own route rather than going through `slotStart(day, 0, config)`, which was
+ * correct only while every grid started at midnight: an anchored grid's first
+ * line sits at `gridOffsetMinutes`, and a day column still spans the real day.
+ */
+export function dayStartInstant(day: Date, config: CalendarConfig = calendarConfig): Date {
+  return zonedTimeToInstant(day.getFullYear(), day.getMonth(), day.getDate(), 0, 0, config.timeZone)
+}
+
+/** Formats a session index as `HH:MM` for axis labels. */
 export function formatSlotLabel(index: number, config: CalendarConfig = calendarConfig): string {
   const minutes = slotStartMinutes(index, config)
   const hh = String(Math.floor(minutes / MINUTES_PER_HOUR)).padStart(2, '0')
@@ -188,42 +233,21 @@ export function formatSlotLabel(index: number, config: CalendarConfig = calendar
 }
 
 /**
- * How many slots one click starting at `config`'s slot size consumes: the
- * smallest whole number of slots whose combined length reaches
- * `config.minDurationMinutes`, or exactly one when no minimum governs the
- * date (see the module docblock's "the click unit honours the minimum
- * duration"). A pure function of `minDurationMinutes` and `slotMinutes` —
- * exported so `isSlotOutOfHours` here and `slotInterval`
- * (`calendar/week.ts`) share one definition of what one click means, rather
- * than each rounding it up on its own and risking the two drifting apart.
- */
-export function slotsPerClick(config: CalendarConfig = calendarConfig): number {
-  return config.minDurationMinutes === null
-    ? 1
-    : Math.ceil(config.minDurationMinutes / config.slotMinutes)
-}
-
-/**
- * Whether a click starting at slot `index` falls outside the Space's
- * operating hours.
+ * Whether the session starting at `index` falls outside the Space's operating
+ * hours.
  *
- * A click counts as out-of-hours unless the **whole click unit** —
- * `slotsPerClick(config)` slots, not just the one row `index` names — sits
- * entirely within `[openMinutes, closeMinutes)`. This is the same "never
- * offer what the server will refuse" reasoning as everywhere else in the
- * grid, applied to the minimum duration's own widening: a click whose row is
- * itself inside the window but whose resolved end runs past closing
- * contains a minute the backend's `AvailabilityHoursRule` would deny just as
- * surely as a single slot straddling the boundary does, so it reads as
- * blocked rather than bookable. With no minimum configured,
- * `slotsPerClick` is 1 and this is exactly the single-slot check it always
- * was. With both bounds `null` (a Space with no hours restriction), nothing
- * is ever out-of-hours.
+ * One session is one click, so the check is over exactly `[start, start +
+ * sessionMinutes)`: a session whose own row is inside the window but whose end
+ * runs past closing contains a minute the backend's `AvailabilityHoursRule`
+ * would deny, so it reads as blocked rather than bookable — the same "never
+ * offer what the server will refuse" reasoning as everywhere else in the grid.
+ * With both bounds `null` (a Space with no hours restriction), nothing is ever
+ * out-of-hours.
  */
 export function isSlotOutOfHours(index: number, config: CalendarConfig = calendarConfig): boolean {
   if (config.openMinutes === null && config.closeMinutes === null) return false
   const start = slotStartMinutes(index, config)
-  const end = start + slotsPerClick(config) * config.slotMinutes
+  const end = start + config.sessionMinutes
   const open = config.openMinutes ?? 0
   const close = config.closeMinutes ?? MINUTES_PER_DAY
   return start < open || end > close
@@ -245,40 +269,37 @@ function parseClockMinutes(value: string): number {
 // resolution over the Space's `space_rules` rows), never re-derived here.
 
 /**
- * One date's resolved slot size and operating window, in minutes since
- * midnight — the per-day counterpart to `CalendarConfig`'s single global
- * values, built from one entry of `GET /spaces/{public_id}/schedule`'s
+ * One date's resolved session length, grid anchor and operating window, in
+ * minutes since midnight — the per-day counterpart to `CalendarConfig`'s single
+ * global values, built from one entry of `GET /spaces/{public_id}/schedule`'s
  * response (`DayScheduleRead` in `api/types.ts`).
  *
  * `openMinutes` / `closeMinutes` `null` means the Space enforces no bound on
- * this date, exactly like `CalendarConfig`'s fields. `slotMinutes` falls
- * back to the shipped default (`calendarConfig.slotMinutes`) when the Space
- * configures no slot rule for the date at all.
+ * this date, exactly like `CalendarConfig`'s fields. `sessionMinutes` falls
+ * back to the shipped default (`calendarConfig.sessionMinutes`) when the Space
+ * configures no session rule for the date at all, and `anchorMinutes` falls
+ * back to `0` under the same condition — a grid with nothing to anchor it runs
+ * from midnight, which is what it always did.
  *
  * `coherenceIssue` is carried straight through from the server's own
  * `DayScheduleRead.coherence_issue` and is never computed here: whether a
- * date's resolved hours land on its resolved slot grid is a question about
- * which rules govern that date, and this module must never re-derive rule
- * semantics (`.claude/rules/rule-engine.md`).
- *
- * `minDurationMinutes` is this date's own resolved `min_duration` floor,
- * `null` meaning no such rule governs it — the per-day counterpart to
- * `CalendarConfig.minDurationMinutes`, and read the same way, only by
- * `slotInterval`.
+ * date's resolved rules can be laid out at all is a question about which rules
+ * govern that date, and this module must never re-derive rule semantics
+ * (`.claude/rules/rule-engine.md`).
  */
 export interface DaySchedule {
-  slotMinutes: number
+  sessionMinutes: number
   openMinutes: number | null
   closeMinutes: number | null
   coherenceIssue: string | null
-  minDurationMinutes: number | null
+  anchorMinutes: number
 }
 
 /**
  * A week's resolved layout: what `slotStart` etc. get called with. Reduces
  * to one `DaySchedule` per date, sharing one `timeZone` — `timezone` is the
  * one genuinely per-Space column left (`.claude/rules/identity-and-access.md`),
- * so it is never per-day the way hours and slot size now are.
+ * so it is never per-day the way hours and session length now are.
  *
  * `forDate` rather than a plain `Record` keyed by date: a `CalendarGrid`
  * asking about a date this `WeekSchedule` was never built for (nothing
@@ -293,29 +314,29 @@ export interface WeekSchedule {
   forDate: (dateKey: string) => DaySchedule
 }
 
-/** The shipped default, in `DaySchedule` shape — no hours restriction, the default slot size. */
+/** The shipped default, in `DaySchedule` shape — no hours restriction, the default session length. */
 const DEFAULT_DAY_SCHEDULE: DaySchedule = {
-  slotMinutes: calendarConfig.slotMinutes,
+  sessionMinutes: calendarConfig.sessionMinutes,
   openMinutes: calendarConfig.openMinutes,
   closeMinutes: calendarConfig.closeMinutes,
   coherenceIssue: null,
-  minDurationMinutes: calendarConfig.minDurationMinutes,
+  anchorMinutes: calendarConfig.anchorMinutes,
 }
 
 /** One `DayScheduleRead` (the wire shape) parsed into a `DaySchedule`. */
 function parseDaySchedule(entry: {
-  slot_minutes: number | null
+  session_minutes: number | null
   opens_at: string | null
   closes_at: string | null
   coherence_issue: string | null
-  min_duration_minutes: number | null
+  anchor_minutes: number | null
 }): DaySchedule {
   return {
-    slotMinutes: entry.slot_minutes ?? calendarConfig.slotMinutes,
+    sessionMinutes: entry.session_minutes ?? calendarConfig.sessionMinutes,
     openMinutes: entry.opens_at === null ? null : parseClockMinutes(entry.opens_at),
     closeMinutes: entry.closes_at === null ? null : parseClockMinutes(entry.closes_at),
     coherenceIssue: entry.coherence_issue,
-    minDurationMinutes: entry.min_duration_minutes,
+    anchorMinutes: entry.anchor_minutes ?? calendarConfig.anchorMinutes,
   }
 }
 
@@ -330,11 +351,11 @@ function parseDaySchedule(entry: {
 export function buildWeekSchedule(
   entries: readonly {
     date: string
-    slot_minutes: number | null
+    session_minutes: number | null
     opens_at: string | null
     closes_at: string | null
     coherence_issue: string | null
-    min_duration_minutes: number | null
+    anchor_minutes: number | null
   }[],
   timeZone: string,
 ): WeekSchedule {
@@ -352,20 +373,14 @@ export function buildWeekSchedule(
  * fallback when no real `WeekSchedule` prop is supplied (matching the old
  * `config ?? calendarConfig` default), and this module's own test suite,
  * whose fixtures still think in one `CalendarConfig` for a whole week.
- *
- * `minDurationMinutes` is always `null` here rather than carried through from
- * `config`: every caller of this function is a uniform, no-rules fallback
- * (the shipped default, or a test fixture built before this field existed),
- * never a real per-date resolution — a real minimum duration only ever
- * reaches a `DaySchedule` through `buildWeekSchedule`'s wire parsing.
  */
 export function uniformWeekSchedule(config: CalendarConfig): WeekSchedule {
   const day: DaySchedule = {
-    slotMinutes: config.slotMinutes,
+    sessionMinutes: config.sessionMinutes,
     openMinutes: config.openMinutes,
     closeMinutes: config.closeMinutes,
     coherenceIssue: null,
-    minDurationMinutes: null,
+    anchorMinutes: config.anchorMinutes,
   }
   return { timeZone: config.timeZone, forDate: () => day }
 }
@@ -374,28 +389,30 @@ export function uniformWeekSchedule(config: CalendarConfig): WeekSchedule {
 export function calendarConfigForDay(schedule: WeekSchedule, dateKey: string): CalendarConfig {
   const day = schedule.forDate(dateKey)
   return {
-    slotMinutes: day.slotMinutes,
+    sessionMinutes: day.sessionMinutes,
     openMinutes: day.openMinutes,
     closeMinutes: day.closeMinutes,
     timeZone: schedule.timeZone,
-    minDurationMinutes: day.minDurationMinutes,
+    anchorMinutes: day.anchorMinutes,
   }
 }
 
 /**
- * The smallest `slotMinutes` across `dateKeys`' own resolved schedule — the
+ * The smallest `sessionMinutes` across `dateKeys`' own resolved schedule — the
  * shared row-axis granularity a heterogeneous week's grid renders at (see
  * `CalendarGrid`'s module docblock). Every day's own grid lines land on a
- * *subset* of the axis rows only when every configured `slotMinutes` in the
- * week is a multiple of this value; when it is not (a 20-minute day beside a
- * 30-minute one), the axis is still the finest of the two, per the plan, and
- * the mismatch is a readability finding recorded in the PR rather than a
- * case this function papers over.
+ * *subset* of the axis rows only when every configured `sessionMinutes` in the
+ * week is a multiple of this value **and** every day's anchor agrees with the
+ * axis's own; when they do not, the axis is still the finest of them, and the
+ * mismatch is a readability finding rather than a case this function papers
+ * over. Reconciling a shared axis with per-day anchors is deferred with the
+ * rest of the week-axis work (`ops/pending/bugs/grid-from-hours-and-min-duration.md`,
+ * decision 7).
  */
-export function finestSlotMinutes(schedule: WeekSchedule, dateKeys: readonly string[]): number {
+export function finestSessionMinutes(schedule: WeekSchedule, dateKeys: readonly string[]): number {
   let finest = Infinity
   for (const key of dateKeys) {
-    finest = Math.min(finest, schedule.forDate(key).slotMinutes)
+    finest = Math.min(finest, schedule.forDate(key).sessionMinutes)
   }
-  return Number.isFinite(finest) ? finest : calendarConfig.slotMinutes
+  return Number.isFinite(finest) ? finest : calendarConfig.sessionMinutes
 }

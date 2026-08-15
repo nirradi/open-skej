@@ -38,14 +38,14 @@ from app.sandbox_seed import (
     SPACE_A_MAX_CONSECUTIVE_MINUTES,
     SPACE_A_MAX_DURATION_MINUTES,
     SPACE_A_NAME,
-    SPACE_A_SLOT_MINUTES,
+    SPACE_A_SESSION_MINUTES,
     SPACE_A_TIMEZONE,
     SPACE_B_CLOSES_AT_MINUTES,
     SPACE_B_MAX_BOOKINGS_PER_WEEK,
     SPACE_B_MAX_DURATION_MINUTES,
     SPACE_B_NAME,
     SPACE_B_OPENS_AT_MINUTES,
-    SPACE_B_SLOT_MINUTES,
+    SPACE_B_SESSION_MINUTES,
     SPACE_B_TIMEZONE,
     STRANGER_AUTH0_SUB,
     STRANGER_EMAIL,
@@ -123,12 +123,12 @@ def test_seed_produces_every_interesting_state(session):
     # above means (see `sandbox_seed.py`'s own comment on the constant).
     rules_a = _rules(session, space_a)
     assert set(rules_a) == {
-        "slot_alignment",
+        "session_length",
         "max_duration",
         "max_consecutive_duration",
         "booking_horizon",
     }
-    assert rules_a["slot_alignment"] == {"slot_minutes": SPACE_A_SLOT_MINUTES}
+    assert rules_a["session_length"] == {"session_minutes": SPACE_A_SESSION_MINUTES}
     assert rules_a["max_duration"] == {"max_duration_minutes": SPACE_A_MAX_DURATION_MINUTES}
     assert rules_a["max_consecutive_duration"] == {
         "max_consecutive_minutes": SPACE_A_MAX_CONSECUTIVE_MINUTES
@@ -173,7 +173,7 @@ def test_seed_produces_every_interesting_state(session):
     # weekly cap counted across both its Resources.
     assert set(rules_b) == {
         "availability_hours",
-        "slot_alignment",
+        "session_length",
         "max_duration",
         "max_bookings_per_week",
     }
@@ -181,7 +181,7 @@ def test_seed_produces_every_interesting_state(session):
         "opens_at_minutes": SPACE_B_OPENS_AT_MINUTES,
         "closes_at_minutes": SPACE_B_CLOSES_AT_MINUTES,
     }
-    assert rules_b["slot_alignment"] == {"slot_minutes": SPACE_B_SLOT_MINUTES}
+    assert rules_b["session_length"] == {"session_minutes": SPACE_B_SESSION_MINUTES}
     assert rules_b["max_duration"] == {"max_duration_minutes": SPACE_B_MAX_DURATION_MINUTES}
     assert rules_b["max_bookings_per_week"] == {"max_bookings": SPACE_B_MAX_BOOKINGS_PER_WEEK}
     assert rules_b != rules_a

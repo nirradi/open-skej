@@ -19,36 +19,31 @@ this rule runs, "local" has already been reduced to two numbers with nothing lef
 denial copy still names no bound at all: even a local clock time is a fact about one specific
 Space's configuration, not something worth hardcoding into copy shared by the whole canon.
 
-**``SlotAlignmentRule`` and ``MinDurationRule`` are the two rules missing from ``DEFAULT_CANON``,
-and they are missing for two unrelated reasons.** Every other rule here takes a literal that means
-the same thing on every date it is asked about — a duration, a day count, a clock time.
-``SlotAlignmentRule`` takes an ``anchor`` **instant**, which is inherently date-bound (the Space's
-own local midnight on the booking's date, converted to UTC), so a literal baked into
-``DEFAULT_CANON`` at import time would be correct for the day it was written and silently wrong
-every day after — precisely the cached-offset bug ``CLAUDE.md`` warns against. It is therefore
-never part of ``DEFAULT_CANON``, the same way the frequency rules in ``frequency.py`` are
-registered and importable but kept out of it: an adapter resolves ``anchor`` per booking date and
-builds the rule fresh, never once at start-up. ``MinDurationRule`` has no such problem — a minimum
-duration is exactly as date-independent as a maximum one — and stays out for the opposite reason:
-``DEFAULT_CANON`` is the fixed reference the generation loop is measured against and
-``app/e2e/tests/03-sad-path.spec.ts`` asserts against, and adding a floor to it would change
-behaviour those tests depend on. It is fully registered and constructible like every other type;
-it simply is not one of the four the reference assembly happens to hold today.
+**``SessionLengthRule`` is the one rule missing from ``DEFAULT_CANON``, for the same reason
+``SlotAlignmentRule`` — the type it replaces
+(``ops/pending/bugs/grid-from-hours-and-min-duration.md``) — always was.** Every other rule here
+takes a literal that means the same thing on every date it is asked about — a duration, a day
+count, a clock time. ``SessionLengthRule`` takes an ``anchor_minutes`` that is inherently date-bound
+(the date's own resolved opening time, or local midnight when no ``availability_hours`` row governs
+it), so a literal baked into ``DEFAULT_CANON`` at import time would be correct for the day it was
+written and silently wrong the day an admin changed the Space's hours — precisely the cached-offset
+bug ``CLAUDE.md`` warns against. It is therefore never part of ``DEFAULT_CANON``, the same way the
+frequency rules in ``frequency.py`` are registered and importable but kept out of it: an adapter
+resolves ``anchor_minutes`` per booking date and builds the rule fresh, never once at start-up.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
-from .interfaces import BaseRule, BookingRequest, Context, RuleResult, _require_utc
+from .interfaces import BaseRule, BookingRequest, Context, RuleResult
 
 __all__ = [
     "NotInThePastRule",
     "BookingHorizonRule",
     "MaxDurationRule",
     "MaxConsecutiveDurationRule",
-    "MinDurationRule",
-    "SlotAlignmentRule",
+    "SessionLengthRule",
     "AvailabilityHoursRule",
     "DEFAULT_CANON",
     "default_canon",
@@ -176,74 +171,65 @@ class MaxConsecutiveDurationRule(BaseRule):
         return RuleResult.allow()
 
 
-class MinDurationRule(BaseRule):
-    """Bookings may not run shorter than ``min_duration``.
+class SessionLengthRule(BaseRule):
+    """Bookings must start and end on the ``session_minutes`` grid anchored at ``anchor_minutes``.
 
-    The bound is inclusive: a booking of exactly ``min_duration`` passes — the same convention
-    ``MaxDurationRule`` states for its own bound, just facing the opposite direction.
+    Replaces both ``SlotAlignmentRule`` and ``MinDurationRule``
+    (``ops/pending/bugs/grid-from-hours-and-min-duration.md``): if a booking's start and end both
+    land on the grid, the shortest possible booking is one session, so a separate floor is
+    redundant and goes. Unlike ``SlotAlignmentRule`` this works entirely in ``LocalFrame`` minutes,
+    the way ``AvailabilityHoursRule`` already does — reading ``context.local.start_minutes`` /
+    ``end_minutes`` against ``anchor_minutes``, never a UTC instant. There is no UTC anchor instant
+    to grow stale here, which is what kept ``SlotAlignmentRule`` out of ``DEFAULT_CANON`` (see the
+    module docstring) — that problem does not exist for this rule's *evaluation*, only for
+    resolving ``anchor_minutes`` itself, which is still a per-date adapter concern.
 
-    This judges **the request's own span**, ``request.duration``, and nothing else. It says
-    nothing about a *run* of adjoining bookings the same user holds — a member who books three
-    consecutive 30-minute slots back to back, composing a 90-minute run, passes this rule three
-    separate times against a 30-minute minimum and is never judged against the run's own length,
-    because each individual request is evaluated on its own. A rule that needs to judge the run
-    rather than the request reads ``context.run.duration`` instead, a later addition to the
-    contract (`.claude/rules/rule-engine.md`); nothing here fills that gap, deliberately, since
-    the two questions have different remedies and this rule's only remedy is "book longer".
-    """
-
-    def __init__(self, min_duration: timedelta) -> None:
-        if min_duration <= timedelta(0):
-            raise ValueError(f"MinDurationRule.min_duration must be positive; got {min_duration!r}")
-        self.min_duration = min_duration
-
-    def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
-        if request.duration < self.min_duration:
-            return RuleResult.deny(
-                f"Bookings must be at least {_format_duration(self.min_duration)} long,"
-                f" and this one is {_format_duration(request.duration)}."
-                " Please lengthen it and try again."
-            )
-        return RuleResult.allow()
-
-
-class SlotAlignmentRule(BaseRule):
-    """Bookings must start and end on the ``slot_minutes`` grid anchored at ``anchor``.
-
-    ``anchor`` is a UTC instant, not a clock time: the adapter resolves it as the Space's own local
-    midnight on the booking's date, converted to UTC, never ``opens_at``. Anchoring this rule's grid
-    on ``AvailabilityHoursRule``'s parameter would couple two independent rule instances, and it
-    breaks outright the moment the two are scoped to different day sets — local midnight is a
-    property of the date and the zone alone, both of which the adapter already resolves for exactly
-    this reason.
+    ``anchor_minutes`` is resolved by the adapter as the date's own opening time — never a stored
+    param — falling back to local midnight when no ``availability_hours`` row governs the date.
+    Anchoring on the venue's own opening time, rather than always local midnight, is the entire
+    point of this rule replacing ``SlotAlignmentRule``.
 
     Both bounds are checked independently and **both must land on the grid**: a booking with an
     aligned start and an off-grid end is denied on the end just as an off-grid start is, since the
     calendar this Space renders has no row for either.
+
+    Python's ``%`` is non-negative for a negative left operand, so a start before the anchor lands
+    on the same extended grid with no special case: ``(minutes - anchor_minutes) % session_minutes``
+    is correct whether ``minutes`` falls before or after the anchor.
     """
 
-    def __init__(self, slot_minutes: int, anchor: datetime) -> None:
-        if slot_minutes <= 0:
+    def __init__(self, session_minutes: int, anchor_minutes: int) -> None:
+        if session_minutes <= 0:
             raise ValueError(
-                f"SlotAlignmentRule.slot_minutes must be positive; got {slot_minutes!r}"
+                f"SessionLengthRule.session_minutes must be positive; got {session_minutes!r}"
             )
-        if 1440 % slot_minutes != 0:
+        if 1440 % session_minutes != 0:
             raise ValueError(
-                "SlotAlignmentRule.slot_minutes must divide 1440 (a whole number of slots per day);"
-                f" got {slot_minutes!r}"
+                "SessionLengthRule.session_minutes must divide 1440 (a whole number of sessions "
+                f"per day); got {session_minutes!r}"
             )
-        self.slot_minutes = slot_minutes
-        self.anchor = _require_utc(anchor, "SlotAlignmentRule.anchor")
+        if not (0 <= anchor_minutes < 1440):
+            raise ValueError(
+                "SessionLengthRule.anchor_minutes must be within a single local day "
+                f"(0 <= anchor_minutes < 1440); got {anchor_minutes!r}"
+            )
+        self.session_minutes = session_minutes
+        self.anchor_minutes = anchor_minutes
 
-    def _on_grid(self, instant: datetime) -> bool:
-        return (instant - self.anchor) % timedelta(minutes=self.slot_minutes) == timedelta(0)
+    def _on_grid(self, minutes: int) -> bool:
+        return (minutes - self.anchor_minutes) % self.session_minutes == 0
 
     def evaluate(self, request: BookingRequest, context: Context) -> RuleResult:
-        if not self._on_grid(request.start_at) or not self._on_grid(request.end_at):
+        frame = context.local
+        if not self._on_grid(frame.start_minutes):
             return RuleResult.deny(
-                f"Bookings must start and end on this Space's {self.slot_minutes}-minute grid,"
-                " and this one doesn't line up with it."
-                " Please pick a start and end time from the calendar's own slots."
+                f"Bookings run in whole {self.session_minutes}-minute sessions counted from"
+                " opening time. This one does not start on a session boundary."
+            )
+        if not self._on_grid(frame.end_minutes):
+            return RuleResult.deny(
+                f"Bookings run in whole {self.session_minutes}-minute sessions counted from"
+                " opening time. This one does not end on a session boundary."
             )
         return RuleResult.allow()
 
