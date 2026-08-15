@@ -31,6 +31,7 @@ from generation.llm import (
     build_command,
     interpret_cli_result,
 )
+from generation.param_contract import param_contract_findings
 
 # --------------------------------------------------------------------------------------------
 # Fixtures and fakes
@@ -261,6 +262,49 @@ def test_system_prompt_states_the_fail_closed_policy():
 def test_system_prompt_requires_parameters_on_the_instance():
     assert "PARAMETERS GO ON THE INSTANCE" in SYSTEM_PROMPT
     assert "never as module-level constants" in SYSTEM_PROMPT
+
+
+def test_system_prompt_states_the_unit_a_parameter_arrives_in():
+    """The prompt showed ``timedelta``-typed constructors as the house style and said nothing about
+    units anywhere, so a model wrote one and the adapter handed it an ``int``
+    (``ops/pending/bugs/generated-rule-duration-params-deny-every-booking.md``)."""
+    assert "EVERY ARGUMENT ARRIVES AS A PLAIN INTEGER" in SYSTEM_PROMPT
+    assert "A DURATION ARRIVES AS A NUMBER OF MINUTES" in SYSTEM_PROMPT
+    assert "self.max_duration = timedelta(minutes=max_duration)" in SYSTEM_PROMPT
+
+
+def _worked_examples(prompt):
+    """Every ``class X(BaseRule):`` block the prompt shows, as compilable source.
+
+    Found by indentation rather than by a fence, because the prompt shows its examples unfenced —
+    it forbids the model from returning a fence, so demonstrating one would contradict itself.
+    """
+    blocks = []
+    current = None
+    for line in prompt.splitlines():
+        if line.startswith("class ") and line.rstrip().endswith("(BaseRule):"):
+            current = [line]
+            blocks.append(current)
+        elif current is not None:
+            if line.strip() == "" or line.startswith("    "):
+                current.append(line)
+            else:
+                current = None
+    return ["\n".join(block).rstrip() + "\n" for block in blocks]
+
+
+def test_every_worked_example_in_the_prompt_honours_the_parameter_contract():
+    """The prompt's own examples are held to the check its candidates are held to.
+
+    This is the invariant the defect broke. ``generate_rule`` now rejects a rule that treats an
+    integer parameter as a ``timedelta``, and the Style section was demonstrating exactly that in
+    two of its three worked rules — so a model copying the house style would have been rejected for
+    following it, and would have spent its whole retry budget doing so.
+    """
+    examples = _worked_examples(SYSTEM_PROMPT)
+    assert len(examples) == 3
+    for example in examples:
+        assert param_contract_findings(example) == (), example
 
 
 def test_system_prompt_states_utc_and_forbids_dst_handling():

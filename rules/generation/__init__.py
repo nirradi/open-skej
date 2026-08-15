@@ -19,7 +19,13 @@ guarantee is gone and four properties replace it, none of which depend on the pa
 install it does not move the booking API's dependency set.
 """
 
-from .errors import GenerationError, LLMCallError, RuleRejectedError, SuiteRejectedError
+from .errors import (
+    GenerationError,
+    LLMCallError,
+    RuleContractError,
+    RuleRejectedError,
+    SuiteRejectedError,
+)
 from .generator import SYSTEM_PROMPT, build_prompt, generate_rule, strip_code_fence
 from .harness import (
     ENGINE_MODULE_NAME,
@@ -57,13 +63,24 @@ from .loop import (
     run_generation_loop,
     write_artifact,
 )
+from .param_contract import (
+    CONTRACT_SUMMARY,
+    constructor_params,
+    describe_param_contract_findings,
+    param_contract_findings,
+)
 from .tester import TESTER_SYSTEM_PROMPT, build_test_prompt, generate_tests
 
 __all__ = [
     "GenerationError",
     "LLMCallError",
+    "RuleContractError",
     "RuleRejectedError",
     "SuiteRejectedError",
+    "CONTRACT_SUMMARY",
+    "constructor_params",
+    "param_contract_findings",
+    "describe_param_contract_findings",
     "generate_rule",
     "build_prompt",
     "strip_code_fence",

@@ -55,10 +55,16 @@ class StubMaxDurationRule(BaseRule):
 
     ``max_duration`` arrives as a plain integer number of minutes — the wire shape the manifest
     declares (``kind: "integer", unit: "minutes"``) and the shape an admin form submits — and is
-    converted to a ``timedelta`` here, in the constructor, exactly as a real generated rule would:
+    converted to a ``timedelta`` here, in the constructor, exactly as a real generated rule must:
     the adapter that builds a rule instance (``app.rule_catalog``) hands over validated params
     verbatim, with no unit-aware coercion of its own, so converting a unit-labelled parameter into
     the type the rule's own logic needs is the rule's job, not the adapter's.
+
+    That was, until stream 9, the only place the contract was written down at all — which is how a
+    real generated rule came to take a ``timedelta`` and refuse every booking in its Space
+    (``ops/pending/bugs/generated-rule-duration-params-deny-every-booking.md``). The Generator's
+    system prompt now teaches it and ``generation.param_contract`` enforces it before any candidate
+    is accepted. This class is the shape that check passes, and its own test asserts exactly that.
     """
 
     def __init__(self, max_duration):
