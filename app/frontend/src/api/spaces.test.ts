@@ -23,6 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   API_BASE_URL,
   approveAccessRequest,
+  archiveResource,
   archiveSpace,
   createInvitation,
   createResource,
@@ -559,6 +560,37 @@ describe('updateResource', () => {
     const result = await updateResource(space.public_id, resource.id, { name: 'Nope' })
 
     expect(result).toEqual({ outcome: 'conflict', message: detail })
+  })
+})
+
+describe('archiveResource', () => {
+  it('posts to the archive URL and returns the archived Resource', async () => {
+    const archived: Resource = { ...resource, archived_at: '2026-07-21T09:00:00Z' }
+    fetchMock.mockResolvedValue(jsonResponse(200, archived))
+
+    const result = await archiveResource(space.public_id, resource.id)
+
+    const { url, init } = lastRequest()
+    expect(url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/resources/${resource.id}/archive`)
+    expect(init.method).toBe('POST')
+    expect(result).toEqual({ outcome: 'ok', data: archived })
+  })
+
+  it('reports an already-archived Resource as a conflict', async () => {
+    const detail = 'This Resource is archived and can no longer be changed.'
+    fetchMock.mockResolvedValue(jsonResponse(409, { detail }))
+
+    const result = await archiveResource(space.public_id, resource.id)
+
+    expect(result).toEqual({ outcome: 'conflict', message: detail })
+  })
+
+  it('reports a Resource of another Space as not_found', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(404, { detail: 'Not found' }))
+
+    const result = await archiveResource(space.public_id, 999_999)
+
+    expect(result.outcome).toBe('not_found')
   })
 })
 

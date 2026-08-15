@@ -172,6 +172,24 @@ not a second surface on `SpacePage`, for the same reason every other write on th
 home: `SpacePage` is where a *member* picks a Resource to book against, and venue management
 belongs with the rest of it on the console a member never reaches.
 
+**A Resource retires; it is never deleted.** `POST
+/spaces/{public_id}/resources/{resource_id}/archive`, admin+, is the whole removal mechanism, and
+there is no `DELETE`: `bookings.resource_id` points at the row, so a Resource that vanished would
+take every booking made against it with it. Archiving only stamps `archived_at` — the row, and its
+booking history, survive — matching `archive_space`. There is deliberately no un-archive endpoint
+either, so archiving is a one-way door; a Resource retired by mistake is recreated under a new row,
+not restored. `ResourcesPanel` is this lifecycle's only UI: it calls `updateResource` to rename and
+`archiveResource` to retire, both behind the same two-step confirm-in-place `SpaceRulesPage`'s
+`RuleRow` uses for its own delete, and its copy says "Retire" — never "Delete" or "Remove" — because
+the row is kept. A retired Resource stays in the admin's list, marked, offering neither control:
+both endpoints reject an already-archived Resource with `conflict`, so there is nothing left on that
+row to do. This is a decision, not a gap left for a future delete: if a genuine destructive delete is
+wanted later it is a data-retention decision made deliberately, not one smuggled in as a Resource
+lifecycle default. `listResources` excludes archived Resources unless asked otherwise, so the
+single-Resource redirect on `SpacePage` (below) counts only active ones — retiring the second of two
+Resources in a Space turns it into a redirecting single-Resource Space, which is correct and needs no
+special case.
+
 **`opens_at_minutes` and `closes_at_minutes` are stored together, in one `availability_hours` row,
 required together.** Both are `required` parameters of that rule type, so a row holding one bound
 without the other is not a state the type can build from, and it is refused rather than stored. A

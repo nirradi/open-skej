@@ -8,8 +8,9 @@
  *
  * Two behaviours are pinned deliberately, because both are easy to lose:
  *
- * 1. **A created Resource joins the list in place.** No refetch of the whole
- *    panel — the new row appears from the create response alone.
+ * 1. **A created (or renamed, or retired) Resource joins/updates the list in
+ *    place.** No refetch of the whole panel — the row reflects the mutation's
+ *    own response.
  * 2. **`forbidden` is handled explicitly**, not merely assumed away by the
  *    fact that the panel is only rendered for an admin — `messageFor` renders
  *    it like any other refusal.
@@ -18,13 +19,15 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createResource, listResources } from '../api'
+import { archiveResource, createResource, listResources, updateResource } from '../api'
 import { conflict, failed, forbidden, makeResource, makeSpace, ok } from './fixtures'
 import { ResourcesPanel } from './ResourcesPanel'
 
 vi.mock('../api', () => ({
   listResources: vi.fn(),
   createResource: vi.fn(),
+  updateResource: vi.fn(),
+  archiveResource: vi.fn(),
 }))
 
 beforeEach(() => {
@@ -170,5 +173,176 @@ describe('ResourcesPanel', () => {
     expect(screen.getByTestId('resource-name').hasAttribute('disabled')).toBe(true)
     expect(screen.getByTestId('resource-create-submit').hasAttribute('disabled')).toBe(true)
     expect(screen.getByTestId('resources-archived')).toBeTruthy()
+  })
+
+  it('disables rename and retire on an archived Space', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1 })]))
+
+    renderPanel(makeSpace({ archived_at: '2026-07-20T09:00:00.000Z' }))
+
+    await screen.findByTestId('resource-1')
+    expect(screen.getByTestId('resource-1-rename-start').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByTestId('resource-1-retire-start').hasAttribute('disabled')).toBe(true)
+  })
+
+  it('renames a Resource and shows the new name, with no refetch', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    const renamed = makeResource({ id: 1, name: 'Center Court' })
+    vi.mocked(updateResource).mockResolvedValue(ok(renamed))
+    renderPanel(makeSpace({ public_id: 'sp_7f3a9c' }))
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-rename-start'))
+    fireEvent.change(screen.getByTestId('resource-1-rename-input'), {
+      target: { value: 'Center Court' },
+    })
+    fireEvent.click(screen.getByTestId('resource-1-rename-save'))
+
+    expect(vi.mocked(updateResource)).toHaveBeenCalledWith('sp_7f3a9c', 1, {
+      name: 'Center Court',
+    })
+    expect(await screen.findByTestId('resource-1-name')).toHaveProperty(
+      'textContent',
+      'Center Court',
+    )
+    expect(vi.mocked(listResources)).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels a rename without saving', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-rename-start'))
+    fireEvent.change(screen.getByTestId('resource-1-rename-input'), {
+      target: { value: 'Something else' },
+    })
+    fireEvent.click(screen.getByTestId('resource-1-rename-cancel'))
+
+    expect(vi.mocked(updateResource)).not.toHaveBeenCalled()
+    expect(screen.getByTestId('resource-1-name').textContent).toBe('Court A')
+  })
+
+  it('refuses a whitespace-only rename without asking the server', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-rename-start'))
+    fireEvent.change(screen.getByTestId('resource-1-rename-input'), { target: { value: '   ' } })
+    fireEvent.click(screen.getByTestId('resource-1-rename-save'))
+
+    expect(await screen.findByTestId('resource-1-error')).toBeTruthy()
+    expect(vi.mocked(updateResource)).not.toHaveBeenCalled()
+  })
+
+  it('asks before retiring, and cancelling makes no request', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-retire-start'))
+    expect(screen.getByTestId('resource-1-retire-confirm')).toBeTruthy()
+    expect(vi.mocked(archiveResource)).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByTestId('resource-1-retire-cancel'))
+
+    expect(screen.queryByTestId('resource-1-retire-confirm')).toBeNull()
+    expect(vi.mocked(archiveResource)).not.toHaveBeenCalled()
+  })
+
+  it('retires a Resource and the row becomes a retired row with no controls', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    const archived = makeResource({
+      id: 1,
+      name: 'Court A',
+      archived_at: '2026-07-21T09:00:00.000Z',
+    })
+    vi.mocked(archiveResource).mockResolvedValue(ok(archived))
+    renderPanel(makeSpace({ public_id: 'sp_7f3a9c' }))
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-retire-start'))
+    fireEvent.click(screen.getByTestId('resource-1-retire-confirm-yes'))
+
+    expect(vi.mocked(archiveResource)).toHaveBeenCalledWith('sp_7f3a9c', 1)
+    expect(await screen.findByTestId('resource-archived-1')).toBeTruthy()
+    expect(screen.queryByTestId('resource-1-rename-start')).toBeNull()
+    expect(screen.queryByTestId('resource-1-retire-start')).toBeNull()
+    expect(vi.mocked(listResources)).toHaveBeenCalledTimes(1)
+  })
+
+  it('a retired row offers neither rename nor retire', async () => {
+    vi.mocked(listResources).mockResolvedValue(
+      ok([makeResource({ id: 1, archived_at: '2026-07-10T09:00:00.000Z' })]),
+    )
+    renderPanel()
+
+    await screen.findByTestId('resource-archived-1')
+
+    expect(screen.queryByTestId('resource-1-rename-start')).toBeNull()
+    expect(screen.queryByTestId('resource-1-retire-start')).toBeNull()
+  })
+
+  it('shows a forbidden rename as an error on the row', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    vi.mocked(updateResource).mockResolvedValue(forbidden())
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-rename-start'))
+    fireEvent.change(screen.getByTestId('resource-1-rename-input'), {
+      target: { value: 'Court Z' },
+    })
+    fireEvent.click(screen.getByTestId('resource-1-rename-save'))
+
+    const error = await screen.findByTestId('resource-1-error')
+    expect(error.textContent).toBe("You don't have permission to do that.")
+  })
+
+  it('shows a conflict rename as an error on the row', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    vi.mocked(updateResource).mockResolvedValue(
+      conflict('This Resource is archived and can no longer be changed.'),
+    )
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-rename-start'))
+    fireEvent.change(screen.getByTestId('resource-1-rename-input'), {
+      target: { value: 'Court Z' },
+    })
+    fireEvent.click(screen.getByTestId('resource-1-rename-save'))
+
+    const error = await screen.findByTestId('resource-1-error')
+    expect(error.textContent).toBe('This Resource is archived and can no longer be changed.')
+  })
+
+  it('shows a forbidden retire as an error on the row', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    vi.mocked(archiveResource).mockResolvedValue(forbidden())
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-retire-start'))
+    fireEvent.click(screen.getByTestId('resource-1-retire-confirm-yes'))
+
+    const error = await screen.findByTestId('resource-1-error')
+    expect(error.textContent).toBe("You don't have permission to do that.")
+  })
+
+  it('shows a conflict retire as an error on the row', async () => {
+    vi.mocked(listResources).mockResolvedValue(ok([makeResource({ id: 1, name: 'Court A' })]))
+    vi.mocked(archiveResource).mockResolvedValue(
+      conflict('This Resource is archived and can no longer be changed.'),
+    )
+    renderPanel()
+    await screen.findByTestId('resource-1')
+
+    fireEvent.click(screen.getByTestId('resource-1-retire-start'))
+    fireEvent.click(screen.getByTestId('resource-1-retire-confirm-yes'))
+
+    const error = await screen.findByTestId('resource-1-error')
+    expect(error.textContent).toBe('This Resource is archived and can no longer be changed.')
   })
 })

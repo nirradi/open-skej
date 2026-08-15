@@ -1,6 +1,7 @@
 export {
   API_BASE_URL,
   approveAccessRequest,
+  archiveResource,
   archiveSpace,
   authenticatedRequest,
   cancelResourceBooking,
