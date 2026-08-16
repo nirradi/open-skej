@@ -537,7 +537,7 @@ function RuleRow({
   // The row's own stored params/applies_to can change out from under a local
   // edit — another admin's write, or this component's own successful save
   // landing a fresh `updated_at` — and the drafts should reset to match, the
-  // same "compare during render" idiom `SpaceSchedulePanel`'s `scheduleKey`
+  // same "compare during render" idiom `SpaceSettingsPanel`'s `settingsKey`
   // uses rather than an effect (the `set-state-in-effect` lint this repo
   // enforces).
   const rowKey = `${rule.id}:${JSON.stringify(rule.params)}:${JSON.stringify(rule.applies_to)}:${rule.enabled}`

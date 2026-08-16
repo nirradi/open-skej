@@ -10,7 +10,7 @@ import { MembersPanel } from './MembersPanel'
 import { messageFor } from './messages'
 import { ResourcesPanel } from './ResourcesPanel'
 import { ShareLink } from './ShareLink'
-import { SpaceSchedulePanel } from './SpaceSchedulePanel'
+import { SpaceSettingsPanel } from './SpaceSettingsPanel'
 
 type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: string } | null
 
@@ -20,13 +20,13 @@ type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: stri
  * ## What this screen is, and what it is not
  *
  * It manages **people** — members and their roles, the access-request queue,
- * invitations, and archiving — the Space's **timezone**, the one property of
- * its schedule that stays a plain field rather than a rule instance (see
- * `SpaceSchedulePanel`), and its **Resources** — the bookable calendars a
- * venue holds (`ResourcesPanel`). Every booking constraint — operating hours,
- * slot interval, duration and frequency caps — is a `space_rules` row, edited
- * on its own page at `/s/{public_id}/rules`, linked from here rather than
- * duplicated into this dashboard.
+ * invitations, and archiving — the Space's own **name, description and
+ * timezone**, the three plain columns on `spaces` that stay fields rather
+ * than rule instances (see `SpaceSettingsPanel`), and its **Resources** — the
+ * bookable calendars a venue holds (`ResourcesPanel`). Every booking
+ * constraint — operating hours, slot interval, duration and frequency caps —
+ * is a `space_rules` row, edited on its own page at `/s/{public_id}/rules`,
+ * linked from here rather than duplicated into this dashboard.
  *
  * ## Resource management lives here, not on the Space page
  *
@@ -241,7 +241,7 @@ function SpaceAdmin({
         onMembershipChanged={onMembershipChanged}
       />
       <InvitationsPanel space={space} />
-      <SpaceSchedulePanel space={space} onSpaceChanged={onSpaceChanged} />
+      <SpaceSettingsPanel space={space} onSpaceChanged={onSpaceChanged} />
       {/* Nothing else on this page reads the Resource list today, so `onChanged`
           is a no-op — it exists so a future caller (a Resources count, a
           single-Resource redirect check) is a wiring change, not a rewrite. */}

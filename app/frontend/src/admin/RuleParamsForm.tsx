@@ -19,7 +19,7 @@ import type { RuleParamRead } from '../api'
  * Values are held as strings throughout — the shape every HTML input already
  * produces — and converted to the wire's shape only at the edges
  * (`ruleParamValuesToWire`), the same input-is-a-string,
- * convert-at-the-boundary shape `SpaceSchedulePanel` already uses for its own
+ * convert-at-the-boundary shape `SpaceSettingsPanel` already uses for its own
  * numeric and time fields. Both `kind`s are a plain `number` on the wire —
  * `"local_time"` describes the widget (`<input type="time">`, an `"HH:MM"`
  * display string), never the storage type: the value underneath it is minutes

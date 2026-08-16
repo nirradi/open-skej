@@ -162,8 +162,9 @@ read and written only through the rules API below, and **there is deliberately n
 scalar field can only ever name a type's one *unscoped* (`applies_to IS NULL`) instance: it has
 nowhere to say which of two `availability_hours` rows it means, or to name one scoped to Saturdays,
 so keeping one alongside the rules API would leave two paths answering "what does this Space
-enforce" — the bug class this schema keeps writing down. `SpaceSchedulePanel` edits only the Space's
-`timezone`, the one property its owner calls truly configurable and not a rule; every rule instance,
+enforce" — the bug class this schema keeps writing down. `SpaceSettingsPanel` is the one screen that
+edits `name`, `description` and `timezone` — the three columns this endpoint serves and the only
+properties of a Space its owner calls truly configurable rather than a rule; every rule instance,
 including the six that were once columns on `spaces`, is created and edited at `/s/{public_id}/rules`
 (`SpaceRulesPage`). A Resource has no configuration to edit;
 `PATCH /spaces/{public_id}/resources/{resource_id}` renames it and nothing more. `POST

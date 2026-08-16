@@ -58,8 +58,8 @@ type Load = { kind: 'resources'; resources: Resource[] } | { kind: 'error'; mess
  *
  * `SpaceAdmin` already renders the archived banner above every panel; this
  * one additionally disables its own name field and submit button when
- * `space.archived_at !== null`, matching `SpaceSchedulePanel`'s
- * `schedule-archived` notice — a panel that leaves an enabled control that
+ * `space.archived_at !== null`, matching `SpaceSettingsPanel`'s
+ * `settings-archived` notice — a panel that leaves an enabled control that
  * always 409s is a panel that fails silently.
  */
 export function ResourcesPanel({
