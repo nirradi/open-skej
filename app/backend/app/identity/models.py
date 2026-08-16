@@ -243,6 +243,15 @@ class Space(Base):
     created_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
     archived_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
+    # A monotonically increasing counter, bumped on every write to one of this Space's own
+    # `space_rules` rows (`app.identity.service._bump_rules_version`) — never decremented, never
+    # reset. It exists solely so `app.projection_cache` has something that changes exactly when a
+    # cached rules-only projection for this Space would stop being correct; nothing else in this
+    # schema reads it. A plain integer rather than a timestamp: two writes inside the same
+    # millisecond must still be told apart, and an integer can never collide with itself the way a
+    # clock with limited resolution could. `server_default` so an existing Space backfills to a
+    # real value instead of `NULL` when this column is added.
+    rules_version: Mapped[int] = mapped_column(Integer, default=1, server_default=text("1"))
 
     __table_args__ = (
         # Guards against a caller passing an explicit short public_id and

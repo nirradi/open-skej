@@ -91,7 +91,7 @@ through it rather than through ``REGISTRY.get`` directly.
 import logging
 import math
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -653,6 +653,76 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     buildable.sort(key=lambda entry: (entry[0], entry[1]))
     canon.extend(rule for _, _, rule in buildable)
     return tuple(canon)
+
+
+@dataclass(frozen=True)
+class NotProjectedRuleType:
+    """One rule type this Space has configured that the projection (``app.projection``) never
+    evaluates at all — see that module's docstring, "Project only the rules that are cheap and
+    exact". A member looking at a projected calendar needs to know this exists, because the grid
+    it colours in is not the whole story: a booking this grid shows as bookable can still be
+    denied at booking time by a rule of one of these types.
+    """
+
+    rule_type: str
+    label: str
+
+
+def projectable_config(
+    config: SpaceRuleConfig,
+) -> tuple[SpaceRuleConfig, tuple[NotProjectedRuleType, ...]]:
+    """Split ``config`` into the rules-only projection can safely evaluate, and what it excludes.
+
+    A row is excluded exactly when its registered type resolves *and* declares
+    ``reads_history=True`` — the projection's whole reason for existing is that a rule type with
+    ``reads_history=False`` is a pure function of the candidate interval and the date, so its
+    verdict cannot depend on which member is asking or on any Resource's own bookings, which is
+    what makes the result cacheable per Space and per date rather than per member
+    (``app.projection_cache``'s own docstring). A row whose type does *not* resolve at all is kept
+    rather than excluded — that is a different failure (a configuration-integrity problem
+    ``_build_canon`` turns into a fail-closed denial for the day, module docstring, "a rule that
+    cannot be built is a denial, not a skip"), not a rule this function judges too expensive to
+    project. A disabled row is kept too, unexamined: ``_build_canon`` already drops it regardless
+    of what this function decides, and reporting a paused rule as "not projected" would tell a
+    member about a constraint that is not actually in force.
+
+    Driven entirely by ``RuleType.reads_history`` — never a rule type's name — so a new hand-written
+    or generated type is classified correctly the moment it registers, with no edit needed here.
+    See the module docstring's own reasoning (mirrored in ``app/projection.py``'s "Project only the
+    rules that are cheap and exact") for why ``reads_history`` is safe to trust for this: it can
+    never be *understated* by a generated type's own manifest (``rules/generation/manifest.py``'s
+    ``_mentions_history``, and ``rules/rules/safety.py``'s ban on ``getattr``/dunder access, which
+    is what keeps a rule from reaching ``context.history`` some way the source scan would miss).
+
+    Returns a new ``SpaceRuleConfig`` (same ``timezone``/``lookup``, ``rules`` narrowed) plus every
+    excluded type, deduplicated by ``rule_type`` and sorted by it for a deterministic response —
+    two rows of the same excluded type report once, not twice.
+    """
+    kept: list[SpaceRuleRow] = []
+    excluded: dict[str, str] = {}
+
+    for row in config.rules:
+        if not row.enabled:
+            # `_build_canon` drops a disabled row regardless of its type — keeping it here changes
+            # nothing about what gets built, and excluding it from projection would misreport a
+            # rule that is not actually in force as one the member should be warned about.
+            kept.append(row)
+            continue
+
+        resolved = config.lookup(row.rule_type)
+        if resolved is not None and resolved.reads_history:
+            excluded[row.rule_type] = resolved.label
+            continue
+
+        kept.append(row)
+
+    return (
+        replace(config, rules=tuple(kept)),
+        tuple(
+            NotProjectedRuleType(rule_type=rule_type, label=label)
+            for rule_type, label in sorted(excluded.items())
+        ),
+    )
 
 
 @dataclass(frozen=True)

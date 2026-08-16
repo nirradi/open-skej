@@ -75,6 +75,14 @@ repeat across starts the way a cache would help with). It does not know what a "
 ``RuleResult`` carries only user-facing ``fail_reason`` text (``rules/rules/interfaces.py``), never
 a rule identity, so ``reason_code`` is derived from that text alone; see
 ``_derive_reason_code`` for exactly how POC-grade that derivation is.
+
+**``project_days`` itself never sees a Resource's own bookings.** ``canon_for_day`` runs the
+Space's real rules and nothing else — no synthetic "already booked" rule belongs in it. Whether a
+candidate overlaps an existing booking is applied afterward, by ``clip_overlap``, against the
+already-computed result: interval arithmetic over one Resource's own bookings, never a further
+``evaluate_request`` call. That split is what makes a ``project_days`` result depend only on the
+Space and the date — never on which Resource or which member is asking — which is the property
+``app.projection_cache`` caches against; see that module's and ``clip_overlap``'s own docstrings.
 """
 
 from __future__ import annotations
@@ -91,6 +99,7 @@ __all__ = [
     "DayGrid",
     "DayProjection",
     "project_days",
+    "clip_overlap",
 ]
 
 #: A local calendar day is 1440 minutes. ``DayGrid`` carries no day-length field of its own — a POC
@@ -122,7 +131,9 @@ class SlotProjection:
 
     def __post_init__(self) -> None:
         if self.start_minutes < 0:
-            raise ValueError(f"SlotProjection.start_minutes must be non-negative; got {self.start_minutes!r}")
+            raise ValueError(
+                f"SlotProjection.start_minutes must be non-negative; got {self.start_minutes!r}"
+            )
         if self.min_slots < 0 or self.max_slots < 0:
             raise ValueError(
                 f"SlotProjection.min_slots/max_slots must be non-negative; got "
@@ -351,3 +362,119 @@ def project_days(
         )
 
     return tuple(projections)
+
+
+def _clip_slot(
+    slot: SlotProjection,
+    *,
+    slot_minutes: int,
+    intervals: Sequence[tuple[float, float]],
+    reason_code: str,
+    reason_text: str,
+) -> SlotProjection:
+    """Clip one already-allowed ``SlotProjection`` against ``intervals`` (see ``clip_overlap``).
+
+    A denied slot (``min_slots == 0``) is returned unchanged — it was never bookable in the first
+    place, so there is nothing an existing booking could add to that verdict, and this function
+    must not overwrite a real rule's own ``reason_code``/``reason_text`` with an overlap one that
+    did not actually decide anything here.
+    """
+    if slot.min_slots == 0:
+        return slot
+
+    start = slot.start_minutes
+
+    for interval_start, interval_end in intervals:
+        if interval_start <= start < interval_end:
+            # The start itself is already inside a booking — nothing from here is bookable,
+            # regardless of what the rules-only scan found.
+            return SlotProjection(
+                start_minutes=start,
+                min_slots=0,
+                max_slots=0,
+                reason_code=reason_code,
+                reason_text=reason_text,
+            )
+
+    # The nearest booking that starts *after* this slot's own start is the only one that can
+    # shorten the contiguous run the rules-only scan already found — a booking further out can
+    # never bind tighter than one already closer in (module docstring's own "top of the
+    # contiguous run" reasoning, carried one step further here).
+    upcoming_starts = [interval_start for interval_start, _ in intervals if interval_start > start]
+    ceiling = min(upcoming_starts) if upcoming_starts else None
+
+    rules_only_end = start + slot.max_slots * slot_minutes
+    capped_end = rules_only_end if ceiling is None else min(rules_only_end, ceiling)
+    clipped_max_slots = int((capped_end - start) // slot_minutes)
+
+    if clipped_max_slots < slot.min_slots:
+        # Even the shortest allowed length now collides with a booking — the whole start is
+        # unbookable, not merely shortened.
+        return SlotProjection(
+            start_minutes=start,
+            min_slots=0,
+            max_slots=0,
+            reason_code=reason_code,
+            reason_text=reason_text,
+        )
+
+    if clipped_max_slots == slot.max_slots:
+        return slot
+
+    return SlotProjection(
+        start_minutes=start, min_slots=slot.min_slots, max_slots=clipped_max_slots
+    )
+
+
+def clip_overlap(
+    day: DayProjection,
+    intervals: Sequence[tuple[float, float]],
+    *,
+    reason_code: str,
+    reason_text: str,
+) -> DayProjection:
+    """Shorten ``day``'s already-allowed runs so none of them invite a booking that would overlap
+    an existing one — by interval arithmetic alone, never a second ``evaluate_request`` call.
+
+    **Why this is a separate step from the scan, and not another synthetic rule in the canon.**
+    Whether a candidate overlaps an existing booking is a fact about one Resource's own calendar,
+    not about the Space's rules — the same distinction ``app.db.driver.BookingDriver`` already
+    draws between an integrity invariant and a configurable rule. Folding it into the canon (as a
+    prior version of this endpoint's ``_ExistingBookingRule`` did) makes the projection depend on
+    which Resource is asked about, which defeats caching the projection per Space and per date
+    (``app.projection_cache``) — every Resource in a Space would need its own cache entry, keyed on
+    a live table that changes on every booking made or cancelled. Clipping the already-computed,
+    Resource-independent rules-only answer against one Resource's own bookings afterward keeps the
+    cache Resource-agnostic while still never reporting an overlapping slot as bookable.
+
+    ``intervals`` are the Resource's own bookings for the day, as ``(start_minutes, end_minutes)``
+    pairs from *this day's own local midnight* — the identical vocabulary ``DayGrid`` and
+    ``SlotProjection.start_minutes`` already use (module docstring), so the caller has done the one
+    timezone conversion this function itself refuses to do. A booking spanning midnight contributes
+    an interval whose bound extends past ``[0, 1440)``; ordinary comparison against a slot's own
+    in-range ``start_minutes`` handles that correctly without this function needing to know the day
+    has an edge.
+
+    Only a slot the rules-only scan already allowed (``min_slots > 0``) is ever touched — a slot the
+    canon itself denied keeps that denial's own ``reason_code``/``reason_text`` verbatim, so an
+    admin-configured rule's own message is never silently replaced by "already booked" for a slot
+    it was never going to offer anyway. A touched slot either keeps its own ``min_slots`` with a
+    shorter ``max_slots`` (the run is still offerable, just not as far), or is zeroed out with
+    ``reason_code``/``reason_text`` when even the shortest allowed length would now overlap.
+    """
+    clipped_slots = tuple(
+        _clip_slot(
+            slot,
+            slot_minutes=day.slot_minutes,
+            intervals=intervals,
+            reason_code=reason_code,
+            reason_text=reason_text,
+        )
+        for slot in day.slots
+    )
+    return DayProjection(
+        date=day.date,
+        slot_minutes=day.slot_minutes,
+        first_slot_minutes=day.first_slot_minutes,
+        slots=clipped_slots,
+    )

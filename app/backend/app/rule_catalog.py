@@ -159,6 +159,17 @@ class RuleCatalog:
     def __init__(self) -> None:
         self._hoisted: dict[str, RuleType] = {}
         self._last_reload_at: float | None = None
+        #: Bumped every time `reload` swaps in a new `_hoisted` map — the projection cache's
+        #: coarse, process-wide half of the "invalidate on a generated-type change" key
+        #: (`app.projection_cache`'s own module docstring). Coarse deliberately: this catalog has
+        #: no record of *which* Space's rows name which generated type, so a reload — a newly
+        #: hoisted type, a row that stopped hoisting, a row whose bytecode changed — invalidates
+        #: every Space's cached projection at once rather than only the ones actually affected.
+        #: That over-invalidates, which costs a re-scan nobody strictly needed; it never
+        #: under-invalidates, which would serve a stale answer past a real change. Starts at 0 and
+        #: only ever increments, matching `Space.rules_version`'s own "cannot go backwards"
+        #: contract.
+        self.generation: int = 0
 
     def get(self, rule_type: str) -> RuleType | None:
         """`REGISTRY` first, then the hoisted generated types. No database access, ever.
@@ -288,6 +299,11 @@ class RuleCatalog:
 
         self._hoisted = hoisted
         self._last_reload_at = time.monotonic()
+        # Unconditional, even when the new map is byte-for-byte the map it replaces: telling the
+        # two apart would mean comparing every hoisted `RuleType` (down through its `build`
+        # closures) for equality, which buys nothing a cache miss followed by an identical answer
+        # does not already give for free. See `self.generation`'s own docstring.
+        self.generation += 1
 
     def hoist(self, row: GeneratedRuleType) -> RuleType:
         """Turn one row into a constructible `RuleType`, re-proving every safety property as it

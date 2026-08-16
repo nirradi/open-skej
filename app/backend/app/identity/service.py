@@ -550,6 +550,23 @@ def get_space_rule(session: Session, space: Space, rule_id: int) -> SpaceRule:
     return rule
 
 
+def _bump_rules_version(space: Space) -> None:
+    """Mark ``space``'s rule configuration as changed, for ``app.projection_cache``'s key.
+
+    Called by every write below that changes what a ``space_rules`` row would resolve to —
+    create, update, delete — never by a read. A plain increment on the ORM attribute, folded into
+    the same transaction the caller is about to commit: there is no separate round trip, so a
+    projection cache lookup racing this write either sees the version from before the write
+    (before this commit is visible) or the version from after it (after), never a version that
+    claims the write happened when it has not yet, or vice versa.
+
+    ``update_space_rule`` reaches this identically whether the changed field is ``params``,
+    ``applies_to`` or ``enabled`` — pausing or unpausing a row changes what the assembled canon
+    does exactly as much as editing its params or its scope does, so all three invalidate alike.
+    """
+    space.rules_version = (space.rules_version or 0) + 1
+
+
 def create_space_rule(
     session: Session,
     space: Space,
@@ -577,6 +594,7 @@ def create_space_rule(
         enabled=enabled,
     )
     session.add(rule)
+    _bump_rules_version(space)
     session.commit()
     return rule
 
@@ -620,6 +638,8 @@ def update_space_rule(
         assert payload.enabled is not None  # SpaceRuleUpdate rejects an explicit null.
         rule.enabled = payload.enabled
 
+    if fields:
+        _bump_rules_version(space)
     session.commit()
     return rule
 
@@ -636,6 +656,7 @@ def delete_space_rule(session: Session, space: Space, *, rule_id: int) -> None:
     _require_active(space)
     rule = get_space_rule(session, space, rule_id)
     session.delete(rule)
+    _bump_rules_version(space)
     session.commit()
 
 

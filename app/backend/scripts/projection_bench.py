@@ -76,6 +76,7 @@ from app.rules_stub import (  # noqa: E402
     _build_local_frame,
     _local_date,
     _resolve_run,
+    projectable_config,
     resolve_day_schedule,
 )
 from app.projection import DayGrid, project_days  # noqa: E402
@@ -94,10 +95,13 @@ __all__ = [
     "SimulatedGeneratedRule",
     "BenchmarkCase",
     "BenchmarkResult",
+    "Task1ComparisonResult",
     "build_synthetic_history",
     "run_case",
     "run_all",
+    "run_task1_comparison",
     "format_table",
+    "format_task1_comparison_table",
     "main",
 ]
 
@@ -290,8 +294,10 @@ class BenchmarkCase:
 
     @property
     def label(self) -> str:
-        canon_label = "hours-only" if not self.with_session_length else (
-            "seeded+ai" if self.with_extra_rule else "seeded   "
+        canon_label = (
+            "hours-only"
+            if not self.with_session_length
+            else ("seeded+ai" if self.with_extra_rule else "seeded   ")
         )
         return (
             f"slot={self.slot_minutes:>2}m  "
@@ -414,6 +420,131 @@ def run_supplementary(*, repeats: int) -> list[BenchmarkResult]:
     return results
 
 
+@dataclass(frozen=True)
+class Task1ComparisonResult:
+    """One side of ``run_task1_comparison``'s before/after — not a ``BenchmarkCase``, since the two
+    sides differ in *which config and history run at all*, not in a single axis value the way every
+    other case in this script does."""
+
+    label: str
+    calls: int
+    median_ms: float
+    us_per_call: float
+
+
+def _build_config_with_frequency_cap(*, with_duration_cap: bool) -> SpaceRuleConfig:
+    """The seeded canon (module docstring, "the exact two ``space_rules`` rows ``create_space``
+    seeds") plus a real, registry-declared ``max_bookings_per_week`` row — ``reads_history=True``
+    — the shape ``app.rules_stub.projectable_config`` (task 1) actually removes from a projected
+    canon. Unlike ``SimulatedGeneratedRule`` above, this is a real ``SpaceRuleRow`` resolved through
+    ``REGISTRY``, so ``projectable_config`` can act on it at all; ``run_task1_comparison`` is the
+    only caller.
+    """
+    rows = [
+        SpaceRuleRow(
+            id=1,
+            rule_type="availability_hours",
+            params={"opens_at_minutes": OPENS_AT_MINUTES, "closes_at_minutes": CLOSES_AT_MINUTES},
+        ),
+        SpaceRuleRow(id=2, rule_type="session_length", params={"session_minutes": SESSION_MINUTES}),
+        SpaceRuleRow(id=4, rule_type="max_bookings_per_week", params={"max_bookings": 5}),
+    ]
+    if with_duration_cap:
+        rows.append(
+            SpaceRuleRow(
+                id=3,
+                rule_type="max_duration",
+                params={"max_duration_minutes": MAX_DURATION_MINUTES},
+            )
+        )
+    return SpaceRuleConfig(timezone=SPACE_TZ, rules=tuple(rows))
+
+
+def _run_task1_side(
+    *, label: str, config: SpaceRuleConfig, history: tuple[EngineBookingRecord, ...], repeats: int
+) -> Task1ComparisonResult:
+    def canon_for_day(on_date: date) -> tuple[BaseRule, ...]:
+        return _build_canon(config, on_date)
+
+    make_request_and_context = _make_context_builder(config, history)
+    grids = _build_grids(30)
+
+    durations_ms: list[float] = []
+    calls = 0
+    for _ in range(repeats):
+        counter = [0]
+        start = time.perf_counter()
+        project_days(
+            canon_for_day=canon_for_day,
+            make_request_and_context=make_request_and_context,
+            days=grids,
+            early_stop=True,
+            call_counter=counter,
+        )
+        durations_ms.append((time.perf_counter() - start) * 1000)
+        calls = counter[0]
+
+    median_ms = statistics.median(durations_ms)
+    return Task1ComparisonResult(
+        label=label,
+        calls=calls,
+        median_ms=median_ms,
+        us_per_call=(median_ms * 1000) / calls if calls else 0.0,
+    )
+
+
+def run_task1_comparison(*, repeats: int) -> list[Task1ComparisonResult]:
+    """Task 1's actual before/after, not a synthetic stand-in for it.
+
+    **Unfiltered**: the real per-booking canon a Space configuring a genuine
+    ``max_bookings_per_week`` row pays for today — ``_build_canon`` runs the row straight, and a
+    real 50-booking history is loaded and scanned by ``_resolve_run`` for every candidate, exactly
+    as ``app.rules_stub.evaluate()`` does per real booking.
+
+    **Filtered**: the projected canon ``app.routers.bookable`` now serves a calendar from —
+    ``app.rules_stub.projectable_config`` removes the ``max_bookings_per_week`` row before the scan
+    ever runs, so no history is loaded and no history is scanned, matching this endpoint's own
+    ``_projection_context_builder`` (empty history, the request's own run alone).
+
+    Both sides project the identical 7-day, 30-minute-slot window with ``max_duration`` set and
+    ``early_stop`` — the pass condition's own axis — so the row that changes between them is
+    exactly, and only, task 1's own filter.
+    """
+    unfiltered_config = _build_config_with_frequency_cap(with_duration_cap=True)
+    filtered_config, _ = projectable_config(unfiltered_config)
+
+    return [
+        _run_task1_side(
+            label="unfiltered (today's real per-booking canon, real history=50)",
+            config=unfiltered_config,
+            history=build_synthetic_history(50),
+            repeats=repeats,
+        ),
+        _run_task1_side(
+            label="filtered   (task 1's projected canon, no history read at all)",
+            config=filtered_config,
+            history=(),
+            repeats=repeats,
+        ),
+    ]
+
+
+def format_task1_comparison_table(results: list[Task1ComparisonResult]) -> str:
+    lines = [
+        "Task 1: the actual replacement — a Space with a real max_bookings_per_week row, projected",
+        "the old way (unfiltered, real history) versus the new way (task 1's filtered, rules-only",
+        "canon). Same 7-day, 30-minute-slot, max_duration-set, early_stop window on both sides.",
+        "",
+        f"{'case':<62}{'calls':>8}{'median_ms':>12}{'us/call':>10}",
+        "-" * 92,
+    ]
+    for result in results:
+        lines.append(
+            f"{result.label:<62}{result.calls:>8}{result.median_ms:>12.2f}{result.us_per_call:>10.2f}"
+        )
+    return "\n".join(lines)
+
+
 def format_table(results: list[BenchmarkResult], *, repeats: int) -> str:
     lines = [
         f"Window: {WINDOW_DAYS} days from {WINDOW_START.isoformat()}, Space tz={SPACE_TZ},"
@@ -502,12 +633,17 @@ def main(argv: list[str] | None = None) -> None:
     supplementary_table = format_supplementary_table(supplementary)
     print("\n" + supplementary_table)
 
+    task1_comparison = run_task1_comparison(repeats=args.repeats)
+    task1_table = format_task1_comparison_table(task1_comparison)
+    print("\n" + task1_table)
+
     args.out.write_text(
         "# Projection benchmark results\n\n"
         "Generated by `app/backend/scripts/projection_bench.py`. See that script and\n"
         "`app/backend/app/projection.py` for what is measured and why.\n\n"
         "```\n" + table + "\n```\n\n"
-        "```\n" + supplementary_table + "\n```\n"
+        "```\n" + supplementary_table + "\n```\n\n"
+        "```\n" + task1_table + "\n```\n"
     )
     print(f"\nWrote {args.out}")
 
