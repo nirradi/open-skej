@@ -421,14 +421,15 @@ function RulesManager({ space }: { space: Space }) {
     const errors: Record<number, string> = {}
     dirtyRows.forEach(({ rule }, index) => {
       const settled = results[index]
-      if (settled.status === 'fulfilled' && settled.value.outcome === 'ok') {
+      if (settled.status === 'rejected') {
+        errors[rule.id] = 'Something went wrong. Please try again.'
+        return
+      }
+      if (settled.value.outcome === 'ok') {
         handleUpdated(settled.value.data)
         return
       }
-      errors[rule.id] =
-        settled.status === 'fulfilled'
-          ? messageFor(settled.value)
-          : 'Something went wrong. Please try again.'
+      errors[rule.id] = messageFor(settled.value)
     })
     setSaveErrors(errors)
   }
