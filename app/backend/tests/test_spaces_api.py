@@ -198,6 +198,7 @@ ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
     ("PATCH", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
     ("DELETE", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
     ("GET", "/spaces/{public_id}/schedule"): MembershipRole.MEMBER,
+    ("GET", "/spaces/{public_id}/resources/{resource_id}/bookable"): MembershipRole.MEMBER,
 }
 
 # One rank below each non-member minimum — the caller the under-privileged half

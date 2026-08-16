@@ -14,7 +14,7 @@ from app.identity.router import router as spaces_router
 from app.identity.router import rule_types_router
 from app.rule_catalog import catalog
 from app.rule_generation import sweep_orphaned_generation_jobs
-from app.routers import resource_bookings
+from app.routers import bookable, resource_bookings
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ app.add_middleware(
 )
 
 app.include_router(resource_bookings.router)
+app.include_router(bookable.router)
 app.include_router(spaces_router)
 app.include_router(rule_types_router)
 

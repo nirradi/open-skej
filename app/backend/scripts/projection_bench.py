@@ -23,16 +23,17 @@ easier question and call it the same name. This script imports those functions d
 as ``rules_stub.evaluate()`` does for one booking, once per synthetic candidate ``project_days``
 asks about.
 
-**One real divergence from production, stated rather than hidden**: ``project_days`` takes one
-fixed ``canon`` for an entire window (see ``app/backend/app/projection.py``'s own docstring), so
-this script builds the canon **once**, for the window's first date, and reuses it for every day and
-every candidate in the run. A real booking's ``rules_stub.evaluate()`` rebuilds its canon fresh for
-every single request, which matters whenever a rule's own resolved value is date-dependent (a
-``session_length`` row's ``anchor_minutes``, see ``canon.py``'s module docstring) — invisible here
-because the synthetic Space's hours and session length do not vary by weekday. A Space whose
-canon genuinely does vary by date (an ``availability_hours`` row scoped to specific weekdays via
-``applies_to``) is not projectable by a single ``project_days`` call with today's signature at all;
-see the report this script's output feeds for why that is a finding, not a bug in this script.
+``project_days`` resolves its canon **per day** (``canon_for_day``, see
+``app/backend/app/projection.py``'s own docstring) — the identical granularity
+``app.rules_stub._build_canon(config, on_date)`` resolves at for one real booking. This script's
+``canon_for_day`` closes over one synthetic ``SpaceRuleConfig`` and calls ``_build_canon`` fresh for
+each ``DayGrid.date`` in the window, exactly as a real Space with weekday- or date-scoped
+``applies_to`` rows would need. The synthetic Space's own hours and session length happen not to
+vary by weekday, so the per-day resolution here always returns the identical canon across the
+window — the benchmark still measures the real per-day resolution cost (one ``_build_canon`` call
+per ``DayGrid``, not per candidate), it is just that this script's own Space does not exercise the
+*varying* case. A future case that seeds an ``applies_to``-scoped row to actually vary the canon by
+weekday is a natural extension, not something today's signature blocks any more.
 
 **The axes below, and why these and not others.** Slot size and duration-cap presence are the two
 the pass condition names directly. Canon (seeded-only vs. seeded-plus-one-more) and history
@@ -313,22 +314,29 @@ class BenchmarkResult:
 def run_case(case: BenchmarkCase, *, repeats: int) -> BenchmarkResult:
     """Run ``project_days`` for ``case`` ``repeats`` times and report the median wall time.
 
-    The canon is built once, outside the timed section — see the module docstring for why
-    building it once per run, not once per candidate, is itself a documented divergence from
-    production rather than an oversight. History and the grid are likewise built once; only
+    ``canon_for_day`` calls ``_build_canon(config, on_date)`` fresh for every ``DayGrid.date`` —
+    the identical per-day resolution ``rules_stub.evaluate()`` performs for one real booking (module
+    docstring) — so this timed section pays that cost once per day, not once for the whole window
+    and not once per candidate. History and the grid are built once outside the loop; only
     ``project_days`` itself is inside the timing loop.
     """
     config = _build_config(
         with_duration_cap=case.with_duration_cap, with_session_length=case.with_session_length
     )
-    canon = _build_canon(config, WINDOW_START)
-    if case.with_extra_rule:
-        canon = canon + (
-            SimulatedGeneratedRule(
-                blocked_dates=frozenset({WINDOW_START + timedelta(days=3)}),
-                weekend_daily_cap_minutes=180,
-            ),
+    extra_rule = (
+        SimulatedGeneratedRule(
+            blocked_dates=frozenset({WINDOW_START + timedelta(days=3)}),
+            weekend_daily_cap_minutes=180,
         )
+        if case.with_extra_rule
+        else None
+    )
+
+    def canon_for_day(on_date: date) -> tuple[BaseRule, ...]:
+        canon = _build_canon(config, on_date)
+        if extra_rule is not None:
+            canon = canon + (extra_rule,)
+        return canon
 
     history = build_synthetic_history(case.history_count)
     make_request_and_context = _make_context_builder(config, history)
@@ -340,7 +348,7 @@ def run_case(case: BenchmarkCase, *, repeats: int) -> BenchmarkResult:
         counter = [0]
         start = time.perf_counter()
         project_days(
-            canon=canon,
+            canon_for_day=canon_for_day,
             make_request_and_context=make_request_and_context,
             days=grids,
             early_stop=case.early_stop,

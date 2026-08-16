@@ -1,0 +1,31 @@
+# POC convenience file — standalone (not merged with docker-compose.yml), not part of the product.
+#
+# The main checkout already runs its own Postgres on host port 5432 (project `skej`), and this
+# installed Docker Compose (v2.15.1) predates the `!override` merge tag that would let an override
+# file cleanly replace just the `ports` list, so a plain standalone file on a different host port is
+# the simplest fix. See POC.md for the up/down commands.
+#
+#   docker compose -f docker-compose.local.yml up -d
+#   export DATABASE_URL=postgresql+psycopg://skej:skej@localhost:5433/skej
+#   cd app/backend && alembic upgrade head
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: skej
+      POSTGRES_PASSWORD: skej
+      POSTGRES_DB: skej
+    ports:
+      - "5433:5432"
+    volumes:
+      - skej-poc-projection-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skej -d skej"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  skej-poc-projection-postgres-data:

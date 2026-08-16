@@ -277,17 +277,35 @@ def _scan_slot(
 
 def project_days(
     *,
-    canon: Sequence[BaseRule],
+    canon_for_day: Callable[[date], Sequence[BaseRule]],
     make_request_and_context: Callable[[datetime, datetime], tuple[BookingRequest, Context]],
     days: Sequence[DayGrid],
     max_scan_slots: int | None = None,
     early_stop: bool = True,
     call_counter: list[int] | None = None,
 ) -> tuple[DayProjection, ...]:
-    """Project every ``DayGrid`` in ``days`` against ``canon``, one ``DayProjection`` each.
+    """Project every ``DayGrid`` in ``days``, one ``DayProjection`` each.
 
-    ``canon`` is evaluated exactly as ``rules.evaluate_request`` always evaluates it — in order,
-    fail-fast — because this function calls nothing else; it is not a reimplementation of any
+    **Why a callable and not one fixed ``canon`` for the whole window.** A Space's rules carry an
+    ``applies_to`` scope of weekdays or specific dates (``app/backend/app/rules_stub.py``'s
+    ``row_applies``), and ``session_length``'s ``anchor_minutes`` is resolved per date
+    (``resolve_day_schedule``) — so two different days in the same window can legitimately run
+    different canons, exactly the way ``rules_stub.evaluate()`` rebuilds its canon fresh for every
+    single booking rather than caching one. A single ``canon`` argument would be correct only for a
+    Space that happens not to use per-day scoping yet, and would silently go stale the first time
+    one did. ``canon_for_day`` is called exactly once per ``DayGrid`` (not once per slot, and not
+    once per scanned candidate length) — the same granularity ``_build_canon(config, on_date)``
+    already resolves at, since nothing about a canon depends on a slot's start or a candidate's
+    length, only on its date. The alternative shape considered was a ``canon`` field on ``DayGrid``
+    itself, rejected because ``DayGrid`` describes a rendered grid — a UI-facing date/slot-geometry
+    concern — and folding "which rules govern this date" into it would make every caller that only
+    wants to describe a grid (a test building one by hand) also responsible for resolving a canon.
+    A callable keeps the two concerns — the grid's shape, and how a canon is derived from a date —
+    decoupled, and lets one callable close over a single ``SpaceRuleConfig`` for an entire window,
+    mirroring ``make_request_and_context``'s own existing shape.
+
+    Each resolved canon is evaluated exactly as ``rules.evaluate_request`` always evaluates it — in
+    order, fail-fast — because this function calls nothing else; it is not a reimplementation of any
     rule's semantics (module docstring). ``make_request_and_context`` is called once per scanned
     candidate length, with two **naive local wall-clock** datetimes built from ``day.date`` and the
     candidate's own start/end minutes — never a UTC instant, since this function holds no timezone
@@ -309,6 +327,7 @@ def project_days(
 
     for day in days:
         day_start = datetime.combine(day.date, time.min)
+        canon = canon_for_day(day.date)
         slots = tuple(
             _scan_slot(
                 day_start=day_start,

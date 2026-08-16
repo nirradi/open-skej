@@ -9,43 +9,43 @@ Each row is the median of 5 repeats of one project_days(...) call.
 
 case                                                             calls   median_ms   us/call
 --------------------------------------------------------------------------------------------
-slot=30m  cap=yes  canon=seeded      history= 0  early_stop=Y     1400       31.71     22.65
-slot=30m  cap=yes  canon=seeded      history= 0  early_stop=N     2520       56.87     22.57
-slot=30m  cap=yes  canon=seeded      history=50  early_stop=Y     1400       77.90     55.65
-slot=30m  cap=yes  canon=seeded      history=50  early_stop=N     2520      137.77     54.67
-slot=30m  cap=yes  canon=seeded+ai   history= 0  early_stop=Y     1560       35.66     22.86
-slot=30m  cap=yes  canon=seeded+ai   history= 0  early_stop=N     2520       57.78     22.93
-slot=30m  cap=yes  canon=seeded+ai   history=50  early_stop=Y     1560       88.24     56.57
-slot=30m  cap=yes  canon=seeded+ai   history=50  early_stop=N     2520      142.41     56.51
-slot=30m  cap=no   canon=seeded      history= 0  early_stop=Y     1400       30.85     22.04
-slot=30m  cap=no   canon=seeded      history= 0  early_stop=N     2520       55.83     22.16
-slot=30m  cap=no   canon=seeded      history=50  early_stop=Y     1400       76.79     54.85
-slot=30m  cap=no   canon=seeded      history=50  early_stop=N     2520      139.26     55.26
-slot=30m  cap=no   canon=seeded+ai   history= 0  early_stop=Y     1560       34.75     22.27
-slot=30m  cap=no   canon=seeded+ai   history= 0  early_stop=N     2520       56.15     22.28
-slot=30m  cap=no   canon=seeded+ai   history=50  early_stop=Y     1560       85.73     54.96
-slot=30m  cap=no   canon=seeded+ai   history=50  early_stop=N     2520      138.90     55.12
-slot=15m  cap=yes  canon=seeded      history= 0  early_stop=Y     7672      171.71     22.38
-slot=15m  cap=yes  canon=seeded      history= 0  early_stop=N     9968      224.27     22.50
-slot=15m  cap=yes  canon=seeded      history=50  early_stop=Y     7672      421.76     54.97
-slot=15m  cap=yes  canon=seeded      history=50  early_stop=N     9968      550.97     55.27
-slot=15m  cap=yes  canon=seeded+ai   history= 0  early_stop=Y     8000      180.77     22.60
-slot=15m  cap=yes  canon=seeded+ai   history= 0  early_stop=N     9968      224.51     22.52
-slot=15m  cap=yes  canon=seeded+ai   history=50  early_stop=Y     8000      439.21     54.90
-slot=15m  cap=yes  canon=seeded+ai   history=50  early_stop=N     9968      545.60     54.74
-slot=15m  cap=no   canon=seeded      history= 0  early_stop=Y     7672      164.63     21.46
-slot=15m  cap=no   canon=seeded      history= 0  early_stop=N     9968      214.61     21.53
-slot=15m  cap=no   canon=seeded      history=50  early_stop=Y     7672      412.24     53.73
-slot=15m  cap=no   canon=seeded      history=50  early_stop=N     9968      538.90     54.06
-slot=15m  cap=no   canon=seeded+ai   history= 0  early_stop=Y     8000      172.28     21.54
-slot=15m  cap=no   canon=seeded+ai   history= 0  early_stop=N     9968      215.05     21.57
-slot=15m  cap=no   canon=seeded+ai   history=50  early_stop=Y     8000      432.45     54.06
-slot=15m  cap=no   canon=seeded+ai   history=50  early_stop=N     9968      537.05     53.88
+slot=30m  cap=yes  canon=seeded      history= 0  early_stop=Y     1400       32.92     23.51
+slot=30m  cap=yes  canon=seeded      history= 0  early_stop=N     2520       57.02     22.63
+slot=30m  cap=yes  canon=seeded      history=50  early_stop=Y     1400       76.99     54.99
+slot=30m  cap=yes  canon=seeded      history=50  early_stop=N     2520      138.44     54.94
+slot=30m  cap=yes  canon=seeded+ai   history= 0  early_stop=Y     1560       35.32     22.64
+slot=30m  cap=yes  canon=seeded+ai   history= 0  early_stop=N     2520       56.85     22.56
+slot=30m  cap=yes  canon=seeded+ai   history=50  early_stop=Y     1560       85.56     54.84
+slot=30m  cap=yes  canon=seeded+ai   history=50  early_stop=N     2520      138.26     54.86
+slot=30m  cap=no   canon=seeded      history= 0  early_stop=Y     1400       30.66     21.90
+slot=30m  cap=no   canon=seeded      history= 0  early_stop=N     2520       54.43     21.60
+slot=30m  cap=no   canon=seeded      history=50  early_stop=Y     1400       75.57     53.98
+slot=30m  cap=no   canon=seeded      history=50  early_stop=N     2520      136.32     54.09
+slot=30m  cap=no   canon=seeded+ai   history= 0  early_stop=Y     1560       34.25     21.95
+slot=30m  cap=no   canon=seeded+ai   history= 0  early_stop=N     2520       54.92     21.79
+slot=30m  cap=no   canon=seeded+ai   history=50  early_stop=Y     1560       84.48     54.15
+slot=30m  cap=no   canon=seeded+ai   history=50  early_stop=N     2520      136.50     54.17
+slot=15m  cap=yes  canon=seeded      history= 0  early_stop=Y     7672      173.00     22.55
+slot=15m  cap=yes  canon=seeded      history= 0  early_stop=N     9968      224.80     22.55
+slot=15m  cap=yes  canon=seeded      history=50  early_stop=Y     7672      420.44     54.80
+slot=15m  cap=yes  canon=seeded      history=50  early_stop=N     9968      546.56     54.83
+slot=15m  cap=yes  canon=seeded+ai   history= 0  early_stop=Y     8000      179.98     22.50
+slot=15m  cap=yes  canon=seeded+ai   history= 0  early_stop=N     9968      229.44     23.02
+slot=15m  cap=yes  canon=seeded+ai   history=50  early_stop=Y     8000      446.26     55.78
+slot=15m  cap=yes  canon=seeded+ai   history=50  early_stop=N     9968      558.81     56.06
+slot=15m  cap=no   canon=seeded      history= 0  early_stop=Y     7672      165.50     21.57
+slot=15m  cap=no   canon=seeded      history= 0  early_stop=N     9968      215.70     21.64
+slot=15m  cap=no   canon=seeded      history=50  early_stop=Y     7672      413.98     53.96
+slot=15m  cap=no   canon=seeded      history=50  early_stop=N     9968      539.81     54.15
+slot=15m  cap=no   canon=seeded+ai   history= 0  early_stop=Y     8000      172.14     21.52
+slot=15m  cap=no   canon=seeded+ai   history= 0  early_stop=N     9968      217.71     21.84
+slot=15m  cap=no   canon=seeded+ai   history=50  early_stop=Y     8000      434.41     54.30
+slot=15m  cap=no   canon=seeded+ai   history=50  early_stop=N     9968      539.99     54.17
 
 Pass condition — 7-day window, 30-minute slots, max_duration set, canon only, no history, early_stop:
-  31.71 ms (PASS — under 200 ms), 1400 evaluate_request calls.
+  32.92 ms (PASS — under 200 ms), 1400 evaluate_request calls.
 
-Worst case observed: slot=15m  cap=yes  canon=seeded      history=50  early_stop=N -> 550.97 ms, 9968 calls.
+Worst case observed: slot=15m  cap=yes  canon=seeded+ai   history=50  early_stop=N -> 558.81 ms, 9968 calls.
 ```
 
 ```
@@ -53,10 +53,10 @@ Supplementary: availability_hours alone (no session_length) — the literal case
 
 case                                                             calls   median_ms   us/call
 --------------------------------------------------------------------------------------------
-slot=30m  cap=yes  canon=hours-only  history= 0  early_stop=Y      518       11.47     22.15
-slot=30m  cap=yes  canon=hours-only  history= 0  early_stop=N     2520       55.54     22.04
-slot=30m  cap=no   canon=hours-only  history= 0  early_stop=Y     1064       22.60     21.24
-slot=30m  cap=no   canon=hours-only  history= 0  early_stop=N     2520       52.76     20.94
+slot=30m  cap=yes  canon=hours-only  history= 0  early_stop=Y      518       11.52     22.24
+slot=30m  cap=yes  canon=hours-only  history= 0  early_stop=N     2520       55.94     22.20
+slot=30m  cap=no   canon=hours-only  history= 0  early_stop=Y     1064       22.50     21.14
+slot=30m  cap=no   canon=hours-only  history= 0  early_stop=N     2520       53.08     21.06
 
-Closing-time-bound worst case: slot=30m  cap=yes  canon=hours-only  history= 0  early_stop=N -> 55.54 ms, 2520 calls.
+Closing-time-bound worst case: slot=30m  cap=yes  canon=hours-only  history= 0  early_stop=N -> 55.94 ms, 2520 calls.
 ```
