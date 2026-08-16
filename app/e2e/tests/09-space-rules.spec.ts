@@ -95,10 +95,15 @@ test.describe('the Space rules page', () => {
     await expect(ruleRow.locator('[data-testid$="-paused-badge"]')).toHaveCount(0)
 
     // Scope to Wednesday (index 2 of the Mon-first `WEEKDAY_LABELS` in
-    // `AppliesToEditor.tsx`) and save.
+    // `AppliesToEditor.tsx`), then save through the page-level Save
+    // (`rules-save`) — task 9.7 replaced the row's own two save buttons with
+    // one save for the whole page, rendered in `rules-list`'s own header
+    // rather than inside any one row, so it is looked up unscoped.
     await ruleRow.locator('[data-testid$="-applies-mode-weekdays"]').check()
     await ruleRow.locator('[data-testid$="-applies-weekday-2"]').check()
-    await ruleRow.locator('[data-testid$="-applies-save"]').click()
+    await expect(ruleRow.getByTestId(`${newRowTestId}-changed`)).toBeVisible()
+    await page.getByTestId('rules-save').click()
+    await expect(ruleRow.getByTestId(`${newRowTestId}-changed`)).toHaveCount(0)
 
     // A reload proves the scope actually reached the server rather than only
     // ever having lived in this component's own state.

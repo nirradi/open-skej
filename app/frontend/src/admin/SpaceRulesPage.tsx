@@ -11,6 +11,7 @@ import {
   type RuleTypeRead,
   type Space,
   type SpaceRuleRead,
+  type SpaceRuleUpdateInput,
 } from '../api'
 import {
   AppliesToEditor,
@@ -61,6 +62,18 @@ import { findRuleTypeFor, ruleBrokenReason } from './ruleValidation'
  * schema check client-side against the fetched registry and renders the
  * result as a visible banner per row, which is the only place in the product
  * that reason is shown to anyone.
+ *
+ * ## One save for the page, not one per row
+ *
+ * `RulesManager` holds a draft of every configured row's `params` and
+ * `applies_to`, edits it in place, and writes it with a single page-level
+ * Save (`rules-save`) or discards it with a single Cancel (`rules-cancel`).
+ * `RuleRow` itself is presentational for both fields — it renders whatever
+ * draft and validity it is handed and reports edits upward; it owns no
+ * `params`/`applies_to` state of its own any more. Creating a rule (its own
+ * "Add rule" button) and pausing or deleting one (`RuleRow`'s own immediate
+ * actions) are unrelated to this draft/save machinery — see each one's own
+ * docstring for why.
  */
 export function SpaceRulesPage() {
   const { publicId } = useParams<{ publicId: string }>()
@@ -174,6 +187,67 @@ type RegistryLoad =
   { kind: 'ok'; ruleTypes: RuleTypeRead[] } | { kind: 'error'; message: string } | null
 type RulesLoad = { kind: 'ok'; rules: SpaceRuleRead[] } | { kind: 'error'; message: string } | null
 
+/** One row's in-progress edit of `params` and `applies_to`, held above `RuleRow`. */
+type RuleDraft = { paramValues: RuleParamValues; appliesDraft: AppliesToDraft }
+
+/** A key that changes whenever anything about a stored row's editable state changes. */
+function ruleRowKey(rule: SpaceRuleRead): string {
+  return `${rule.id}:${JSON.stringify(rule.params)}:${JSON.stringify(rule.applies_to)}:${rule.enabled}`
+}
+
+/** A fresh draft seeded straight from a stored row — what a clean, untouched row looks like. */
+function seedDraft(rule: SpaceRuleRead, ruleTypes: RuleTypeRead[]): RuleDraft {
+  const ruleType = findRuleTypeFor(ruleTypes, rule.rule_type)
+  return {
+    paramValues: ruleType ? ruleParamValuesFromStored(ruleType.params, rule.params) : {},
+    appliesDraft: draftFromAppliesTo(rule.applies_to),
+  }
+}
+
+/**
+ * Rebuilds the drafts map for the current `rules` array, one entry per row.
+ *
+ * A row already present in `previous` keeps its existing draft untouched,
+ * clean or mid-edit alike; only a row with no existing entry — a rule just
+ * created — gets a fresh one seeded from its stored values. This is
+ * deliberately **not** a blind reseed of every row from `rules`: a page-level
+ * Save that partially fails must leave the failed row's draft exactly as the
+ * admin left it (still dirty, still marked) while the succeeded rows' drafts
+ * fall out of the comparison as clean on their own, since a draft that was
+ * just submitted and accepted already equals the fresh stored row it is
+ * compared against. Reseeding everything unconditionally here would instead
+ * discard the failed row's unsaved edit the moment any other row's save
+ * landed — exactly the case `SpaceRulesPage.test.tsx`'s partial-failure test
+ * guards. The gap this leaves — a row nobody is editing changed by another
+ * admin in another tab — is not picked up until Cancel or a reload; this
+ * page has never handled cross-session concurrency and this rewrite does not
+ * add it.
+ */
+function buildDrafts(
+  rules: SpaceRuleRead[],
+  ruleTypes: RuleTypeRead[],
+  previous: Record<number, RuleDraft>,
+): Record<number, RuleDraft> {
+  const next: Record<number, RuleDraft> = {}
+  for (const rule of rules) {
+    next[rule.id] = previous[rule.id] ?? seedDraft(rule, ruleTypes)
+  }
+  return next
+}
+
+/** Whether a draft differs from its stored rule in `params`, `applies_to`, or both. */
+function ruleIsDirty(
+  rule: SpaceRuleRead,
+  ruleType: RuleTypeRead | undefined,
+  draft: RuleDraft,
+): boolean {
+  const wireApplies = appliesToFromDraft(draft.appliesDraft)
+  if (JSON.stringify(wireApplies) !== JSON.stringify(rule.applies_to)) return true
+  if (!ruleType) return false
+  const wireParams = ruleParamValuesToWire(ruleType.params, draft.paramValues)
+  return JSON.stringify(wireParams) !== JSON.stringify(rule.params)
+}
+
 /** Fetches the registry and the Space's configured rules, then renders the editor. */
 function RulesManager({ space }: { space: Space }) {
   const [registryLoad, setRegistryLoad] = useState<RegistryLoad>(null)
@@ -182,6 +256,34 @@ function RulesManager({ space }: { space: Space }) {
   // the admin clicks "Add this rule to the Space" on `RuleAuthoringPanel`,
   // and what preselects it in `AddRulePanel` below.
   const [preselectedType, setPreselectedType] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveErrors, setSaveErrors] = useState<Record<number, string>>({})
+
+  const rules = rulesLoad?.kind === 'ok' ? rulesLoad.rules : []
+  const ruleTypes = registryLoad?.kind === 'ok' ? registryLoad.ruleTypes : []
+
+  // The drafts map, and the reset idiom that keeps it in step with `rules`
+  // without an effect (`react-hooks/set-state-in-effect`) — see the old
+  // per-row `rowKey` (now `ruleRowKey`, moved up here from `RuleRow`) and
+  // `SpaceSettingsPanel`'s `settingsKey` for the same pattern elsewhere in
+  // this codebase. Compared during render against a remembered value; when
+  // it differs, the drafts map is rebuilt (see `buildDrafts` for what
+  // "rebuilt" means here) and any stale per-row save error is dropped along
+  // with it.
+  const rulesKey = rules.map(ruleRowKey).join('|')
+  const [seenRulesKey, setSeenRulesKey] = useState(rulesKey)
+  const [drafts, setDrafts] = useState<Record<number, RuleDraft>>(() =>
+    buildDrafts(rules, ruleTypes, {}),
+  )
+  if (seenRulesKey !== rulesKey) {
+    setSeenRulesKey(rulesKey)
+    setDrafts(buildDrafts(rules, ruleTypes, drafts))
+    const survivingErrors: Record<number, string> = {}
+    for (const rule of rules) {
+      if (saveErrors[rule.id] !== undefined) survivingErrors[rule.id] = saveErrors[rule.id]
+    }
+    setSaveErrors(survivingErrors)
+  }
 
   function fetchRuleTypes() {
     return listRuleTypes().then((result) => {
@@ -251,8 +353,6 @@ function RulesManager({ space }: { space: Space }) {
     )
   }
 
-  const ruleTypes = registryLoad.ruleTypes
-  const rules = rulesLoad.rules
   const archived = space.archived_at !== null
 
   function handleCreated(rule: SpaceRuleRead) {
@@ -279,6 +379,83 @@ function RulesManager({ space }: { space: Space }) {
         : current,
     )
   }
+
+  function handleParamChange(ruleId: number, name: string, value: string) {
+    setDrafts((current) => {
+      const existing = current[ruleId]
+      if (!existing) return current
+      return {
+        ...current,
+        [ruleId]: { ...existing, paramValues: { ...existing.paramValues, [name]: value } },
+      }
+    })
+  }
+
+  function handleAppliesChange(ruleId: number, next: AppliesToDraft) {
+    setDrafts((current) => {
+      const existing = current[ruleId]
+      if (!existing) return current
+      return { ...current, [ruleId]: { ...existing, appliesDraft: next } }
+    })
+  }
+
+  function handleCancelAll() {
+    setDrafts(Object.fromEntries(rules.map((rule) => [rule.id, seedDraft(rule, ruleTypes)])))
+    setSaveErrors({})
+  }
+
+  async function handleSaveAll() {
+    if (dirtyRows.length === 0) return
+    setSaving(true)
+
+    const results = await Promise.allSettled(
+      dirtyRows.map(({ rule, ruleType, draft }) => {
+        const patch: SpaceRuleUpdateInput = { applies_to: appliesToFromDraft(draft.appliesDraft) }
+        if (ruleType) patch.params = ruleParamValuesToWire(ruleType.params, draft.paramValues)
+        return updateSpaceRule(space.public_id, rule.id, patch)
+      }),
+    )
+
+    setSaving(false)
+
+    const errors: Record<number, string> = {}
+    dirtyRows.forEach(({ rule }, index) => {
+      const settled = results[index]
+      if (settled.status === 'rejected') {
+        errors[rule.id] = 'Something went wrong. Please try again.'
+        return
+      }
+      if (settled.value.outcome === 'ok') {
+        handleUpdated(settled.value.data)
+        return
+      }
+      errors[rule.id] = messageFor(settled.value)
+    })
+    setSaveErrors(errors)
+  }
+
+  // One row of derived state per configured rule — its draft (falling back
+  // to a fresh seed defensively; every rule id is expected to already have
+  // an entry by the time this renders, courtesy of the reset idiom above),
+  // its registered type, and whether it is dirty and/or valid. Computed once
+  // here rather than re-derived inside `RuleRow`, since both the page-level
+  // Save button and every row's own "changed"/"invalid" marker need the
+  // identical answer.
+  const rowInfos = sortRulesForDisplay(rules, ruleTypes).map((rule) => {
+    const ruleType = findRuleTypeFor(ruleTypes, rule.rule_type)
+    const draft = drafts[rule.id] ?? seedDraft(rule, ruleTypes)
+    const dirty = ruleIsDirty(rule, ruleType, draft)
+    const paramsValid = ruleType ? ruleParamsAreValid(ruleType.params, draft.paramValues) : true
+    const appliesValid = appliesToDraftIsValid(draft.appliesDraft)
+    return { rule, ruleType, draft, dirty, valid: paramsValid && appliesValid }
+  })
+
+  const dirtyRows = rowInfos.filter((info) => info.dirty)
+  const invalidDirtyRows = dirtyRows.filter((info) => !info.valid)
+  const saveDisabled = archived || saving || dirtyRows.length === 0 || invalidDirtyRows.length > 0
+  const cancelDisabled = saving || dirtyRows.length === 0
+
+  const saveErrorEntries = Object.entries(saveErrors)
 
   return (
     <div className="space-y-6">
@@ -310,7 +487,58 @@ function RulesManager({ space }: { space: Space }) {
       />
 
       <section className="rounded-lg border border-slate-200 bg-white p-4" data-testid="rules-list">
-        <h2 className="text-sm font-semibold text-slate-900">Configured rules</h2>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-slate-900">Configured rules</h2>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded border border-slate-300 px-3 py-1 text-sm disabled:opacity-50"
+              data-testid="rules-cancel"
+              disabled={cancelDisabled}
+              onClick={handleCancelAll}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="rounded bg-slate-800 px-3 py-1 text-sm text-white disabled:opacity-50"
+              data-testid="rules-save"
+              disabled={saveDisabled}
+              onClick={() => void handleSaveAll()}
+            >
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+
+        {invalidDirtyRows.length > 0 ? (
+          <p className="mt-2 text-xs text-amber-700" data-testid="rules-save-invalid">
+            Save is disabled: fix the highlighted row
+            {invalidDirtyRows.length > 1 ? 's' : ''} —{' '}
+            {invalidDirtyRows
+              .map(({ rule, ruleType }) => `${ruleType?.label ?? rule.rule_type} (rule ${rule.id})`)
+              .join(', ')}
+            .
+          </p>
+        ) : null}
+
+        {saveErrorEntries.length > 0 ? (
+          <p
+            className="mt-2 rounded border border-red-300 bg-red-50 p-2 text-xs text-red-800"
+            data-testid="rules-save-error"
+            role="alert"
+          >
+            {saveErrorEntries
+              .map(([idText, message]) => {
+                const id = Number(idText)
+                const info = rowInfos.find((candidate) => candidate.rule.id === id)
+                const label = info?.ruleType?.label ?? info?.rule.rule_type ?? `rule ${id}`
+                return `${label} (rule ${id}) failed to save: ${message}`
+              })
+              .join(' ')}
+          </p>
+        ) : null}
 
         {rules.length === 0 ? (
           <p className="mt-2 text-sm text-slate-600" data-testid="rules-empty">
@@ -318,13 +546,18 @@ function RulesManager({ space }: { space: Space }) {
           </p>
         ) : (
           <ul className="mt-3 divide-y divide-slate-100">
-            {sortRulesForDisplay(rules, ruleTypes).map((rule) => (
+            {rowInfos.map(({ rule, ruleType, draft, dirty, valid }) => (
               <RuleRow
                 key={rule.id}
                 space={space}
                 rule={rule}
-                ruleTypes={ruleTypes}
-                disabled={archived}
+                ruleType={ruleType}
+                disabled={archived || saving}
+                draft={draft}
+                changed={dirty}
+                invalidBlockingSave={dirty && !valid}
+                onParamChange={(name, value) => handleParamChange(rule.id, name, value)}
+                onAppliesChange={(next) => handleAppliesChange(rule.id, next)}
                 onUpdated={handleUpdated}
                 onDeleted={handleDeleted}
               />
@@ -344,12 +577,24 @@ function sortRulesForDisplay(rules: SpaceRuleRead[], ruleTypes: RuleTypeRead[]):
 }
 
 /**
- * "Add a rule": pick a registered type, fill its params, submit.
+ * "Add a rule": pick a registered type, fill its params, scope it, submit.
  *
- * `applies_to` starts at "always" here — scoping a freshly created rule to a
- * weekday or a set of dates is an edit on the row afterward
- * (`RuleRow`'s own `AppliesToEditor`), not a second copy of that editor on
- * this form.
+ * ## Scope is editable here now, not only afterward
+ *
+ * `AppliesToEditor` defaults to `{ mode: 'always' }` — the identical default
+ * a freshly created rule got before this task, just now a visible, editable
+ * field on this form rather than an assumption baked into the create call.
+ * This reverses the page's original decision, which read: *"`applies_to`
+ * starts at 'always' here — scoping a freshly created rule to a weekday or a
+ * set of dates is an edit on the row afterward, not a second copy of that
+ * editor on this form."* That shape was the source of
+ * `scope-not-appearing-on-create.md`: an admin who wanted a scoped rule had
+ * to create it unscoped and then find the row's own scope editor to narrow
+ * it, a step nothing on this form hinted was still needed. Reusing
+ * `AppliesToEditor` here costs nothing extra to validate or convert — it
+ * already exports `appliesToFromDraft` and `appliesToDraftIsValid`, the same
+ * two functions `RulesManager`'s page-level Save now uses for every row's
+ * draft — so this is the same editor, not a second implementation of it.
  *
  * ## The picker shows a description, not a combobox
  *
@@ -366,10 +611,19 @@ function sortRulesForDisplay(rules: SpaceRuleRead[], ruleTypes: RuleTypeRead[]):
  *
  * Set by `RulesManager` when the admin chooses "Add this rule to the Space"
  * on a just-succeeded `RuleAuthoringPanel` job — the drop-in the task
- * describes. Applied with the same compare-during-render idiom `RuleRow`
- * uses for its own external resets (`rowKey`) rather than an effect, since
+ * describes. Applied with the same compare-during-render idiom `RulesManager`
+ * uses for its own external resets (`rulesKey`) rather than an effect, since
  * this repo's eslint config forbids calling `setState` synchronously inside
  * one.
+ *
+ * ## Creation stays its own immediate action
+ *
+ * Unlike an existing row's `params`/`applies_to`, which are now drafted and
+ * saved through the page-level Save, creating a rule keeps its own button and
+ * fires immediately — it is a different action (there is nothing "stored" to
+ * compare a draft against until it exists) and folding it into the
+ * page-level Save would leave that button meaning two different things at
+ * once.
  */
 function AddRulePanel({
   space,
@@ -388,6 +642,7 @@ function AddRulePanel({
 }) {
   const [selectedType, setSelectedType] = useState('')
   const [values, setValues] = useState<RuleParamValues>({})
+  const [appliesDraft, setAppliesDraft] = useState<AppliesToDraft>({ mode: 'always' })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -411,7 +666,10 @@ function AddRulePanel({
     ruleType.is_single &&
     existingRules.some((existing) => existing.rule_type === ruleType.rule_type)
 
-  const valid = ruleType !== null && ruleParamsAreValid(ruleType.params, values)
+  const valid =
+    ruleType !== null &&
+    ruleParamsAreValid(ruleType.params, values) &&
+    appliesToDraftIsValid(appliesDraft)
 
   async function handleCreate() {
     if (!ruleType) return
@@ -421,6 +679,7 @@ function AddRulePanel({
     const result = await createSpaceRule(space.public_id, {
       rule_type: ruleType.rule_type,
       params: ruleParamValuesToWire(ruleType.params, values),
+      applies_to: appliesToFromDraft(appliesDraft),
     })
     setBusy(false)
 
@@ -428,6 +687,7 @@ function AddRulePanel({
       onCreated(result.data)
       setSelectedType('')
       setValues({})
+      setAppliesDraft({ mode: 'always' })
       return
     }
 
@@ -477,6 +737,15 @@ function AddRulePanel({
             disabled={disabled || busy}
           />
 
+          <div className="mt-3">
+            <AppliesToEditor
+              idPrefix="add-rule"
+              draft={appliesDraft}
+              onChange={setAppliesDraft}
+              disabled={disabled || busy}
+            />
+          </div>
+
           {alreadyHasInstance ? (
             <p className="mt-2 text-xs text-amber-700" data-testid="add-rule-single-warning">
               This Space already has an instance of {ruleType.label}. A second one is unusual, not
@@ -505,84 +774,63 @@ function AddRulePanel({
   )
 }
 
-/** One configured rule instance: its params form, its `applies_to` editor, pause, and delete. */
+/**
+ * One configured rule instance: its params form, its `applies_to` editor,
+ * pause, and delete.
+ *
+ * ## Presentational for `params`/`applies_to`
+ *
+ * This component no longer owns a draft of either field — `RulesManager`
+ * does, one per rule id, and hands this row its current draft (`draft`) plus
+ * `onParamChange` / `onAppliesChange` to report edits upward, along with
+ * whether the draft is currently `changed` (dirty) and, if so, whether it is
+ * `invalidBlockingSave`. That is what makes a single page-level Save/Cancel
+ * possible: a per-row draft with no shared owner cannot be saved or
+ * discarded as one page-level action.
+ *
+ * ## Pause and delete stay immediate, on purpose
+ *
+ * Both remain exactly as before this task: their own buttons, their own
+ * request, fired the moment they are clicked, with no relation to the
+ * draft/dirty machinery above. This is deliberate, not a leftover: pause is
+ * one field with one obvious meaning, and delete is destructive and already
+ * carries its own two-step confirm. Folding either into the page-level Save
+ * would mean a "deleted" (or "paused") row sitting on screen pending a Save
+ * the admin might still Cancel — worse in every direction than the row
+ * simply changing state right away. This component therefore still owns its
+ * own `confirmingDelete`, `busy` and `error` state, scoped to those two
+ * actions only.
+ */
 function RuleRow({
   space,
   rule,
-  ruleTypes,
+  ruleType,
   disabled,
+  draft,
+  changed,
+  invalidBlockingSave,
+  onParamChange,
+  onAppliesChange,
   onUpdated,
   onDeleted,
 }: {
   space: Space
   rule: SpaceRuleRead
-  ruleTypes: RuleTypeRead[]
+  ruleType: RuleTypeRead | undefined
   disabled: boolean
+  draft: RuleDraft
+  changed: boolean
+  invalidBlockingSave: boolean
+  onParamChange: (name: string, value: string) => void
+  onAppliesChange: (draft: AppliesToDraft) => void
   onUpdated: (rule: SpaceRuleRead) => void
   onDeleted: (ruleId: number) => void
 }) {
-  const ruleType = findRuleTypeFor(ruleTypes, rule.rule_type)
-  const brokenReason = ruleBrokenReason(ruleTypes, rule)
+  const brokenReason = ruleBrokenReason(ruleType ? [ruleType] : [], rule)
 
-  const [paramValues, setParamValues] = useState<RuleParamValues>(
-    ruleType ? ruleParamValuesFromStored(ruleType.params, rule.params) : {},
-  )
-  const [appliesDraft, setAppliesDraft] = useState<AppliesToDraft>(
-    draftFromAppliesTo(rule.applies_to),
-  )
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-
-  // The row's own stored params/applies_to can change out from under a local
-  // edit — another admin's write, or this component's own successful save
-  // landing a fresh `updated_at` — and the drafts should reset to match, the
-  // same "compare during render" idiom `SpaceSettingsPanel`'s `settingsKey`
-  // uses rather than an effect (the `set-state-in-effect` lint this repo
-  // enforces).
-  const rowKey = `${rule.id}:${JSON.stringify(rule.params)}:${JSON.stringify(rule.applies_to)}:${rule.enabled}`
-  const [seenRowKey, setSeenRowKey] = useState(rowKey)
-  if (seenRowKey !== rowKey) {
-    setSeenRowKey(rowKey)
-    setParamValues(ruleType ? ruleParamValuesFromStored(ruleType.params, rule.params) : {})
-    setAppliesDraft(draftFromAppliesTo(rule.applies_to))
-    setError('')
-  }
-
-  async function handleSaveParams() {
-    if (!ruleType) return
-    setBusy(true)
-    setError('')
-
-    const result = await updateSpaceRule(space.public_id, rule.id, {
-      params: ruleParamValuesToWire(ruleType.params, paramValues),
-    })
-    setBusy(false)
-
-    if (result.outcome === 'ok') {
-      onUpdated(result.data)
-      return
-    }
-
-    setError(messageFor(result))
-  }
-
-  async function handleSaveAppliesTo() {
-    setBusy(true)
-    setError('')
-
-    const result = await updateSpaceRule(space.public_id, rule.id, {
-      applies_to: appliesToFromDraft(appliesDraft),
-    })
-    setBusy(false)
-
-    if (result.outcome === 'ok') {
-      onUpdated(result.data)
-      return
-    }
-
-    setError(messageFor(result))
-  }
 
   async function handleToggleEnabled() {
     setBusy(true)
@@ -614,19 +862,27 @@ function RuleRow({
     setError(messageFor(result))
   }
 
-  const paramsValid = ruleType ? ruleParamsAreValid(ruleType.params, paramValues) : false
-  const appliesValid = appliesToDraftIsValid(appliesDraft)
-
   return (
-    <li className="py-4" data-testid={`rule-${rule.id}`}>
+    <li
+      className={`py-4 ${changed ? 'border-l-4 border-blue-400 bg-blue-50/40 pl-3' : ''}`}
+      data-testid={`rule-${rule.id}`}
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
+        <div className="flex items-center gap-2">
           <p className="text-sm font-medium text-slate-900" data-testid={`rule-${rule.id}-type`}>
             {ruleType?.label ?? rule.rule_type}
           </p>
           {!rule.enabled ? (
             <span className="text-xs text-amber-700" data-testid={`rule-${rule.id}-paused-badge`}>
               Paused
+            </span>
+          ) : null}
+          {changed ? (
+            <span
+              className="text-xs font-medium text-blue-700"
+              data-testid={`rule-${rule.id}-changed`}
+            >
+              Changed
             </span>
           ) : null}
         </div>
@@ -691,43 +947,36 @@ function RuleRow({
         </p>
       ) : null}
 
+      {invalidBlockingSave ? (
+        <p
+          className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-800"
+          data-testid={`rule-${rule.id}-invalid`}
+          role="alert"
+        >
+          This row&rsquo;s changes are invalid and are blocking Save — fix the highlighted field(s)
+          below, or Cancel to discard them.
+        </p>
+      ) : null}
+
       {ruleType ? (
         <div className="mt-2">
           <RuleParamsForm
             idPrefix={`rule-${rule.id}`}
             params={ruleType.params}
-            values={paramValues}
-            onChange={(name, value) => setParamValues((current) => ({ ...current, [name]: value }))}
+            values={draft.paramValues}
+            onChange={onParamChange}
             disabled={disabled || busy}
           />
-          <button
-            type="button"
-            className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-50"
-            data-testid={`rule-${rule.id}-params-save`}
-            disabled={disabled || busy || !paramsValid}
-            onClick={() => void handleSaveParams()}
-          >
-            Save parameters
-          </button>
         </div>
       ) : null}
 
       <div className="mt-3">
         <AppliesToEditor
           idPrefix={`rule-${rule.id}`}
-          draft={appliesDraft}
-          onChange={setAppliesDraft}
+          draft={draft.appliesDraft}
+          onChange={onAppliesChange}
           disabled={disabled || busy}
         />
-        <button
-          type="button"
-          className="mt-2 rounded border border-slate-300 px-2 py-1 text-xs disabled:opacity-50"
-          data-testid={`rule-${rule.id}-applies-save`}
-          disabled={disabled || busy || !appliesValid}
-          onClick={() => void handleSaveAppliesTo()}
-        >
-          Save scope
-        </button>
       </div>
 
       {error ? (
