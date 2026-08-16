@@ -28,6 +28,31 @@ type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: stri
  * is a `space_rules` row, edited on its own page at `/s/{public_id}/rules`,
  * linked from here rather than duplicated into this dashboard.
  *
+ * ## The console is a side nav of sections, not a stack
+ *
+ * For a Space an admin manages, `SpaceAdmin` renders a left-hand navigation
+ * list of **sections** — `People` (`AccessRequestsPanel`, `MembersPanel`,
+ * `InvitationsPanel`), `Resources` (`ResourcesPanel`), and `Settings`
+ * (`SpaceSettingsPanel`, `ShareLink`, and `ArchiveSpacePanel` for an owner) —
+ * with exactly one section's panels rendered in the main area at a time.
+ * `People` is the section shown on arrival, because the access-request queue
+ * is the one thing on this page that is *waiting* on the admin. Section
+ * selection is local component state, not a route: there is deliberately no
+ * `?section=` and no nested route, so `/admin` stays the one address this
+ * page answers to.
+ *
+ * The Space picker above (`space-picker-panel`) is not itself a section — it
+ * scopes every one of them, and stays above the section nav rather than
+ * becoming a fourth-or-so entry in it.
+ *
+ * **`Rules` is a fourth entry in that nav list, and it is a link, not a
+ * section.** Clicking it navigates to `/s/{public_id}/rules`
+ * (`SpaceRulesPage`), which already carries its own back-link. It is
+ * deliberately *not* pulled into this console — absorbing that page is a
+ * bigger change than re-parenting these panels, and its save model is being
+ * rewritten separately (task 9.7). Do not "helpfully" fold it into a fourth
+ * in-place section later without revisiting that decision.
+ *
  * ## Resource management lives here, not on the Space page
  *
  * `POST /spaces/{public_id}/resources` is admin+, exactly like every other
@@ -121,7 +146,7 @@ export function AdminPage() {
 
   return (
     <main className="min-h-screen bg-slate-50 p-8 text-slate-800">
-      <div className="mx-auto max-w-3xl">
+      <div className="mx-auto max-w-5xl">
         <h1 className="text-2xl font-semibold text-slate-900">Manage Spaces</h1>
         <p className="mt-2 mb-6 text-sm text-slate-600">
           Create a Space, decide who is in it, and hand out its link.
@@ -166,8 +191,6 @@ export function AdminPage() {
                     </option>
                   ))}
                 </select>
-
-                {selected ? <ShareLink publicId={selected.public_id} /> : null}
               </section>
 
               {selected ? (
@@ -186,13 +209,33 @@ export function AdminPage() {
   )
 }
 
+/** The section ids the console's side nav offers, in nav order. */
+type SectionId = 'people' | 'resources' | 'settings'
+
+const SECTIONS: ReadonlyArray<{ id: SectionId; label: string }> = [
+  { id: 'people', label: 'People' },
+  { id: 'resources', label: 'Resources' },
+  { id: 'settings', label: 'Settings' },
+]
+
+const NAV_ITEM_BASE =
+  'rounded px-3 py-2 text-left text-sm font-medium whitespace-nowrap transition-colors'
+const NAV_ITEM_ACTIVE = 'bg-slate-800 text-white'
+const NAV_ITEM_INACTIVE = 'text-slate-700 hover:bg-slate-100'
+
 /**
  * The panels for one Space, chosen by the caller's role in it.
  *
  * A plain member sees the notice and nothing else — no member list, no queue, no
- * invitations. The invitation list in particular is admin-only on the server too,
- * because it names people who are *not* in the Space: who is being recruited is
- * not every member's business.
+ * invitations, and no section nav to click into. The invitation list in
+ * particular is admin-only on the server too, because it names people who are
+ * *not* in the Space: who is being recruited is not every member's business.
+ *
+ * For an admin or owner, the section shown is local `useState`, not derived
+ * from `space` — switching Spaces in the picker above re-renders this same
+ * component with new props rather than remounting it, so the selected section
+ * survives a Space switch exactly as the ticket wants: it is a view of the
+ * console, not of one Space.
  */
 function SpaceAdmin({
   space,
@@ -207,6 +250,7 @@ function SpaceAdmin({
 }) {
   const isAdmin = space.my_role === 'admin' || space.my_role === 'owner'
   const archived = space.archived_at !== null
+  const [section, setSection] = useState<SectionId>('people')
 
   if (!isAdmin) {
     return (
@@ -234,41 +278,73 @@ function SpaceAdmin({
         </p>
       ) : null}
 
-      <AccessRequestsPanel space={space} onApproved={onMembershipChanged} />
-      <MembersPanel
-        space={space}
-        refreshToken={membershipToken}
-        onMembershipChanged={onMembershipChanged}
-      />
-      <InvitationsPanel space={space} />
-      <SpaceSettingsPanel space={space} onSpaceChanged={onSpaceChanged} />
-      {/* Nothing else on this page reads the Resource list today, so `onChanged`
-          is a no-op — it exists so a future caller (a Resources count, a
-          single-Resource redirect check) is a wiring change, not a rewrite. */}
-      <ResourcesPanel space={space} onChanged={() => {}} />
-
-      <section
-        className="rounded-lg border border-slate-200 bg-white p-4"
-        data-testid="rules-link-panel"
-      >
-        <h2 className="text-sm font-semibold text-slate-900">Rules</h2>
-        <p className="mt-1 text-xs text-slate-500">
-          Operating hours, slot interval, duration and frequency caps — every booking constraint
-          this Space enforces.
-        </p>
-        <Link
-          to={`/s/${space.public_id}/rules`}
-          className="mt-3 inline-block rounded bg-slate-800 px-3 py-1 text-sm text-white"
-          data-testid="space-rules-link"
+      <div className="flex flex-col gap-6 md:flex-row md:items-start">
+        <nav
+          className="flex flex-row gap-1 overflow-x-auto md:w-44 md:flex-none md:flex-col"
+          data-testid="admin-nav"
+          aria-label="Console sections"
         >
-          Manage rules
-        </Link>
-      </section>
+          {SECTIONS.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              data-testid={`admin-nav-${entry.id}`}
+              aria-current={section === entry.id ? 'true' : undefined}
+              className={`${NAV_ITEM_BASE} ${
+                section === entry.id ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE
+              }`}
+              onClick={() => setSection(entry.id)}
+            >
+              {entry.label}
+            </button>
+          ))}
 
-      {/* Archiving is owner-only on the server, so an admin is not offered it. */}
-      {space.my_role === 'owner' ? (
-        <ArchiveSpacePanel space={space} onArchived={onSpaceChanged} />
-      ) : null}
+          {/* A link out, not a section: visibly different (an arrow, a
+              lighter weight, never the active-section styling above) so
+              clicking it reads as leaving the console rather than switching
+              within it. */}
+          <Link
+            to={`/s/${space.public_id}/rules`}
+            data-testid="space-rules-link"
+            className={`${NAV_ITEM_BASE} mt-1 border-t border-slate-200 pt-3 text-slate-500 hover:bg-slate-100 hover:text-slate-700 md:mt-2`}
+          >
+            Rules ↗
+          </Link>
+        </nav>
+
+        <div className="min-w-0 flex-1 space-y-6" data-testid="admin-section-content">
+          {section === 'people' ? (
+            <>
+              <AccessRequestsPanel space={space} onApproved={onMembershipChanged} />
+              <MembersPanel
+                space={space}
+                refreshToken={membershipToken}
+                onMembershipChanged={onMembershipChanged}
+              />
+              <InvitationsPanel space={space} />
+            </>
+          ) : null}
+
+          {section === 'resources' ? (
+            // Nothing else on this page reads the Resource list today, so
+            // `onChanged` is a no-op — it exists so a future caller (a
+            // Resources count, a single-Resource redirect check) is a wiring
+            // change, not a rewrite.
+            <ResourcesPanel space={space} onChanged={() => {}} />
+          ) : null}
+
+          {section === 'settings' ? (
+            <>
+              <SpaceSettingsPanel space={space} onSpaceChanged={onSpaceChanged} />
+              <ShareLink publicId={space.public_id} />
+              {/* Archiving is owner-only on the server, so an admin is not offered it. */}
+              {space.my_role === 'owner' ? (
+                <ArchiveSpacePanel space={space} onArchived={onSpaceChanged} />
+              ) : null}
+            </>
+          ) : null}
+        </div>
+      </div>
     </div>
   )
 }
