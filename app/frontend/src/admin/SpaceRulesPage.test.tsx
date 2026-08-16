@@ -35,7 +35,7 @@ import {
   updateSpaceRule,
   type RuleTypeRead,
 } from '../api'
-import { makeRuleParam, makeRuleType, makeSpace, makeSpaceRule, ok } from './fixtures'
+import { failed, makeRuleParam, makeRuleType, makeSpace, makeSpaceRule, ok } from './fixtures'
 import { SpaceRulesPage } from './SpaceRulesPage'
 
 vi.mock('../api', () => ({
@@ -182,9 +182,46 @@ describe('SpaceRulesPage — create, pause, delete', () => {
     fireEvent.click(screen.getByTestId('add-rule-submit'))
 
     expect(await screen.findByTestId('rule-5')).toBeTruthy()
+    // `AddRulePanel` now carries its own `AppliesToEditor`, defaulted to
+    // "always" (`{ mode: 'always' }`), which converts to `null` on the wire
+    // (`appliesToFromDraft`) — task 9.7 made create send `applies_to` always,
+    // not only once a scope is chosen.
     expect(vi.mocked(createSpaceRule)).toHaveBeenCalledWith('sp_7f3a9c', {
       rule_type: 'max_duration',
       params: { max_duration_minutes: 90 },
+      applies_to: null,
+    })
+  })
+
+  it('creates a rule scoped to a weekday, and the scope reaches the wire body', async () => {
+    // Task 9.7's task-1: scope is editable at create time, not only as a
+    // later edit on the row. This proves the create call itself carries the
+    // chosen `applies_to` rather than always defaulting to "always".
+    const created = makeSpaceRule({
+      id: 6,
+      rule_type: 'max_duration',
+      params: { max_duration_minutes: 90 },
+      applies_to: { weekdays: [2] },
+    })
+    vi.mocked(createSpaceRule).mockResolvedValue(ok(created))
+
+    renderPage()
+
+    fireEvent.change(await screen.findByTestId('add-rule-type-select'), {
+      target: { value: 'max_duration' },
+    })
+    fireEvent.change(await screen.findByTestId('add-rule-param-max_duration_minutes'), {
+      target: { value: '90' },
+    })
+    fireEvent.click(screen.getByTestId('add-rule-applies-mode-weekdays'))
+    fireEvent.click(screen.getByTestId('add-rule-applies-weekday-2'))
+    fireEvent.click(screen.getByTestId('add-rule-submit'))
+
+    expect(await screen.findByTestId('rule-6')).toBeTruthy()
+    expect(vi.mocked(createSpaceRule)).toHaveBeenCalledWith('sp_7f3a9c', {
+      rule_type: 'max_duration',
+      params: { max_duration_minutes: 90 },
+      applies_to: { weekdays: [2] },
     })
   })
 
@@ -225,5 +262,192 @@ describe('SpaceRulesPage — the fail-closed row made visible', () => {
 
     const banner = await screen.findByTestId('rule-9-broken')
     expect(banner.textContent).toContain('Missing required parameter')
+  })
+})
+
+/**
+ * Task 9.7 — the page-level save model: `RulesManager` holds one draft per
+ * configured row, `rules-save` writes only the dirty ones (one `PATCH` each,
+ * carrying `params` and `applies_to` together), `rules-cancel` discards every
+ * draft with no request, and a dirty row is visibly marked
+ * (`rule-{id}-changed`). This replaces the old per-row `-params-save` /
+ * `-applies-save` buttons, which no longer exist anywhere in this component.
+ */
+describe('SpaceRulesPage — page-level save', () => {
+  it('disables Save on arrival, enables it once a row is edited, and disables it again once the edit is undone', async () => {
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([makeSpaceRule({ id: 100, params: { max_duration_minutes: 90 } })]),
+    )
+
+    renderPage()
+
+    const saveButton = (await screen.findByTestId('rules-save')) as HTMLButtonElement
+    expect(saveButton.disabled).toBe(true)
+
+    const paramInput = screen.getByTestId('rule-100-param-max_duration_minutes')
+    fireEvent.change(paramInput, { target: { value: '120' } })
+    expect(saveButton.disabled).toBe(false)
+    expect(screen.getByTestId('rule-100-changed')).toBeTruthy()
+
+    fireEvent.change(paramInput, { target: { value: '90' } })
+    expect(saveButton.disabled).toBe(true)
+    expect(screen.queryByTestId('rule-100-changed')).toBeNull()
+  })
+
+  it('writes only the dirty row, leaving the untouched rows alone', async () => {
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([
+        makeSpaceRule({ id: 100, params: { max_duration_minutes: 60 } }),
+        makeSpaceRule({ id: 101, params: { max_duration_minutes: 90 } }),
+        makeSpaceRule({ id: 102, params: { max_duration_minutes: 120 } }),
+      ]),
+    )
+    vi.mocked(updateSpaceRule).mockResolvedValue(
+      ok(makeSpaceRule({ id: 101, params: { max_duration_minutes: 75 } })),
+    )
+
+    renderPage()
+
+    fireEvent.change(await screen.findByTestId('rule-101-param-max_duration_minutes'), {
+      target: { value: '75' },
+    })
+    fireEvent.click(screen.getByTestId('rules-save'))
+
+    await vi.waitFor(() => expect(vi.mocked(updateSpaceRule)).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(updateSpaceRule)).toHaveBeenCalledWith('sp_7f3a9c', 101, {
+      applies_to: null,
+      params: { max_duration_minutes: 75 },
+    })
+  })
+
+  it('sends params and applies_to together in one PATCH when both were edited on the same row', async () => {
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([makeSpaceRule({ id: 100, params: { max_duration_minutes: 90 }, applies_to: null })]),
+    )
+    vi.mocked(updateSpaceRule).mockResolvedValue(
+      ok(
+        makeSpaceRule({
+          id: 100,
+          params: { max_duration_minutes: 120 },
+          applies_to: { weekdays: [3] },
+        }),
+      ),
+    )
+
+    renderPage()
+
+    fireEvent.change(await screen.findByTestId('rule-100-param-max_duration_minutes'), {
+      target: { value: '120' },
+    })
+    fireEvent.click(screen.getByTestId('rule-100-applies-mode-weekdays'))
+    fireEvent.click(screen.getByTestId('rule-100-applies-weekday-3'))
+    fireEvent.click(screen.getByTestId('rules-save'))
+
+    await vi.waitFor(() => expect(vi.mocked(updateSpaceRule)).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(updateSpaceRule)).toHaveBeenCalledWith('sp_7f3a9c', 100, {
+      applies_to: { weekdays: [3] },
+      params: { max_duration_minutes: 120 },
+    })
+  })
+
+  it('cancel restores every field to its stored value and makes no request', async () => {
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([makeSpaceRule({ id: 100, params: { max_duration_minutes: 90 }, applies_to: null })]),
+    )
+
+    renderPage()
+
+    const paramInput = (await screen.findByTestId(
+      'rule-100-param-max_duration_minutes',
+    )) as HTMLInputElement
+    fireEvent.change(paramInput, { target: { value: '120' } })
+    fireEvent.click(screen.getByTestId('rule-100-applies-mode-weekdays'))
+    fireEvent.click(screen.getByTestId('rule-100-applies-weekday-1'))
+    expect(screen.getByTestId('rule-100-changed')).toBeTruthy()
+
+    fireEvent.click(screen.getByTestId('rules-cancel'))
+
+    expect(paramInput.value).toBe('90')
+    expect((screen.getByTestId('rule-100-applies-mode-always') as HTMLInputElement).checked).toBe(
+      true,
+    )
+    expect(screen.queryByTestId('rule-100-changed')).toBeNull()
+    expect(vi.mocked(updateSpaceRule)).not.toHaveBeenCalled()
+  })
+
+  it('marks only the row that changed', async () => {
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([
+        makeSpaceRule({ id: 100, params: { max_duration_minutes: 60 } }),
+        makeSpaceRule({ id: 101, params: { max_duration_minutes: 90 } }),
+      ]),
+    )
+
+    renderPage()
+
+    fireEvent.change(await screen.findByTestId('rule-100-param-max_duration_minutes'), {
+      target: { value: '75' },
+    })
+
+    expect(screen.getByTestId('rule-100-changed')).toBeTruthy()
+    expect(screen.queryByTestId('rule-101-changed')).toBeNull()
+  })
+
+  it('on partial failure, clears the row that saved and keeps the row that failed dirty and named', async () => {
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([
+        makeSpaceRule({ id: 100, rule_type: 'max_duration', params: { max_duration_minutes: 60 } }),
+        makeSpaceRule({ id: 101, rule_type: 'max_duration', params: { max_duration_minutes: 90 } }),
+      ]),
+    )
+    // `updateSpaceRule` is called once per dirty row (`Promise.allSettled`),
+    // never a bulk request — row 100 succeeds and echoes the edited value
+    // back, row 101 fails.
+    vi.mocked(updateSpaceRule).mockImplementation(async (_publicId, ruleId) => {
+      if (ruleId === 100) {
+        return ok(makeSpaceRule({ id: 100, params: { max_duration_minutes: 65 } }))
+      }
+      return failed('The server had a problem.')
+    })
+
+    renderPage()
+
+    fireEvent.change(await screen.findByTestId('rule-100-param-max_duration_minutes'), {
+      target: { value: '65' },
+    })
+    fireEvent.change(await screen.findByTestId('rule-101-param-max_duration_minutes'), {
+      target: { value: '95' },
+    })
+    fireEvent.click(screen.getByTestId('rules-save'))
+
+    await vi.waitFor(() => expect(vi.mocked(updateSpaceRule)).toHaveBeenCalledTimes(2))
+
+    // The succeeded row goes clean — its "changed" marker disappears.
+    await vi.waitFor(() => expect(screen.queryByTestId('rule-100-changed')).toBeNull())
+    // The failed row stays dirty and marked, its edited value intact.
+    expect(screen.getByTestId('rule-101-changed')).toBeTruthy()
+    expect(
+      (screen.getByTestId('rule-101-param-max_duration_minutes') as HTMLInputElement).value,
+    ).toBe('95')
+
+    const errorBanner = await screen.findByTestId('rules-save-error')
+    expect(errorBanner.textContent).toContain('rule 101')
+    expect(errorBanner.textContent).toContain('The server had a problem.')
+    expect(errorBanner.textContent).not.toContain('rule 100')
+  })
+
+  it('disables Save on an archived Space', async () => {
+    vi.mocked(getSpace).mockResolvedValue(
+      ok(makeSpace({ my_role: 'admin', archived_at: '2026-07-20T09:00:00.000Z' })),
+    )
+    vi.mocked(listSpaceRules).mockResolvedValue(
+      ok([makeSpaceRule({ id: 100, params: { max_duration_minutes: 90 } })]),
+    )
+
+    renderPage()
+
+    expect(await screen.findByTestId('rules-archived-banner')).toBeTruthy()
+    const saveButton = (await screen.findByTestId('rules-save')) as HTMLButtonElement
+    expect(saveButton.disabled).toBe(true)
   })
 })
