@@ -24,14 +24,23 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
+from shape import project_day, validate_shape
+
 from app.auth.dependencies import get_current_user
 from app.db.session import get_session
 from app.identity import service
-from app.identity.authz import SpaceContext, lookup_space, require_space_role, space_not_found
+from app.identity.authz import (
+    SpaceContext,
+    lookup_space,
+    require_space_role,
+    role_at_least,
+    space_not_found,
+)
 from app.identity.models import AccessRequestStatus, InvitationStatus, MembershipRole, User
 from app.identity.schemas import (
     AccessRequestCreate,
     AccessRequestRead,
+    DayProjectionRead,
     DayScheduleRead,
     InvitationCreate,
     InvitationRead,
@@ -91,13 +100,16 @@ RULE_NOT_FOUND_DETAIL = "No such rule instance in this Space."
 INVALID_OPERATING_HOURS_DETAIL = (
     "Opening time must be within a single day, and earlier than closing time by at most 24 hours."
 )
+DRAFT_SHAPE_REQUIRES_ADMIN_DETAIL = "Viewing the draft shape requires the admin role in this Space."
+NO_DRAFT_SHAPE_DETAIL = "This Space has no draft shape to preview."
 
-# `GET /spaces/{public_id}/schedule`'s upper bound on `days` (task 6.9). Two
-# calendar months is comfortably more than the single week the frontend grid
-# ever asks for in one request, while still bounding the work one request can
-# cause — the same "at most one calendar month of history" spirit
-# `CLAUDE.md` states for rule evaluation, applied here to how far ahead a
-# single schedule request may resolve.
+# `GET /spaces/{public_id}/schedule`'s upper bound on `days` (task 6.9), reused rather than a
+# second number for `GET /spaces/{public_id}/calendar` (task 10.3) asking a near-identical
+# question over `from`/`to` instead of `from`/`days`. Two calendar months is comfortably more
+# than the single week the frontend grid ever asks for in one request, while still bounding the
+# work one request can cause — the same "at most one calendar month of history" spirit
+# `CLAUDE.md` states for rule evaluation, applied here to how far ahead a single request may
+# resolve.
 MAX_SCHEDULE_DAYS = 62
 
 
@@ -186,6 +198,16 @@ def _unknown_rule_type(rule_type: str) -> HTTPException:
 
 def _invalid_rule_params(message: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=message)
+
+
+def _draft_shape_requires_admin() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN, detail=DRAFT_SHAPE_REQUIRES_ADMIN_DETAIL
+    )
+
+
+def _no_draft_shape() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=NO_DRAFT_SHAPE_DETAIL)
 
 
 @router.post("", response_model=SpaceRead, status_code=status.HTTP_201_CREATED)
@@ -755,6 +777,76 @@ def get_space_schedule(
     config = service.space_rule_config(session, context.space)
     return [
         DayScheduleRead.build(on_date, resolve_day_schedule(config, on_date))
+        for on_date in (from_date + timedelta(days=offset) for offset in range(days))
+    ]
+
+
+@router.get("/{public_id}/calendar", response_model=list[DayProjectionRead])
+def get_space_calendar(
+    context: MemberContext,
+    session: SessionDep,
+    from_date: Annotated[date, Query(alias="from")],
+    to_date: Annotated[date, Query(alias="to")],
+    draft: bool = False,
+) -> list[DayProjectionRead]:
+    """The shape's own projection for each local date in ``[from, to]`` — task 10.3, the read half
+    of the availability boundary ``create_resource_booking``'s gate enforces.
+
+    **The server projects; the client never does.** ``shape.project_day`` is called here and
+    nowhere else on this path, the identical function the gate calls through ``shape.permits`` —
+    this is the rule ``.claude/rules/identity-and-access.md`` already states for
+    ``anchor_minutes`` ("the client never derives it, because which rows govern a date is the
+    server's question"), carried into the shape: a client that projected its own calendar could
+    disagree with what the gate would actually enforce.
+
+    **Member+ for the live shape.** A member may already see the hours the calendar renders, so
+    resolving them again here conceals nothing a plain read of the calendar does not already —
+    the same gate ``GET .../schedule`` uses.
+
+    **Admin+ for ``draft=true``, checked here rather than inferred from the request.** A draft is
+    an admin's half-finished thought and must not be visible to members. ``MemberContext`` alone
+    only proves the caller belongs to the Space; the role is re-checked inline against
+    ``context.role`` before the draft is ever read, the same shape
+    ``cancel_resource_booking`` uses to resolve two different authorities on one route
+    (``app.routers.resource_bookings``) — ``require_space_role`` itself is a fixed-role
+    dependency and cannot branch on a query parameter, so the second check has to live in the
+    handler, on the server's own reading of the caller's role, never the client's claim of one.
+
+    ``to`` is **inclusive** on both ends, matching the shape schema's own
+    ``effective_from``/``effective_to`` convention rather than the engine's half-open one — this
+    is a calendar range a human typed, not an instant. The range is bounded by
+    ``MAX_SCHEDULE_DAYS``, the identical cap ``GET .../schedule`` already imposes on ``days``.
+
+    An unreadable live shape (``shape.InvalidShapeError``, a stored document that no longer
+    validates) is left to raise past this handler rather than caught: that failure is a data
+    integrity problem with the Space's own configuration, not a request this endpoint can answer
+    for any Space, and the one caller that turns it into a fail-closed *booking* refusal is the
+    gate itself (``create_resource_booking``), not a read.
+    """
+    if to_date < from_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="to must not be before from"
+        )
+
+    days = (to_date - from_date).days + 1
+    if days > MAX_SCHEDULE_DAYS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"from/to must not span more than {MAX_SCHEDULE_DAYS} days",
+        )
+
+    if draft:
+        if not role_at_least(context.role, MembershipRole.ADMIN):
+            raise _draft_shape_requires_admin()
+        draft_row = service.draft_shape(session, context.space)
+        if draft_row is None:
+            raise _no_draft_shape()
+        shape = validate_shape(draft_row.document)
+    else:
+        shape = service.live_shape(session, context.space)
+
+    return [
+        DayProjectionRead.build(project_day(shape, on_date))
         for on_date in (from_date + timedelta(days=offset) for offset in range(days))
     ]
 

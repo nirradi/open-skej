@@ -16,7 +16,12 @@ The mapping of outcomes to status codes:
 * **404 (``detail``)** — the Space is not the caller's, or the Resource / booking
   is not in it. Raised by ``require_space_role`` and the scoped lookups, and a
   404 (never 403) for a foreign Space so the ``public_id`` is not an oracle.
-* **422 + ``error: "rule_denied"``** — the rule engine refused; nothing written.
+* **422 + ``error: "rule_denied"``** — the calendar shape or the rule engine
+  refused; nothing written. One response for both (task 10.3): the shape gate
+  runs first, before the rule engine ever builds a canon, and reuses this
+  identical status code and body so no client learns a second branch to
+  render for what is, from a member's side, one situation — "we will not
+  take this booking, and here is why".
 * **409 + ``error: "overlap"``** — the slot is already taken.
 * **409 + ``error: "space_archived"``** — the Space is archived, so it takes no
   new bookings. Its existing future bookings stay and remain cancellable.
@@ -38,13 +43,16 @@ Space's own configuration — see ``app.identity.service.space_rule_config``
 ``verdict.allowed`` / ``verdict.message``.
 """
 
+import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
-from rules import history_window
+from rules import RULE_ERROR_MESSAGE, history_window
+from shape import InvalidShapeError, permits
 from sqlalchemy.orm import Session
 
 from app.db import (
@@ -60,7 +68,7 @@ from app.identity import service
 from app.identity.authz import SpaceContext, require_space_role, role_at_least
 from app.identity.models import MembershipRole, Resource, Space, User
 from app.db.session import get_session
-from app.rules_stub import BookingRequest, evaluate
+from app.rules_stub import BookingRequest, _local_date, _local_day_bounds, evaluate
 from app.schemas import (
     BookingAlreadyCancelled,
     BookingAlreadyStarted,
@@ -74,6 +82,7 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/spaces/{public_id}/resources/{resource_id}/bookings", tags=["bookings"])
+logger = logging.getLogger(__name__)
 
 SessionDep = Annotated[Session, Depends(get_session)]
 DriverDep = Annotated[BookingDriver, Depends(get_driver)]
@@ -233,10 +242,14 @@ def create_resource_booking(
 ) -> BookingRead | JSONResponse:
     """Book this Resource for the authenticated caller.
 
-    Order is load-bearing: the archived check and the rules run before the driver
-    is reached, so a refusal never leaves a partial write. An archived Space is
-    refused up front — no rule needs to run to know a closed venue takes no
-    bookings.
+    Order is load-bearing: archived? -> shape? -> rules -> driver
+    (``.claude/rules/calendar-shape.md``, OVERVIEW decision 8). An archived Space is refused up
+    front — no rule needs to run to know a closed venue takes no bookings. The **shape gate**
+    (task 10.3) runs next, before the rule engine ever builds a canon: when a booking breaks both
+    the shape and a rule, the shape's own copy ("we close at 20:00") is the more actionable of the
+    two, the same fail-fast arbitration the engine's own rule priorities already perform one layer
+    down. The gate returns the identical 422 ``BookingDenied`` the rule engine's own denial does —
+    no new status code, no new response model.
     """
     if context.archived:
         return JSONResponse(
@@ -245,6 +258,51 @@ def create_resource_booking(
         )
 
     space = context.space_context.space
+
+    # --- The shape gate. Structure before policy, and it must fail closed. ---
+    try:
+        current_shape = service.live_shape(session, space)
+    except InvalidShapeError:
+        # An unreadable shape is a shape that refuses, never one that is bypassed — the identical
+        # rule `app.rule_catalog` already states for a generated rule row that will not hoist. The
+        # real cause goes to the log; the client gets the engine's own generic copy, never the
+        # validator's message, which names an internal field path rather than anything a member
+        # booking a court should read.
+        logger.error(
+            "Space %s's live shape no longer validates; refusing every booking against it.",
+            space.public_id,
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=BookingDenied(message=RULE_ERROR_MESSAGE).model_dump(),
+        )
+
+    # The shape holds local wall clock; the request holds a UTC instant. This is the one place
+    # that conversion happens (`.claude/rules/calendar-shape.md`) — `_local_date` and
+    # `_local_day_bounds` are `app.rules_stub`'s own implementation of "this venue's local day",
+    # reused rather than re-derived a second time. A booking spanning local midnight resolves
+    # against the date it **starts** on, matching every window convention in the engine, and its
+    # `end_minutes` may legitimately exceed 1440 — exactly what an `end_time` past `24:00` in the
+    # shape exists to meet.
+    on_date = _local_date(payload.start_at, space.timezone)
+    day_start, _ = _local_day_bounds(on_date, space.timezone)
+    start_minutes = math.floor((payload.start_at - day_start).total_seconds() / 60)
+    end_minutes = math.ceil((payload.end_at - day_start).total_seconds() / 60)
+
+    # `permits` raises `InvalidBookingRequestError` only for a genuine caller/adapter mistake —
+    # never for an ordinary refusal, which is a `ShapeVerdict(allowed=False, ...)` below. Given
+    # `payload` is already validated (`start_at < end_at`, both timezone-aware) and `on_date` is
+    # derived from `payload.start_at` itself, that exception is not caught here: reaching it would
+    # mean this adapter built its own inputs wrong, the identical "loud on the cause" treatment
+    # `ContextMismatchError` gets from `rules_stub.evaluate` for the same reason.
+    shape_verdict = permits(current_shape, on_date, start_minutes, end_minutes)
+    if not shape_verdict.allowed:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content=BookingDenied(message=shape_verdict.reason).model_dump(),
+        )
+
     config = service.space_rule_config(session, space)
 
     # One instant, shared by the history query and the engine's own clock, so a

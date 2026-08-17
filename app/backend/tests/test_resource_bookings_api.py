@@ -20,6 +20,7 @@ share a driver instance across tests that each drop and recreate the schema.
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +33,15 @@ from app.db.postgres import PostgresBookingDriver
 from app.db.session import get_session
 from app.dependencies import get_driver
 from app.identity import service
-from app.identity.models import MembershipRole, Resource, Space, SpaceMembership, User
+from app.identity.models import (
+    MembershipRole,
+    Resource,
+    ShapeStatus,
+    Space,
+    SpaceCalendarShape,
+    SpaceMembership,
+    User,
+)
 from app.identity.schemas import SpaceRuleUpdate
 from app.main import app
 
@@ -57,6 +66,25 @@ def at(hour: int, minute: int = 0) -> datetime:
 
 def iso(value: datetime) -> str:
     return value.isoformat()
+
+
+# A shape permissive enough that the pre-existing rule-engine tests below (max_duration,
+# session_length, overlap) are refused only by the *rule* each is named for, never by the
+# availability gate (task 10.3) that now runs ahead of it. ``DEFAULT_SHAPE``'s own [60]-only grid
+# would otherwise refuse several of their 30- and 120-minute bookings before the rule under test
+# ever ran, which is exactly the ordering bug this gate must not introduce into an unrelated suite.
+_PERMISSIVE_SHAPE = {
+    "version": 1,
+    "operating_blocks": [
+        {
+            "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+            "start_time": "00:00",
+            "end_time": "24:00",
+            "allowed_durations_mins": [30, 60, 90, 120, 180],
+        }
+    ],
+    "blackout_windows": [],
+}
 
 
 # --- Fixtures. ----------------------------------------------------------------
@@ -168,6 +196,17 @@ def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> N
         )
 
 
+def _set_shape(session: Session, space: Space, owner: User, document: dict) -> None:
+    """Publish ``document`` as this Space's live shape, replacing whatever came before.
+
+    Goes through the real service functions (``upsert_draft`` then ``publish_draft``) rather than
+    writing the row directly, so a test using this exercises the same validated write path a real
+    admin's chat turn would, not a shortcut around it.
+    """
+    service.upsert_draft(session, space, document, owner)
+    service.publish_draft(session, space, owner)
+
+
 @pytest.fixture
 def space(session: Session, owner: User) -> Space:
     """A Space with its auto-created first Resource, owned by ``owner``.
@@ -178,9 +217,15 @@ def space(session: Session, owner: User) -> Space:
     Space with no configuration would enforce nothing but ``NotInThePastRule``,
     and ``test_rule_denial_returns_422_and_persists_nothing`` needs a real rule
     to trip.
+
+    Its live shape is replaced with ``_PERMISSIVE_SHAPE`` (task 10.3): the availability gate now
+    runs ahead of every rule this module tests, and ``create_space``'s own ``DEFAULT_SHAPE`` only
+    offers 60-minute bookings — too narrow for the 30-, 90- and 120-minute requests several of
+    those rule tests depend on to reach the rule engine at all.
     """
     space = service.create_space(session, owner, name="Court Club", description="A club")
     _set_rule(session, space, "max_duration", {"max_duration_minutes": 120})
+    _set_shape(session, space, owner, _PERMISSIVE_SHAPE)
     return space
 
 
@@ -347,6 +392,286 @@ def test_an_on_grid_booking_is_unaffected_by_session_length(
 
     response = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(11))}
+    )
+
+    assert response.status_code == 201, response.text
+
+
+# --- The availability shape gate (task 10.3). -----------------------------------
+#
+# ``space``'s own fixture already proves the ordinary case — every test above that reaches 201
+# passed the (permissive) shape gate and then the rule engine. These tests exercise the gate's
+# own refusals, each against a deliberately narrower shape than the fixture's default.
+
+_NARROW_SHAPE = {
+    "version": 1,
+    "operating_blocks": [
+        {
+            "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+            "start_time": "09:00",
+            "end_time": "17:00",
+            "allowed_durations_mins": [60],
+        }
+    ],
+    "blackout_windows": [],
+}
+
+
+def test_a_booking_outside_the_shape_is_refused_and_never_reaches_the_rule_engine(
+    api: Api,
+    driver: PostgresBookingDriver,
+    session: Session,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    """Proves the ordering directly, mirroring
+    ``test_archived_check_runs_before_the_rules_or_driver_are_touched``: the gate must refuse
+    *before* ``evaluate`` is ever called, not merely produce the same outcome it would have.
+    """
+    _set_shape(session, space, owner, _NARROW_SHAPE)
+
+    import app.routers.resource_bookings as resource_bookings_module
+
+    def exploding_evaluate(*args, **kwargs):
+        raise AssertionError("the rule engine must not run for a booking the shape already refused")
+
+    original_evaluate = resource_bookings_module.evaluate
+    resource_bookings_module.evaluate = exploding_evaluate
+    try:
+        # 20:00 is well outside the block's 09:00-17:00 window.
+        response = api.as_user(owner).post(
+            _url(space, resource), json={"start_at": iso(at(20)), "end_at": iso(at(21))}
+        )
+    finally:
+        resource_bookings_module.evaluate = original_evaluate
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "rule_denied"
+
+    bookings = driver.list_bookings(
+        start=DAY - timedelta(days=1),
+        end=DAY + timedelta(days=1),
+        resource_id=resource.id,
+        include_cancelled=True,
+    )
+    assert bookings == []
+
+
+def test_a_duration_the_block_does_not_offer_is_refused(
+    api: Api,
+    driver: PostgresBookingDriver,
+    session: Session,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    _set_shape(session, space, owner, _NARROW_SHAPE)
+
+    response = api.as_user(owner).post(
+        _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11, 30))}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "rule_denied"
+
+    bookings = driver.list_bookings(
+        start=DAY - timedelta(days=1),
+        end=DAY + timedelta(days=1),
+        resource_id=resource.id,
+        include_cancelled=True,
+    )
+    assert bookings == []
+
+
+def test_a_start_off_the_blocks_grid_is_refused(
+    api: Api,
+    driver: PostgresBookingDriver,
+    session: Session,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    _set_shape(session, space, owner, _NARROW_SHAPE)
+
+    response = api.as_user(owner).post(
+        _url(space, resource), json={"start_at": iso(at(10, 15)), "end_at": iso(at(11, 15))}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "rule_denied"
+
+    bookings = driver.list_bookings(
+        start=DAY - timedelta(days=1),
+        end=DAY + timedelta(days=1),
+        resource_id=resource.id,
+        include_cancelled=True,
+    )
+    assert bookings == []
+
+
+def test_a_booking_overlapping_a_blackout_is_refused(
+    api: Api,
+    driver: PostgresBookingDriver,
+    session: Session,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    _set_shape(
+        session,
+        space,
+        owner,
+        {
+            "version": 1,
+            "operating_blocks": [
+                {
+                    "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+                    "start_time": "09:00",
+                    "end_time": "17:00",
+                    "allowed_durations_mins": [60],
+                }
+            ],
+            "blackout_windows": [
+                {"start_time": "10:00", "end_time": "11:00", "reason": "Court maintenance"}
+            ],
+        },
+    )
+
+    response = api.as_user(owner).post(
+        _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11))}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "rule_denied"
+
+    bookings = driver.list_bookings(
+        start=DAY - timedelta(days=1),
+        end=DAY + timedelta(days=1),
+        resource_id=resource.id,
+        include_cancelled=True,
+    )
+    assert bookings == []
+
+
+def test_an_unreadable_stored_shape_refuses_the_booking(
+    api: Api,
+    driver: PostgresBookingDriver,
+    session: Session,
+    owner: User,
+    space: Space,
+    resource: Resource,
+) -> None:
+    """``live_shape`` re-validates on every read (task 10.2) — a document written before a schema
+    change is a document nobody re-checked, and the gate must refuse rather than fall back to
+    anything permissive when that happens (fail closed, ``.claude/rules/calendar-shape.md``)."""
+    live_row = session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one()
+    live_row.document = {
+        "version": 1,
+        "operating_blocks": [
+            # `days: []` fails `validate_shape` outright — an operating block naming no day at
+            # all, the same broken document `test_space_calendar_shapes.py` uses.
+            {"days": [], "start_time": "09:00", "end_time": "17:00", "allowed_durations_mins": [60]}
+        ],
+        "blackout_windows": [],
+    }
+    session.commit()
+
+    response = api.as_user(owner).post(
+        _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11))}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "rule_denied"
+
+    bookings = driver.list_bookings(
+        start=DAY - timedelta(days=1),
+        end=DAY + timedelta(days=1),
+        resource_id=resource.id,
+        include_cancelled=True,
+    )
+    assert bookings == []
+
+
+def test_cancellation_of_a_booking_now_outside_the_shape_still_succeeds(
+    api: Api, session: Session, owner: User, space: Space, resource: Resource
+) -> None:
+    """A member trapped with an uncancellable booking is the direct cost of getting this wrong
+    (``.claude/rules/calendar-shape.md``) — publishing a shape that no longer covers an existing
+    booking must never block cancelling it."""
+    created = (
+        api.as_user(owner)
+        .post(_url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11))})
+        .json()
+    )
+
+    # Close the venue entirely — the booking above now sits outside the live shape.
+    _set_shape(
+        session, space, owner, {"version": 1, "operating_blocks": [], "blackout_windows": []}
+    )
+
+    response = api.as_user(owner).delete(_url(space, resource, f"/{created['id']}"))
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+
+
+def test_a_sydney_space_resolves_the_shape_against_its_own_local_date(
+    api: Api, session: Session, owner: User
+) -> None:
+    """The gate converts at the boundary in the Space's own zone
+    (``.claude/rules/calendar-shape.md``), never UTC's — a booking whose local date and UTC date
+    disagree must be judged against the *local* one, exactly as ``rules_stub`` already does for
+    the rule engine's own local frame.
+
+    A fresh Space rather than the shared ``space`` fixture, because its timezone has to be set
+    before anything is asked about a local date on it.
+    """
+    space = service.create_space(session, owner, name="Sydney Club", description=None)
+    space.timezone = "Australia/Sydney"
+    session.commit()
+    resource = session.execute(select(Resource).where(Resource.space_id == space.id)).scalar_one()
+
+    sydney = ZoneInfo("Australia/Sydney")
+    local_date = (datetime.now(sydney) + timedelta(days=30)).date()
+    _set_shape(
+        session,
+        space,
+        owner,
+        {
+            "version": 1,
+            "operating_blocks": [
+                {
+                    "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+                    "start_time": "00:00",
+                    "end_time": "24:00",
+                    "allowed_durations_mins": [60],
+                    "effective_from": local_date.isoformat(),
+                    "effective_to": local_date.isoformat(),
+                }
+            ],
+            "blackout_windows": [],
+        },
+    )
+
+    # 09:00 local is inside the seeded 09:00-17:00 `availability_hours` row too (this fresh Space
+    # keeps `create_space`'s own seeded rules), so a pass here is the shape and the engine
+    # agreeing, not one of them happening not to run.
+    local_start = datetime(local_date.year, local_date.month, local_date.day, 9, 0, tzinfo=sydney)
+    local_end = local_start + timedelta(hours=1)
+    # Sanity: the instant this books falls on the *previous* UTC date, so a gate that resolved the
+    # UTC date instead of the local one would find no operating block covering it at all — the
+    # block is scoped to `local_date` alone via `effective_from`/`effective_to`.
+    assert local_start.astimezone(timezone.utc).date() != local_date
+
+    response = api.as_user(owner).post(
+        f"/spaces/{space.public_id}/resources/{resource.id}/bookings",
+        json={"start_at": local_start.isoformat(), "end_at": local_end.isoformat()},
     )
 
     assert response.status_code == 201, response.text

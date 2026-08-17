@@ -215,10 +215,65 @@ out the write side; every one refuses on an archived Space through the existing
 `SpaceArchivedError` path, and none of them re-checks the caller's role — authorization is the
 router's job, matching how every other write in this module already splits the two.
 
+## The availability gate, and the endpoint the calendar reads
+
+The shape is enforced in `create_resource_booking`
+(`app/backend/app/routers/resource_bookings.py`) at a fixed position relative to the Space's own
+archived check and the rule engine: `archived? -> shape? -> rules -> driver`. Structure is checked
+before policy — when a booking breaks both, *"we close at 20:00"* is more actionable than *"you
+have had three bookings this week"*, the same fail-fast arbitration the engine's own rule
+priorities already perform one layer down (`rule-engine.md`'s canon ordering). The gate returns the
+existing 422 `BookingDenied` with `verdict.reason` as its message — no new status code, no new
+response model, so no client learns a second branch to render for what is, from a member's side,
+one situation.
+
+**An unreadable shape refuses; it is never skipped.** `service.live_shape` re-validates the stored
+document on every read and raises `shape.InvalidShapeError` for one that no longer parses. The
+gate catches exactly that exception, logs the real cause, and returns the engine's own generic
+`RULE_ERROR_MESSAGE` — never the validator's message, which names an internal field path rather
+than anything a member booking a court should read. This is the identical rule `app.rule_catalog`
+already states for a generated rule row that will not hoist: an unavailable check is a check that
+refuses, never one silently bypassed.
+
+**The gate never runs for a cancellation.** Cancelling a booking that has fallen outside a newly
+published shape must still work — a member trapped with an uncancellable booking is the direct
+cost of getting this wrong, and it is the kind of defect that only shows up after a publish.
+`cancel_resource_booking` does not consult the shape at all, matching how it already skips the rule
+engine for the same reason (rules gate acquiring a slot, not releasing one).
+
+**The local conversion happens once, at this boundary, and nowhere else.** The shape holds local
+wall-clock minutes; a booking request holds a UTC instant. The gate resolves the booking's local
+date and its start/end as minutes from that date's local midnight — reusing
+`app.rules_stub`'s own `_local_date` and `_local_day_bounds` rather than a second implementation of
+"this venue's local day" — and calls `shape.permits` with them. A booking spanning local midnight
+resolves against the date it **starts** on, matching every window convention in the engine, and its
+`end_minutes` may legitimately exceed 1440, which is exactly what an `end_time` past `24:00` in the
+shape exists to meet.
+
+`GET /spaces/{public_id}/calendar?from={date}&to={date}[&draft=true]` is the read half of the same
+boundary: it serves one `DayProjection` per local date in `[from, to]` (**inclusive** on both
+ends, matching the shape schema's own `effective_from`/`effective_to` convention rather than the
+engine's half-open one — this is a calendar range a human typed, not an instant), calling
+`shape.project_day` directly rather than leaving the client to derive it — the same rule
+`identity-and-access.md` already states for `anchor_minutes` ("the client never derives it, because
+which rows govern a date is the server's question"), carried into the shape. The range is bounded
+by the same `MAX_SCHEDULE_DAYS` constant `GET /spaces/{public_id}/schedule` already uses, rather
+than a second number.
+
+**Two roles sit on this one route.** Member+ reads the live shape; `draft=true` requires admin+,
+checked inline against the caller's resolved role rather than inferred from the query string — a
+draft is an admin's half-finished thought and must not be visible to members. The wire shape mirrors
+`rules.shape.projection.DayProjection` field for field, in the package's own vocabulary — minutes
+from local midnight throughout, never `DayScheduleRead`'s `HH:MM:SS` wall-clock strings, because
+converting from minutes to a wall clock and back is two chances to disagree with the gate that
+enforces the identical table.
+
+This endpoint replaces `GET /spaces/{public_id}/schedule` in role but does not remove it; both
+serve the calendar grid until task 10.4 moves the frontend across and 10.5 retires the schedule
+endpoint along with the two rule types it resolved.
+
 ## What later tasks in this stream add here
 
-* **10.3** — the gate's exact position relative to `evaluate_request` in `create_resource_booking`,
-  and the projection endpoint the calendar reads.
 * **10.4** — how the grid draws blocks, blackouts and allowed durations from the projection.
 * **10.5** — the retirement of `availability_hours` and `session_length`, and where the run's gap
   tolerance is re-sourced from once `resolve_day_schedule` is gone.
