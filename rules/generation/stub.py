@@ -201,15 +201,19 @@ def test_fails_closed_on_a_history_it_has_no_reason_to_read():
         datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc),
         datetime(2026, 7, 21, 13, 0, tzinfo=timezone.utc),
     )
-    other_users_booking = BookingRecord(
-        "someone-else",
+    # Same user as the request — every entry in a real Context's history always is
+    # (`ops/pending/bugs/generated-rule-verified-against-unreachable-history.md`). Irrelevant to
+    # this rule, which never reads history at all, is demonstrated by an unrelated booking, not by
+    # one belonging to someone else.
+    unrelated_booking = BookingRecord(
+        "user-1",
         "court-1",
         datetime(2026, 7, 21, 9, 0, tzinfo=timezone.utc),
         datetime(2026, 7, 21, 10, 0, tzinfo=timezone.utc),
     )
     context = make_context(
         now=datetime(2026, 7, 21, 11, 0, tzinfo=timezone.utc),
-        bookings=(other_users_booking,),
+        bookings=(unrelated_booking,),
     )
     assert rule.evaluate(request, context).passed
 

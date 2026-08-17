@@ -185,12 +185,6 @@ def test_rule_returning_a_non_ruleresult_is_contained():
     assert not later.called
 
 
-def test_history_belonging_to_another_user_raises():
-    context = make_context(make_booking(user_id="someone-else"))
-    with pytest.raises(ContextMismatchError, match="someone-else"):
-        evaluate_request(make_request(), context, [])
-
-
 def test_history_for_a_different_resource_is_accepted():
     """History is filtered to the user, not the resource.
 
@@ -203,6 +197,11 @@ def test_history_for_a_different_resource_is_accepted():
 
 
 def test_context_built_for_a_different_user_raises():
+    """A context whose history mismatches its own `user_id` can no longer be built at all —
+    `test_interfaces.py::test_context_rejects_history_for_a_different_user` covers that. What is
+    still this controller's own job is catching a `Context` that is internally consistent but was
+    simply built for the wrong person.
+    """
     context = make_context(user_id="other-user")
     with pytest.raises(ContextMismatchError, match="other-user"):
         evaluate_request(make_request(), context, [])
@@ -210,7 +209,7 @@ def test_context_built_for_a_different_user_raises():
 
 def test_mismatch_is_checked_before_any_rule_runs():
     spy = SpyRule(RuleResult.allow())
-    context = make_context(make_booking(user_id="someone-else"))
+    context = make_context(user_id="someone-else")
     with pytest.raises(ContextMismatchError):
         evaluate_request(make_request(), context, [spy])
     assert not spy.called

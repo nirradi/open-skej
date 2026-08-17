@@ -382,6 +382,27 @@ class Context:
                     f"window [{lower}, {upper}): {booking.start_at} - {booking.end_at}. "
                     "The caller must cap history before building the context."
                 )
+            # Every booking in history must belong to the same person this Context is for.
+            # Checkable here, unlike the request-dependent invariants the controller cross-checks
+            # (`rules.controller._check_context_matches_request`) — this one needs only `self.user`
+            # and `self.history`, both already in scope, so there is no reason to leave it
+            # reachable only through the one entry point that runs a canon. A hand-built ``Context``
+            # bypassing that entry point (a test, an adversarial suite generated for a candidate
+            # rule) is exactly where this mattered in practice: a Tester-written fixture gave a
+            # history entry a different `user_id` than its own request to probe an "inter-booking
+            # gap between different people" rule, which is a legitimate `HistoryContext` under the
+            # old contract but a scenario production can never produce — the adapter that builds
+            # every real ``Context`` filters history to the caller before a rule ever sees it. The
+            # candidate verified against that fixture and shipped fail-open
+            # (``ops/pending/bugs/generated-rule-verified-against-unreachable-history.md``). Making
+            # the mismatch impossible to construct, rather than only impossible to reach production
+            # with, is what closes the class rather than the one instance.
+            if booking.user_id != self.user.user_id:
+                raise ValueError(
+                    f"Context.history.bookings[{index}] belongs to user {booking.user_id!r}, not "
+                    f"{self.user.user_id!r} (Context.user.user_id). History must be filtered to "
+                    "the Context's own user before the context is built."
+                )
 
     @property
     def now(self) -> datetime:

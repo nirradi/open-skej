@@ -481,6 +481,30 @@ def test_window_rejection_names_the_offending_index() -> None:
         make_context(good, bad)
 
 
+def test_context_accepts_history_for_the_same_user() -> None:
+    context = make_context(booking(utc(2026, 7, 15, 9), utc(2026, 7, 15, 10), user_id="u1"))
+    assert len(context.history) == 1
+
+
+def test_context_rejects_history_for_a_different_user() -> None:
+    """`ops/pending/bugs/generated-rule-verified-against-unreachable-history.md`: nothing stopped a
+    hand-built ``Context`` — a Tester-written adversarial fixture, in the reported case — from
+    giving a history entry a different ``user_id`` than the one the ``Context`` is otherwise for.
+    That is not a state the adapter that builds every real ``Context`` can produce, so a candidate
+    rule verified against it and shipped fail-open. Made unconstructable rather than merely
+    unreachable in production.
+    """
+    with pytest.raises(ValueError, match="belongs to user 'someone-else'"):
+        make_context(booking(utc(2026, 7, 15, 9), utc(2026, 7, 15, 10), user_id="someone-else"))
+
+
+def test_history_user_rejection_names_the_offending_index() -> None:
+    good = booking(utc(2026, 7, 15, 9), utc(2026, 7, 15, 10), user_id="u1")
+    bad = booking(utc(2026, 7, 15, 11), utc(2026, 7, 15, 12), user_id="someone-else")
+    with pytest.raises(ValueError, match=r"bookings\[1\]"):
+        make_context(good, bad)
+
+
 def test_context_rejects_wrong_component_types() -> None:
     calendar = CalendarContext(Weekday.MONDAY, NOW)
     local = utc_frame(NOW)

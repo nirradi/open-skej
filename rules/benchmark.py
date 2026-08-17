@@ -1,4 +1,4 @@
-"""Feed the five golden rule descriptions through the generation loop and report what happened.
+"""Feed the golden rule descriptions through the generation loop and report what happened.
 
 **Invoked by hand, never from the test run.** It makes live calls against a real model backend —
 an Ollama daemon by default, or the Claude CLI — and ``pyproject.toml``'s ``testpaths = ["tests"]``
@@ -142,12 +142,24 @@ class GoldenExample:
 #: The golden set, in this order. Fixed rather than configurable: a benchmark that measured a
 #: different set of constraints each run could not compare one prompt revision against the next.
 #:
-#: **The five descriptions are unchanged and in their original order** — appending or reordering
-#: re-baselines every run ever recorded, and this stream had no reason to pay that: the defect it
-#: closes is invisible in a *prompt*, not absent from the set. Two of these ("max 1 hour", "no more
-#: than 3 hours total per day") are duration-shaped and scored ``VERIFIED`` while producing rules
-#: that took an entire Space off line. What was missing was never another constraint to try; it was
-#: something recorded about the answer. That is ``expects``.
+#: **The first five descriptions are unchanged and in their original order** — appending or
+#: reordering re-baselines every run ever recorded, and that stream had no reason to pay that: the
+#: defect it closed was invisible in a *prompt*, not absent from the set. Two of these ("max 1
+#: hour", "no more than 3 hours total per day") are duration-shaped and scored ``VERIFIED`` while
+#: producing rules that took an entire Space off line. What was missing was never another
+#: constraint to try; it was something recorded about the answer. That is ``expects``.
+#:
+#: **The sixth is new**, and this one *is* a new shape of prompt the first five never exercised:
+#: none of them names another person. "There must be a minimum 15 minutes between two bookings
+#: from different people" is the prompt that produced a real generated rule branching on
+#: `record.user_id != request.user_id` inside `context.history.bookings` — a comparison that can
+#: never be true, since history is filtered to the requester before any rule sees it. The
+#: candidate validated, survived its own adversarial suite, and matched `inspect.signature`, so it
+#: scored ``VERIFIED`` while never denying a single real booking
+#: (``ops/pending/bugs/generated-rule-verified-against-unreachable-history.md``). Appended per
+#: standing practice — a new example when the defect is a shape the set does not contain
+#: (``ops/pending/bugs/rule-bugs-close-with-a-benchmark-case.md``) — rather than replacing any of
+#: the first five.
 GOLDEN_EXAMPLES: tuple[GoldenExample, ...] = (
     GoldenExample(
         "max 1 hour",
@@ -167,6 +179,10 @@ GOLDEN_EXAMPLES: tuple[GoldenExample, ...] = (
     ),
     GoldenExample(
         "at most 2 bookings on the same day",
+        (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS, ArtifactExpectation.TAKES_A_PARAMETER),
+    ),
+    GoldenExample(
+        "there must be a minimum 15 minutes between two bookings from different people",
         (ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS, ArtifactExpectation.TAKES_A_PARAMETER),
     ),
 )

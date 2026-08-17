@@ -394,6 +394,19 @@ def test_style_section_has_a_worked_example_reading_context_run():
     assert "class MaxConsecutivePlayRule(BaseRule):" in style
 
 
+def test_system_prompt_states_history_is_same_user_only():
+    """`ops/pending/bugs/generated-rule-verified-against-unreachable-history.md`: a generated rule
+    branching on `record.user_id != request.user_id` verified against its own adversarial suite and
+    shipped fail-open, because nothing told the model `context.history.bookings` can never contain
+    another user's booking. Stated as its own hard constraint so a model does not spend its retry
+    budget rediscovering it, and so a prompt asking to compare against a different person's booking
+    is answered against the requester's own history instead of with a check that can never fire.
+    """
+    assert "BELONGS TO THE SAME PERSON MAKING THIS REQUEST" in SYSTEM_PROMPT
+    assert "record.user_id` is always `request.user_id`" in SYSTEM_PROMPT
+    assert "is dead code" in SYSTEM_PROMPT
+
+
 # --------------------------------------------------------------------------------------------
 # ClaudeCliClient — argv and payload parsing, never the binary
 # --------------------------------------------------------------------------------------------

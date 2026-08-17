@@ -178,6 +178,18 @@ and `context.run.booking_count` describe that same session. Neither span is a de
 constraint that says "in a row", "back to back", or "consecutively", or that caps a total a member \
 could trivially split into two separate bookings, wants the run.
 
+9. EVERY BookingRecord IN `context.history.bookings` BELONGS TO THE SAME PERSON MAKING THIS \
+REQUEST. `record.user_id` is always `request.user_id` — the caller that builds this history \
+filters it to the requester before your rule ever sees it, with no exception and no way to ask \
+for anyone else's. You cannot see, count, or compare against a booking made by a different \
+person, on this Resource or any other; no field on `context` ever answers a question about \
+someone other than the requester. `if record.user_id != request.user_id: ...` is not merely \
+unnecessary, it is dead code — the condition can never be true, so any check written inside it \
+never runs, and the rule silently never enforces whatever that check was meant to catch. A \
+constraint phrased around "other members", "someone else", or "different people" can only be \
+honestly enforced against the requester's OWN bookings — write the rule for that reading. Do not \
+write a check that depends on seeing anyone else's booking; it will look correct and never fire.
+
 ## Style
 
 Write it the way this hand-written rule is written — this is the reference:
