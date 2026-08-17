@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from rules import ParamKind, RuleParam, RuleType
+from shape import BlackoutInterval, DayProjection, OfferedStart, OperatingInterval
 
 from app.identity.models import (
     AccessRequestStatus,
@@ -625,6 +626,107 @@ class DayScheduleRead(BaseModel):
             opens_at=schedule.opens_at,
             closes_at=schedule.closes_at,
             coherence_issue=schedule.coherence_issue,
+        )
+
+
+# --- The shape projection (task 10.3). ---------------------------------------------------------
+#
+# `GET /spaces/{public_id}/calendar` serves `shape.projection.project_day`'s own output, field for
+# field, in the package's own vocabulary — minutes from local midnight throughout, never
+# `DayScheduleRead`'s `HH:MM:SS` wall-clock strings (`.claude/rules/calendar-shape.md`, "the wire
+# says the same"). The grid needs minutes to lay out slots, and converting from minutes to a wall
+# clock and back is two chances to disagree with the gate that enforces the identical table.
+
+
+class OfferedStartRead(BaseModel):
+    """One grid-aligned local minute a booking may begin at, and every duration offered there.
+
+    Mirrors ``shape.projection.OfferedStart``. This is the authoritative table a booking is
+    judged against — the availability gate (task 10.3, ``app.routers.resource_bookings``) answers
+    ``shape.permits`` from the identical table, so the calendar can never draw a start the gate
+    would then refuse, or grey out one the gate would allow.
+    """
+
+    start_minutes: int
+    durations_mins: list[int]
+
+    @classmethod
+    def build(cls, offered: OfferedStart) -> "OfferedStartRead":
+        return cls(
+            start_minutes=offered.start_minutes,
+            durations_mins=list(offered.durations_mins),
+        )
+
+
+class OperatingIntervalRead(BaseModel):
+    """One merged region of operating time in force on a date. Mirrors
+    ``shape.projection.OperatingInterval`` — a structural summary of what is nominally offered
+    across the merged region, not itself grid- or blackout-aware; ``offered_starts`` is the
+    exact, per-minute answer.
+    """
+
+    start_minutes: int
+    end_minutes: int
+    allowed_durations_mins: list[int]
+
+    @classmethod
+    def build(cls, interval: OperatingInterval) -> "OperatingIntervalRead":
+        return cls(
+            start_minutes=interval.start_minutes,
+            end_minutes=interval.end_minutes,
+            allowed_durations_mins=list(interval.allowed_durations_mins),
+        )
+
+
+class BlackoutIntervalRead(BaseModel):
+    """One blackout window in force on a date, with its own reason. Mirrors
+    ``shape.projection.BlackoutInterval`` — ``reason`` is the one piece of admin-authored text
+    this package ever serves verbatim; see that dataclass for why it is safe to.
+    """
+
+    start_minutes: int
+    end_minutes: int
+    reason: str
+
+    @classmethod
+    def build(cls, interval: BlackoutInterval) -> "BlackoutIntervalRead":
+        return cls(
+            start_minutes=interval.start_minutes,
+            end_minutes=interval.end_minutes,
+            reason=interval.reason,
+        )
+
+
+class DayProjectionRead(BaseModel):
+    """One local date's shape projection, as ``GET /spaces/{public_id}/calendar`` serves it.
+
+    Mirrors ``shape.projection.DayProjection`` field for field — see that class and
+    ``.claude/rules/calendar-shape.md`` for what each field means and the fail-closed guarantee
+    behind ``offered_starts``. ``bookable`` is ``bool(offered_starts)``, reported directly rather
+    than left for the client to derive, matching this whole endpoint's "the server projects, the
+    client never does" rule.
+    """
+
+    date: date
+    operating_intervals: list[OperatingIntervalRead]
+    blackout_intervals: list[BlackoutIntervalRead]
+    offered_starts: list[OfferedStartRead]
+    bookable: bool
+
+    @classmethod
+    def build(cls, projection: DayProjection) -> "DayProjectionRead":
+        return cls(
+            date=projection.on_date,
+            operating_intervals=[
+                OperatingIntervalRead.build(interval) for interval in projection.operating_intervals
+            ],
+            blackout_intervals=[
+                BlackoutIntervalRead.build(interval) for interval in projection.blackout_intervals
+            ],
+            offered_starts=[
+                OfferedStartRead.build(offered) for offered in projection.offered_starts
+            ],
+            bookable=projection.bookable,
         )
 
 

@@ -116,10 +116,17 @@ of day a booking starts — is answered by the caller before a rule runs and han
 
 ## Controller
 
-`evaluate_request()` is the single entry point the backend calls. In order: cross-check the request
-against the context (`Context` cannot do this itself — the request is not in scope when a context is
-built), run the canon in order **fail-fast** (the first denial wins and nothing after it runs), and
-contain a buggy rule.
+`evaluate_request()` is the single entry point the backend calls for **policy**, but it is no longer
+the first thing a booking meets. `create_resource_booking` now runs a structural availability gate
+ahead of it (`shape.permits`, task 10.3, `.claude/rules/calendar-shape.md`): archived check, then
+shape, then this controller, then the driver. The engine is still the only thing that judges *who*
+may take a slot and *how much* of it — the shape only says what the venue offers at all — so nothing
+below this heading changes; a booking simply no longer reaches `evaluate_request` unless the shape
+has already offered the slot it asks for.
+
+In order: cross-check the request against the context (`Context` cannot do this itself — the
+request is not in scope when a context is built), run the canon in order **fail-fast** (the first
+denial wins and nothing after it runs), and contain a buggy rule.
 
 **The cross-check covers the local frame as well as the history's user.** `local.day_start <=
 request.start_at < local.day_end`, or `ContextMismatchError` — same reasoning as the user check: a
