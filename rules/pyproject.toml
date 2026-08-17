@@ -22,7 +22,14 @@ dependencies = []
 # the sandbox before a row is ever stored, and the controller's containment around every call a
 # hoisted rule makes thereafter. `generation` carries no dependencies of its own, so this does
 # not move the backend's dependency set.
-packages = ["rules", "generation"]
+#
+# `shape` is a third, independent package (Stream 10): the calendar shape document, its validator,
+# and the projection that turns a shape plus a local date into the intervals a booking may occupy.
+# It lives here rather than in the backend because the shape benchmark (10.7) has to import the
+# projection to assert on it, and the benchmark lives in `rules/` and cannot import the backend
+# (`.claude/rules/calendar-shape.md`). It carries no dependency on `rules` or `generation` either —
+# standard library only, exactly as they are.
+packages = ["rules", "generation", "shape"]
 
 [tool.black]
 line-length = 100

@@ -73,6 +73,10 @@ rules/rules/
   controller.py  evaluate_request(): fail-fast canon execution and error containment
   registry.py    Each rule type's runtime identity: the stable string id a `space_rules` row
                    stores, its parameter schema, its priority, and the function that builds it
+rules/shape/     The calendar shape document, its validator, and the projection that turns a
+                   shape plus a local date into the intervals a booking may occupy — structure a
+                   Space offers, drawn by the calendar and checked before the rule engine runs
+                   (`.claude/rules/calendar-shape.md`)
 ```
 
 ## Cross-cutting invariants
@@ -129,6 +133,8 @@ Each domain's contracts, decisions and rationale live beside this file and are a
 
 * `.claude/rules/identity-and-access.md` — users, Spaces, memberships, authorization.
 * `.claude/rules/rule-engine.md` — the rule contract, the execution model, AI rule generation.
+* `.claude/rules/calendar-shape.md` — the calendar shape document, its projection, and the line
+  between what a Space offers (shape) and who may take it (a rule).
 
 ## Keeping these documents live
 
