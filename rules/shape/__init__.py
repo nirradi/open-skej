@@ -26,7 +26,7 @@ from .projection import (
     permits,
     project_day,
 )
-from .types import DAY_CODES, DAY_NAMES, BlackoutWindow, OperatingBlock, Shape
+from .types import DAY_CODES, DAY_NAMES, DEFAULT_SHAPE, BlackoutWindow, OperatingBlock, Shape
 from .validate import InvalidShapeError, validate_shape
 
 __all__ = [
@@ -35,6 +35,7 @@ __all__ = [
     "BlackoutWindow",
     "DAY_CODES",
     "DAY_NAMES",
+    "DEFAULT_SHAPE",
     "InvalidShapeError",
     "validate_shape",
     "OperatingInterval",

@@ -122,6 +122,22 @@ class RuleGenerationJobStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class ShapeStatus(str, enum.Enum):
+    """Where one version of a Space's calendar shape sits in its own lifecycle.
+
+    ``draft`` is a chat turn's own working copy, not yet enforced; ``live`` is the version the
+    availability gate (task 10.3) and the calendar actually read; ``superseded`` is a former
+    ``live`` row, kept rather than deleted so publish history answers "what changed and when"
+    without a second table. Publishing (:func:`app.identity.service.publish_draft`) is the only
+    transition between all three, and it moves exactly two rows in one write: the current
+    ``live`` becomes ``superseded`` and the ``draft`` becomes ``live``.
+    """
+
+    DRAFT = "draft"
+    LIVE = "live"
+    SUPERSEDED = "superseded"
+
+
 class PromptAgent(str, enum.Enum):
     """Which agent in the generation loop authored a stored prompt.
 
@@ -163,6 +179,7 @@ _RULE_GENERATION_JOB_STATUS_TYPE = _string_enum(
     RuleGenerationJobStatus, "rule_generation_job_status", 16
 )
 _PROMPT_AGENT_TYPE = _string_enum(PromptAgent, "prompt_agent", 16)
+_SHAPE_STATUS_TYPE = _string_enum(ShapeStatus, "space_calendar_shape_status", 16)
 
 
 class User(Base):
@@ -331,6 +348,97 @@ class SpaceRule(Base):
         return (
             f"SpaceRule(id={self.id!r}, space_id={self.space_id!r},"
             f" rule_type={self.rule_type!r}, enabled={self.enabled!r})"
+        )
+
+
+class SpaceCalendarShape(Base):
+    """One version of a Space's calendar shape — structure, not policy (``.claude/rules/calendar-
+    shape.md``: "A shape says what the venue offers. A rule says who may take it, and how much of
+    it.").
+
+    One row per **version**, never one row per Space, so publish history is what a Space's own
+    rows already are rather than a second table: ``created_at`` on every row of one Space, in
+    order, is the whole "what changed and when" answer. ``document`` is the JSON
+    ``rules.shape.validate_shape`` accepts and produces — stored raw and re-validated on every
+    read (:func:`app.identity.service.live_shape`), never trusted from having validated once at
+    write time, the identical discipline ``app.rule_catalog`` already applies to a stored
+    generated rule's source.
+
+    **Two partial unique indexes, not a CHECK, and not a read-then-write guard in the service
+    layer.** ``uq_space_calendar_shapes_live`` and ``uq_space_calendar_shapes_draft`` are each
+    unique on ``space_id`` filtered to their own status — at most one live and at most one draft
+    row per Space, enforced by the database itself. This is the identical shape and the identical
+    reasoning ``uq_rule_generation_jobs_in_flight`` already gives: two concurrent writers can both
+    pass a read-then-write check and only one of them can pass a unique index, and an admin's chat
+    tab left open in two browser windows is exactly that race.
+
+    **Publishing moves two rows in one transaction, never one.** The current ``live`` row becomes
+    ``superseded`` and the ``draft`` row becomes ``live`` with ``published_at`` set — both writes
+    or neither, because a version that briefly has no ``live`` row (or two) is a state nothing
+    downstream of the availability gate is prepared to see.
+
+    ``created_by_user_id`` and ``published_by_user_id`` are **nullable**, unlike almost every other
+    provenance column in this schema: the 10.2 migration backfills one ``live`` row per
+    pre-existing Space with neither set, since a system backfill has no acting user (OVERVIEW
+    decision 3 — there is no production data, so nothing is derived, but the table still has to
+    exist under every Space from the moment it ships). A row written through the API or the chat
+    (task 10.8) always sets both.
+
+    ``source_conversation_id`` is a **plain nullable integer with no ``ForeignKey``** — task 10.8
+    adds the conversations table this will eventually reference; adding the constraint now would
+    mean either forward-declaring a table this task does not own or leaving the column pointing at
+    nothing until 10.8 lands. It is null for the default row this table's own migration writes and
+    for any row written outside a chat turn (a direct API write, once one exists).
+
+    No ``ON DELETE CASCADE`` on ``space_id``, matching every other foreign key onto ``spaces.id``
+    in this schema — nothing here is deleted, so there is no delete to cascade, and a cascade
+    would silently destroy a Space's whole shape history the moment the Space referencing it were
+    ever removed by some future path.
+    """
+
+    __tablename__ = "space_calendar_shapes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"))
+    document: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[ShapeStatus] = mapped_column(_SHAPE_STATUS_TYPE)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    created_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), default=None)
+    published_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
+    published_by_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id"), default=None
+    )
+    # No ForeignKey target exists yet — task 10.8 adds the conversations table. Plain nullable
+    # integer until then; see the class docstring.
+    source_conversation_id: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+
+    __table_args__ = (
+        # "Which shape versions belong to this Space?" — every read this table serves — filters
+        # on space_id alone, matching the ``ix_space_rules_space`` / ``ix_resources_space``
+        # convention.
+        Index("ix_space_calendar_shapes_space", "space_id"),
+        # At most one live shape per Space. See the class docstring for why this is an index
+        # rather than a check performed in the service layer.
+        Index(
+            "uq_space_calendar_shapes_live",
+            "space_id",
+            unique=True,
+            postgresql_where=text("status = 'live'"),
+        ),
+        # At most one draft per Space — the identical reasoning, over the other status a Space
+        # may hold at most one live instance of.
+        Index(
+            "uq_space_calendar_shapes_draft",
+            "space_id",
+            unique=True,
+            postgresql_where=text("status = 'draft'"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"SpaceCalendarShape(id={self.id!r}, space_id={self.space_id!r},"
+            f" status={self.status.value!r})"
         )
 
 
