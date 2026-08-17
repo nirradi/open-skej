@@ -2,11 +2,14 @@
 
 ``evaluate_request`` is the single entry point the backend calls. It has three jobs, in order:
 
-1. **Cross-check the request against the context.** ``Context`` cannot do this itself — the request
-   is not visible when a context is built — so this is the first place both are in scope. Three
-   things are checked: that the history belongs to the requesting user, that ``context.local`` was
-   resolved for the day the request actually starts in, and that ``context.run`` actually contains
-   the request it was built for.
+1. **Cross-check the request against the context.** ``Context`` cannot fully do this itself — the
+   request is not visible when a context is built — so this is the first place both are in scope.
+   Two things are checked here: that ``context.user`` is the request's own user, and that
+   ``context.local`` and ``context.run`` were both resolved for this request rather than some other
+   booking. (A third thing — that every entry in ``context.history`` belongs to the same user as
+   ``context.user`` — needs no request at all and is enforced earlier, at ``Context`` construction
+   itself; see ``interfaces.Context.__post_init__``. Together the two checks still guarantee history
+   belongs to the requester, they just no longer need to be the same check.)
 2. **Run the canon in order, fail-fast.** The first rule that denies wins and nothing after it runs.
 3. **Contain a buggy rule.** A rule that raises becomes a denial with generic copy, logged with the
    real exception. A bug in one rule must never 500 the booking endpoint, and must never leak a
@@ -45,14 +48,15 @@ class ContextMismatchError(ValueError):
 def _check_context_matches_request(request: BookingRequest, context: Context) -> None:
     """Raise ``ContextMismatchError`` unless ``context`` genuinely describes ``request``.
 
-    History is filtered to the requesting **user** — never to the requested resource. A caller may
-    legitimately hand the engine one user's bookings drawn from several resources (an application
-    scoping a frequency cap to every Resource in a Space rather than to the one being booked); the
-    engine has no opinion on how wide that scope is, only on whose bookings it may be. The real
-    invariant, and the only one checked here, is that every booking in ``context.history`` belongs
-    to the user in ``request`` — mixing in another user's history would silently count it toward
-    this user's limits, which is exactly what ``ContextMismatchError`` exists to catch instead of
-    hiding it.
+    ``context.user`` must be the request's own user: ``Context`` cannot check this itself, since it
+    has no visibility into ``request`` at construction time. Once this holds, and combined with the
+    guarantee ``Context.__post_init__`` already enforces — that every booking in ``context.history``
+    belongs to ``context.user`` — history transitively belongs to the requester too, without this
+    function needing to walk it a second time. History stays filtered to the **user**, never to the
+    requested resource: a caller may legitimately hand the engine one user's bookings drawn from
+    several resources (an application scoping a frequency cap to every Resource in a Space rather
+    than to the one being booked); the engine has no opinion on how wide that scope is, only on
+    whose bookings it may be.
 
     ``context.local`` is checked the same way and for the same reason. A frame resolved for the
     wrong date is a frame whose day, week and month bounds all describe a different stretch of the
@@ -93,14 +97,6 @@ def _check_context_matches_request(request: BookingRequest, context: Context) ->
             f"[{request.start_at}, {request.end_at}). The caller resolved a run that does not "
             "contain its own request, so a rule reading it would judge someone else's session."
         )
-
-    for index, booking in enumerate(context.history.bookings):
-        if booking.user_id != request.user_id:
-            raise ContextMismatchError(
-                f"Context.history.bookings[{index}] belongs to user {booking.user_id!r}, not the "
-                f"requesting user {request.user_id!r}. History must be filtered to the requesting "
-                "user before the context is built."
-            )
 
 
 def evaluate_request(

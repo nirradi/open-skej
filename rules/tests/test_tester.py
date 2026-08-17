@@ -134,9 +134,9 @@ CANDIDATE_TESTS = textwrap.dedent("""\
             MaxDurationRule(timedelta(0))
 
 
-    def test_history_of_another_user_does_not_make_it_pass():
-        other = BookingRecord("user-2", "court-1", NOW, NOW + timedelta(hours=9))
-        result = MaxDurationRule(LIMIT).evaluate(request(9), context([other]))
+    def test_unrelated_history_does_not_make_an_over_limit_booking_pass():
+        earlier = BookingRecord("user-1", "court-1", NOW, NOW + timedelta(hours=9))
+        result = MaxDurationRule(LIMIT).evaluate(request(9), context([earlier]))
         assert not result.passed
 
 
@@ -392,6 +392,24 @@ def test_system_prompt_demands_a_run_versus_request_case():
     assert "THE CASE WHERE THE REQUEST ALONE WOULD PASS AND THE RUN DOES NOT" in SYSTEM_PROMPT
     assert "AND THE MIRROR, IF THE RULE DOES NOT READ `context.run`" in SYSTEM_PROMPT
     assert "must never be denied by a long run sitting around it" in SYSTEM_PROMPT
+
+
+def test_system_prompt_forbids_a_foreign_user_id_in_history_fixtures():
+    """`ops/pending/bugs/generated-rule-verified-against-unreachable-history.md`: a Tester-written
+    suite built `BookingRecord("user-2", ...)` against a request from `"user-1"` to probe an
+    "inter-booking gap between different people" rule. The fixture is legitimate Python — nothing in
+    `interfaces.py` stops a hand-built `HistoryContext` from holding a foreign `user_id` — but the
+    adapter that builds every real `Context` never populates history with anyone but the caller, so
+    the candidate that passed that fixture verified against a scenario production cannot produce and
+    shipped fail-open. The Tester must build every fixture the way the adapter actually does.
+    """
+    assert "MUST CARRY THE SAME `user_id` AS THAT FIXTURE'S" in SYSTEM_PROMPT
+    assert "never contains a booking made by anyone else" in SYSTEM_PROMPT
+    assert "positive cases, boundary cases, and the fail-closed probe below alike" in SYSTEM_PROMPT
+    # The old fail-closed-probe suggestion that caused this is explicitly retracted, not just
+    # silently dropped — a model that has already read a similar suggestion elsewhere should not
+    # reach for it here either.
+    assert "Not a history holding a different user's bookings" in SYSTEM_PROMPT
 
 
 def test_build_test_prompt_frames_the_constraint_as_intent_not_behaviour():

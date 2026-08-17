@@ -89,6 +89,15 @@ rule — you are testing the code as written, and a test that repairs it in pass
     Context(user, calendar, local, run, history)
     RuleResult has .passed (bool) and .fail_reason (str or None)
 
+EVERY BookingRecord IN A FIXTURE'S HISTORY MUST CARRY THE SAME `user_id` AS THAT FIXTURE'S \
+REQUEST. In the running system, `context.history.bookings` is filtered to the requester before \
+the rule ever sees it and never contains a booking made by anyone else — on this resource or any \
+other. If the rule under test reads `record.user_id` at all, do not give any `BookingRecord` in \
+your fixtures a different one: a fixture that does is testing an input the running system can \
+never produce, and a rule that only denies when it sees a foreign `user_id` will pass every test \
+you write this way while never denying a single real booking. This applies to every fixture in \
+the module — positive cases, boundary cases, and the fail-closed probe below alike.
+
 EVERY ARGUMENT SHOWN ABOVE IS REQUIRED AND NONE OF THEM HAS A DEFAULT. `week_starts_on`, `local` \
 and `run` are the three this costs a whole run on: `CalendarContext(now=...)`, `Context(user=..., \
 calendar=..., local=...)`, or any `Context(...)` missing `run` is a `TypeError` at the first line \
@@ -174,9 +183,11 @@ and is discovered by two people standing on the same court. Write it like this:
             return                      # raising is fail-closed; the controller contains it
         assert not result.passed, "a rule that cannot decide must not allow the booking"
 
-   Choose the unusable input from what would actually confuse THIS rule: a history holding a \
-different user's bookings, a context whose `now` sits far from the request, an empty history where \
-the rule counts, a request whose resource the rule has no record of.
+   Choose the unusable input from what would actually confuse THIS rule: a context whose `now` \
+sits far from the request, an empty history where the rule counts, a request whose resource the \
+rule has no record of. Not a history holding a different user's bookings — that is never merely \
+confusing, it cannot happen at all (see above), and a probe built from it tests nothing about the \
+running system.
 
    IT MUST BE INPUT THE ENGINE TYPES WILL ACTUALLY BUILD. `BookingRequest` and `BookingRecord` \
 reject `start_at >= end_at` at construction, so a "negative duration" or zero-length probe never \

@@ -255,16 +255,16 @@ def test_a_verified_run_with_a_sound_artifact_still_succeeds():
 
 
 def test_every_golden_example_checks_its_parameters_units():
-    """Declared by all five, including the ones with no duration in them: a rule may reach for the
-    wrong type for any parameter, and a check that only ran where a defect was expected would not
-    be a check."""
+    """Declared by every example, including the ones with no duration in them: a rule may reach for
+    the wrong type for any parameter, and a check that only ran where a defect was expected would
+    not be a check."""
     for example in GOLDEN_EXAMPLES:
         assert ArtifactExpectation.PARAMS_HONOUR_THEIR_UNITS in example.expects
 
 
 def test_every_golden_example_naming_a_number_requires_a_parameter():
-    """ "only on weekends" names no number and may legitimately produce a parameterless rule. The
-    other four all name one, and a rule that hardcodes it answers the prompt without answering the
+    """ "only on weekends" names no number and may legitimately produce a parameterless rule. Every
+    other example names one, and a rule that hardcodes it answers the prompt without answering the
     constraint."""
     for example in GOLDEN_EXAMPLES:
         names_a_number = example.description != "only on weekends"
@@ -500,7 +500,7 @@ def test_a_call_error_report_carries_no_attempts_or_tokens():
 # --------------------------------------------------------------------------------------------
 
 
-def test_resolve_examples_defaults_to_all_five_in_order():
+def test_resolve_examples_defaults_to_the_whole_golden_set_in_order():
     assert resolve_examples(None) == list(GOLDEN_EXAMPLES)
     assert resolve_examples([]) == list(GOLDEN_EXAMPLES)
 
