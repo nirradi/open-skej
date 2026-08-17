@@ -11,6 +11,7 @@ from datetime import date, datetime
 import pytest
 
 from shape import (
+    DEFAULT_SHAPE,
     InvalidBookingRequestError,
     InvalidShapeError,
     permits,
@@ -516,3 +517,40 @@ def test_permits_never_raises_for_an_ordinary_refusal():
     verdict = permits(shape, date(2026, 8, 18), 9 * 60, 10 * 60)  # a Tuesday: not governed
     assert verdict.allowed is False
     assert isinstance(verdict.reason, str) and verdict.reason
+
+
+# --- DEFAULT_SHAPE: the value task 10.2 seeds every Space with ----------------------------------
+
+
+class TestDefaultShape:
+    """``DEFAULT_SHAPE`` (``ops/plans/stream-10/10.2-a-shape-per-space.md``) reproduces what a
+    Space with no ``availability_hours`` and no ``session_length`` row renders as today: open
+    every day, no blackouts, 60-minute bookings on the hour."""
+
+    def test_validates(self):
+        shape = validate_shape(DEFAULT_SHAPE)
+        assert shape.version == 1
+        assert len(shape.operating_blocks) == 1
+        assert shape.blackout_windows == ()
+
+    def test_every_day_is_bookable_at_every_hour(self):
+        shape = validate_shape(DEFAULT_SHAPE)
+        for on_date in (date(2026, 8, 17), date(2026, 8, 18), date(2026, 8, 23)):  # Mon, Tue, Sun
+            projection = project_day(shape, on_date)
+            assert projection.bookable is True
+            starts = {
+                offered.start_minutes: offered.durations_mins
+                for offered in projection.offered_starts
+            }
+            assert starts[0] == (60,)
+            assert starts[23 * 60] == (60,)  # the last on-the-hour start of the day
+
+    def test_a_60_minute_booking_at_any_hour_is_permitted(self):
+        shape = validate_shape(DEFAULT_SHAPE)
+        verdict = permits(shape, date(2026, 8, 17), 13 * 60, 14 * 60)
+        assert verdict.allowed is True
+
+    def test_an_off_grid_start_is_refused(self):
+        shape = validate_shape(DEFAULT_SHAPE)
+        verdict = permits(shape, date(2026, 8, 17), 13 * 60 + 15, 14 * 60 + 15)
+        assert verdict.allowed is False

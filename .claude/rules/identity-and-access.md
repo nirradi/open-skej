@@ -134,6 +134,12 @@ not asked for stays absent. A Space genuinely meant to enforce no hours holds no
 have the seeded one deleted — which is what `sandbox_seed` does to Space A, since "not enforced" is
 the absence of a row and never a row with an empty bound.
 
+**Space creation also writes one live `SpaceCalendarShape` row**, `DEFAULT_SHAPE`
+(`.claude/rules/calendar-shape.md`), in the same transaction as the rest. A Space with no live shape
+row is not a reachable state, matching the reasoning above for a fresh venue never meeting an empty
+Resource list — the shape is a third piece of a Space's starting configuration, alongside its first
+Resource and its two seeded rule rows, and all three are written atomically with the Space itself.
+
 **Membership and roles stay at the Space, never the Resource.** You are admitted to the venue, not to
 one court, and a member may book any Resource in the Space. This is deliberate and load-bearing: the
 entire authorization model above — roles, access requests, invitations, the unguessable `public_id`,

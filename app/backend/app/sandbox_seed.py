@@ -98,6 +98,7 @@ from app.identity.models import (
     RuleGenerationJob,
     Space,
     SpaceAccessRequest,
+    SpaceCalendarShape,
     SpaceInvitation,
     SpaceMembership,
     SpaceRule,
@@ -219,13 +220,14 @@ def _reset(session: Session) -> None:
 
     Children before parents: bookings before the Resources and users they
     reference, the three per-Space queues before the Spaces and users they
-    reference, ``space_rules`` and Resources before Spaces (task 6.6 gave
-    ``space_rules.space_id`` a foreign key onto ``spaces.id`` with no cascade,
-    matching every other FK in this schema), Spaces before users
-    (``created_by_user_id``), users last. One transaction, so a second run
-    never observes a half-wiped database. This is a disposable sandbox, not
-    the production schema this repository otherwise never deletes from — see
-    the module docstring.
+    reference, ``space_rules``, ``space_calendar_shapes`` and Resources before
+    Spaces (task 6.6 gave ``space_rules.space_id`` a foreign key onto
+    ``spaces.id`` with no cascade, matching every other FK in this schema —
+    task 10.2's ``space_calendar_shapes.space_id`` is the identical shape),
+    Spaces before users (``created_by_user_id``), users last. One
+    transaction, so a second run never observes a half-wiped database. This
+    is a disposable sandbox, not the production schema this repository
+    otherwise never deletes from — see the module docstring.
 
     **The generation tables are wiped too, and they are not optional.** A
     generated rule type carries ``created_by_space_id`` NOT NULL onto the very
@@ -238,12 +240,19 @@ def _reset(session: Session) -> None:
     they produced, and ``prompt_versions`` last: it references nothing, but
     leaving it would strand rows nothing points at and break this function's
     promise that a second run yields the same counts as the first.
+
+    **``space_calendar_shapes`` is wiped for the identical reason.** Every
+    Space ``run`` below creates through ``service.create_space`` now carries a
+    live shape row the moment it exists (task 10.2), so without this line the
+    ``Space`` delete two lines down would raise ``ForeignKeyViolation`` on the
+    very first re-seed.
     """
     session.execute(delete(Booking))
     session.execute(delete(SpaceAccessRequest))
     session.execute(delete(SpaceInvitation))
     session.execute(delete(SpaceMembership))
     session.execute(delete(SpaceRule))
+    session.execute(delete(SpaceCalendarShape))
     session.execute(delete(RuleGenerationExchange))
     session.execute(delete(RuleGenerationJob))
     session.execute(delete(GeneratedRuleType))

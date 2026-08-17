@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Optional, Sequence
 
 from rules import ParamKind
+from shape import DEFAULT_SHAPE, Shape, validate_shape
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -34,8 +35,10 @@ from app.identity.models import (
     InvitationStatus,
     MembershipRole,
     Resource,
+    ShapeStatus,
     Space,
     SpaceAccessRequest,
+    SpaceCalendarShape,
     SpaceInvitation,
     SpaceMembership,
     SpaceRule,
@@ -237,6 +240,16 @@ class OwnerAuthorityRequiredError(Exception):
     """
 
 
+class NoDraftToPublishError(Exception):
+    """``publish_draft`` was called on a Space holding no draft shape row.
+
+    Refused rather than treated as a no-op. Publishing is the one act that must move a draft to
+    live; silently doing nothing would tell an admin "published" while the live shape never
+    changed — the same "a no-op must not read as success" reasoning
+    :class:`InvitationAlreadyResolvedError` already gives for a comparable state-machine gap.
+    """
+
+
 def _require_active(space: Space) -> None:
     if space.archived_at is not None:
         raise SpaceArchivedError(space.public_id)
@@ -295,7 +308,7 @@ def create_space(
 ) -> Space:
     """Create a Space, make its creator the owner, and give it one Resource, atomically.
 
-    Three writes share one transaction. The owner membership because a Space with
+    Several writes share one transaction. The owner membership because a Space with
     no owner is unrecoverable — nobody could archive it, manage it, or be added to
     it. The first Resource because a Space is a *venue*: a fresh one with no
     bookable calendar is a dead end, and creating it here means the product never
@@ -309,6 +322,11 @@ def create_space(
     Resource is config-free by design and every court in a Space shares the
     Space's one schedule. The four rule parameters are left unset, i.e. no
     rows are created for them.
+
+    It also gets a live ``SpaceCalendarShape`` row holding ``DEFAULT_SHAPE`` (task 10.2,
+    ``.claude/rules/calendar-shape.md``) — a Space with no shape row must not be a reachable
+    state, so this write is in the same transaction as the rest rather than a follow-up a caller
+    could observe half-done.
     """
     space = Space(name=name, description=description, created_by_user_id=creator.id)
     session.add(space)
@@ -331,6 +349,19 @@ def create_space(
             space_id=space.id,
             rule_type="session_length",
             params={"session_minutes": _DEFAULT_SESSION_MINUTES},
+        )
+    )
+    # A live default shape, in the same transaction as the rest of Space creation —
+    # `.claude/rules/calendar-shape.md`: "A Space with no shape must not be a reachable state."
+    # `DEFAULT_SHAPE` lives in `rules/shape/` rather than here so this literal and the migration's
+    # own backfill copy (`c07aeccce98c_space_calendar_shapes_table.py`) both read from the one
+    # place the value is actually defined.
+    session.add(
+        SpaceCalendarShape(
+            space_id=space.id,
+            document=DEFAULT_SHAPE,
+            status=ShapeStatus.LIVE,
+            published_at=utcnow(),
         )
     )
     session.commit()
@@ -438,6 +469,162 @@ def space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
         ),
         lookup=catalog.lookup,
     )
+
+
+# ``ShapeVersion`` names the return type task 10.2's own ticket asks for. The natural value is
+# the ``SpaceCalendarShape`` row itself — every other service function in this module returns its
+# ORM row directly (``Space``, ``SpaceRule``, ``Resource``, ...) rather than a bespoke wrapper, and
+# a shape version has no field a caller needs that the row does not already carry. The alias exists
+# so 10.3's gate and 10.8's conversation API can spell the ticket's own name for it.
+ShapeVersion = SpaceCalendarShape
+
+
+def live_shape(session: Session, space: Space) -> Shape:
+    """This Space's current live shape, validated fresh on every read.
+
+    Every Space always holds exactly one ``live`` row — ``create_space`` writes one and
+    ``publish_draft`` never leaves the gap where none exists — so this is a ``scalar_one()``, not
+    an optional lookup; a Space with no live row is a bug elsewhere; a shape with no schema-
+    validating row must not exist.
+
+    **Re-validates the stored document on every call rather than trusting that it validated once
+    at write time.** A document written before a schema change is a document nobody re-checked, so
+    a row whose ``document`` no longer validates raises :class:`shape.InvalidShapeError` here — it
+    is not silently patched over and it does not fall back to ``DEFAULT_SHAPE``. This mirrors
+    ``app.rule_catalog``'s own "re-validate at every load" discipline for a stored generated rule's
+    source, for the identical reason: the caller (task 10.3's availability gate) turns the raise
+    into a refusal, which is what "fail closed" asks for here — a shape that cannot be trusted is
+    exactly as unusable as a shape that says the venue is never open.
+    """
+    row = session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one()
+    return validate_shape(row.document)
+
+
+def draft_shape(session: Session, space: Space) -> Optional[ShapeVersion]:
+    """This Space's draft row, or ``None`` when no chat turn has written one yet.
+
+    Unlike :func:`live_shape`, this returns the row itself rather than a validated ``Shape`` — a
+    draft is read back by the chat's own preview (task 10.8/10.9), which wants the same document a
+    later call to :func:`upsert_draft` would overwrite, not a value already parsed into dataclasses
+    it would have to re-serialize to show a diff against.
+    """
+    return session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.DRAFT,
+        )
+    ).scalar_one_or_none()
+
+
+def upsert_draft(
+    session: Session,
+    space: Space,
+    document: dict,
+    user: User,
+    *,
+    conversation_id: Optional[int] = None,
+) -> ShapeVersion:
+    """Validate ``document`` and write or replace this Space's single draft row.
+
+    Validates **before** writing anything — fail closed, the same discipline every mutating path
+    in this module already follows for its own boundary checks: a document that does not parse
+    through :func:`shape.validate_shape` never reaches the database, and :class:`shape
+    .InvalidShapeError` propagates to the caller (task 10.8's conversation API retries it against
+    the model verbatim, exactly as ``rules.safety.UnsafeRuleError`` already is).
+
+    At most one draft exists per Space (``uq_space_calendar_shapes_draft``), so a second turn
+    replaces the first in place — updating ``document``, ``created_at`` and
+    ``source_conversation_id`` on the existing row — rather than superseding it the way publishing
+    does; a draft is a single working copy, not its own version history, and nothing downstream
+    reads a superseded *draft*.
+    """
+    _require_active(space)
+    validate_shape(document)
+
+    existing = draft_shape(session, space)
+    if existing is not None:
+        existing.document = document
+        existing.created_at = utcnow()
+        existing.created_by_user_id = user.id
+        existing.source_conversation_id = conversation_id
+        session.commit()
+        return existing
+
+    row = SpaceCalendarShape(
+        space_id=space.id,
+        document=document,
+        status=ShapeStatus.DRAFT,
+        created_by_user_id=user.id,
+        source_conversation_id=conversation_id,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def publish_draft(session: Session, space: Space, user: User) -> ShapeVersion:
+    """Make this Space's draft its live shape, atomically, keeping every prior version.
+
+    Two writes in one transaction: the current ``live`` row becomes ``superseded`` and the
+    ``draft`` row becomes ``live`` with ``published_at`` and ``published_by_user_id`` set. Nothing
+    is deleted — the version history this leaves behind is the whole point of publish being
+    explicit rather than every chat turn going live immediately (OVERVIEW decision 4), and it is
+    the only place a later "what changed and when" answer can come from.
+
+    The two updates are flushed **in that order, explicitly** rather than left to the unit of
+    work's own ordering. Both partial unique indexes are ordinary (non-deferrable) indexes, checked
+    per statement, so flipping the draft to ``live`` before the old live row has already moved to
+    ``superseded`` would collide with ``uq_space_calendar_shapes_live`` inside this same
+    transaction — a self-inflicted version of the exact race those indexes exist to catch from two
+    different callers.
+
+    Raises :class:`NoDraftToPublishError` when there is nothing to publish, rather than treating
+    the call as a no-op — see that exception's own docstring.
+    """
+    _require_active(space)
+
+    draft = draft_shape(session, space)
+    if draft is None:
+        raise NoDraftToPublishError(space.public_id)
+
+    live = session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one_or_none()
+    if live is not None:
+        live.status = ShapeStatus.SUPERSEDED
+        session.flush()
+
+    now = utcnow()
+    draft.status = ShapeStatus.LIVE
+    draft.published_at = now
+    draft.published_by_user_id = user.id
+    session.commit()
+    return draft
+
+
+def discard_draft(session: Session, space: Space) -> None:
+    """Delete this Space's draft row, if it has one.
+
+    A no-op when there is no draft — unlike publishing, discarding has nothing left to do once the
+    state it asks for already holds, so there is no ambiguous outcome a silent no-op could hide.
+    The draft row is genuinely deleted rather than retired: it is a working copy nobody else
+    references and never became a version anyone published, the same "an instance is really
+    deleted" reasoning ``SpaceRule``'s own docstring gives for a rule instance nobody points at.
+    """
+    _require_active(space)
+    draft = draft_shape(session, space)
+    if draft is None:
+        return
+    session.delete(draft)
+    session.commit()
 
 
 def _validate_rule_params(rule_type_id: str, params: dict) -> None:

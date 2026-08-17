@@ -168,10 +168,55 @@ interval, a `datetime` handed where a local `date` was asked for. This is the id
 `rules.controller` draws between a denial and `ContextMismatchError`: a denial is user-facing copy,
 and presenting a caller bug as a polite refusal would hide the bug instead of surfacing it.
 
+## Storage: one shape per Space, versioned
+
+`space_calendar_shapes` (`app.identity.models.SpaceCalendarShape`) holds one row per **version** of
+a Space's shape, never one row per Space. `status` is `draft` | `live` | `superseded`. A Space's
+current shape is its one `live` row; a chat turn (task 10.8) writes or replaces its one `draft` row;
+publishing turns a `draft` into `live` and the row it replaces into `superseded` — nothing is ever
+deleted, so the full sequence of a Space's `live` rows, in `created_at` order, is the whole "what
+changed and when" answer with no second table for it.
+
+**Two partial unique indexes carry the "at most one live, at most one draft per Space" constraint**,
+`uq_space_calendar_shapes_live` and `uq_space_calendar_shapes_draft`, each unique on `space_id`
+filtered to their own status — the identical shape and reasoning
+`uq_rule_generation_jobs_in_flight` already gives (`.claude/rules/identity-and-access.md`): two
+concurrent writers (an admin's chat tab open in two windows) can both pass a read-then-write check
+in the service layer and only one can pass a database index, so the index is the actual enforcement
+and the service layer never re-derives it as a check of its own.
+
+**Publishing moves two rows in one transaction, never one.** The current `live` row becomes
+`superseded` and the `draft` row becomes `live` with `published_at` / `published_by_user_id` set,
+flushed in that order — the old `live` row must already be `superseded` before the draft flips to
+`live`, or the flip collides with `uq_space_calendar_shapes_live` inside its own transaction, since
+that index is an ordinary (non-deferrable) one checked per statement. `publish_draft` refuses with
+`NoDraftToPublishError` when the Space holds no draft, rather than treating the call as a silent
+no-op that would tell an admin "published" while the live shape never moved.
+
+**A Space with no live shape row is not a reachable state.** `create_space` writes a live
+`DEFAULT_SHAPE` row in the same transaction as the rest of Space creation, so the availability gate
+(task 10.3) never has to carry a permissive branch for "no shape configured yet" — decision 1
+above is exactly this stated for the schema. `DEFAULT_SHAPE` (`rules/shape/types.py`) is open every
+day 00:00–24:00, `allowed_durations_mins: [60]`, no blackouts — what a Space with neither
+`availability_hours` nor `session_length` already rendered as, so adopting it changes no existing
+test's meaning. Every Space that predates this table was backfilled the identical document by this
+table's own migration, as a `live` row with `created_by_user_id`/`published_by_user_id` left `NULL`
+— a system backfill has no acting user, and both columns are nullable on this table for exactly that
+reason. No shape is derived from a Space's prior `availability_hours` / `session_length` rows; there
+is no production data to derive one from (OVERVIEW decision 3).
+
+`app.identity.service` reads and writes this table beside `space_rule_config`, the module's other
+per-Space configuration assembly: `live_shape` returns the validated `rules.shape.Shape`, re-running
+`validate_shape` on every read rather than trusting that the stored document validated once at write
+time — the identical "re-validate at every load" discipline `app.rule_catalog` applies to a stored
+generated rule's source, and for the same reason: a document written before a schema change is a
+document nobody re-checked. `draft_shape`, `upsert_draft`, `publish_draft` and `discard_draft` round
+out the write side; every one refuses on an archived Space through the existing
+`SpaceArchivedError` path, and none of them re-checks the caller's role — authorization is the
+router's job, matching how every other write in this module already splits the two.
+
 ## What later tasks in this stream add here
 
-* **10.2** — the table storing a Space's draft and live shape, and the default every Space is seeded
-  with.
 * **10.3** — the gate's exact position relative to `evaluate_request` in `create_resource_booking`,
   and the projection endpoint the calendar reads.
 * **10.4** — how the grid draws blocks, blackouts and allowed durations from the projection.

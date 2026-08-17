@@ -30,6 +30,7 @@ __all__ = [
     "OperatingBlock",
     "BlackoutWindow",
     "Shape",
+    "DEFAULT_SHAPE",
 ]
 
 #: The three-letter day codes the JSON document spells, mapped onto ``datetime.date.weekday()``'s
@@ -238,3 +239,33 @@ class Shape:
                     f"got {type(blackout).__name__}"
                 )
         object.__setattr__(self, "blackout_windows", blackouts)
+
+
+#: The shape every Space gets on creation, and the one the 10.2 migration backfills onto every
+#: Space that predates this table (``ops/plans/stream-10/OVERVIEW.md``, decision 3: there is no
+#: production data, so nothing is derived from an existing ``availability_hours`` /
+#: ``session_length`` row -- this literal is written instead). Open every day, 00:00-24:00, one
+#: offered duration of 60 minutes, no blackouts -- which reproduces what a Space with neither row
+#: renders as today, so adopting this default changes no existing test's meaning.
+#:
+#: This is the **untrusted-JSON document shape** :func:`shape.validate.validate_shape` parses --
+#: ``"HH:MM"`` strings, not the minute-int, already-valid :class:`Shape` dataclass -- because its
+#: caller (Space creation) hands it to ``validate_shape`` itself rather than receiving something
+#: pre-parsed. It lives here, beside the schema it is one instance of, so the value is defined
+#: exactly once and stays readable at runtime -- a constant that lived only in a migration file
+#: would not be. The migration that seeds every pre-existing Space with it cannot import this
+#: package (no migration in this history imports ``rules``/``shape``/``app.identity`` -- only
+#: ``app.db.models.UtcDateTime``, a driver-level type) and so carries its own literal copy,
+#: commented as required to stay byte-for-byte equivalent to this one.
+DEFAULT_SHAPE: dict = {
+    "version": 1,
+    "operating_blocks": [
+        {
+            "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+            "start_time": "00:00",
+            "end_time": "24:00",
+            "allowed_durations_mins": [60],
+        }
+    ],
+    "blackout_windows": [],
+}
