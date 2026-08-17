@@ -49,7 +49,12 @@ siblings.
   nothing that could deny a booking for a different reason (an availability
   window, a frequency cap) and break the suite's assumption that duration is
   the only thing standing between it and success. Owner + admin + member. Two
-  identical Resources (courts) sharing the one Space-level schedule.
+  identical Resources (courts) sharing the one Space-level schedule. Its live
+  shape (task 10.3) mirrors that same grid — open every day, stepped by
+  ``SPACE_A_SESSION_MINUTES``, offering every multiple of it well past
+  ``SPACE_A_MAX_DURATION_MINUTES`` — so the availability gate never refuses
+  ahead of ``max_duration``; ``DEFAULT_SHAPE``'s own 60-minutes-only grid
+  would.
 * ``SPACE_B_NAME`` — the manual-QA target for everything Space A deliberately
   does not exercise. Zone ``SPACE_B_TIMEZONE`` (``Australia/Sydney``, not
   UTC and not Space A's own zone) with real ``opens_at_minutes``/
@@ -96,6 +101,7 @@ from app.identity.models import (
     Resource,
     RuleGenerationExchange,
     RuleGenerationJob,
+    ShapeStatus,
     Space,
     SpaceAccessRequest,
     SpaceCalendarShape,
@@ -171,6 +177,32 @@ SPACE_A_BOOKING_HORIZON_DAYS = 60
 # expects to succeed, for a reason it never asserts on. (A consecutive-
 # duration cap is not a frequency cap in that sense — see above.)
 
+# Task 10.3's availability gate (`.claude/rules/calendar-shape.md`) now runs
+# ahead of the rule engine, so `DEFAULT_SHAPE` — open all day, but offering
+# only 60-minute bookings — is no longer permissive enough for a Space whose
+# own canon is deliberately duration-only: `03-sad-path.spec.ts` drags up to
+# `SLOTS_TO_EXCEED_MAX` 30-minute slots (150 minutes) precisely so it can
+# reach `max_duration` and be refused *there*, with that rule's own copy —
+# not by the shape offering nothing longer than an hour. This document keeps
+# the grid identical to the one `session_length` already drew (every day,
+# anchored at local midnight, stepped by `SPACE_A_SESSION_MINUTES`) and
+# offers every multiple of it up to 240 minutes, comfortably past every
+# duration this seed's own consumers select, so the shape is never the rule
+# that answers and the engine stays exactly as exercised as before this
+# gate existed.
+SPACE_A_SHAPE = {
+    "version": 1,
+    "operating_blocks": [
+        {
+            "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+            "start_time": "00:00",
+            "end_time": "24:00",
+            "allowed_durations_mins": [30, 60, 90, 120, 150, 180, 210, 240],
+        }
+    ],
+    "blackout_windows": [],
+}
+
 RESOURCE_A1_NAME = "Court 1"
 RESOURCE_A2_NAME = "Court 2"
 
@@ -202,6 +234,24 @@ SPACE_B_CLOSES_AT_MINUTES = 21 * 60
 SPACE_B_SESSION_MINUTES = 30
 SPACE_B_MAX_DURATION_MINUTES = 90
 SPACE_B_MAX_BOOKINGS_PER_WEEK = 3
+# Mirrors Space A's own shape above, at Space B's own hours and step: open
+# `SPACE_B_OPENS_AT_MINUTES`-`SPACE_B_CLOSES_AT_MINUTES` daily, stepped by
+# `SPACE_B_SESSION_MINUTES`, offering every multiple of it up to 180 minutes
+# — past `SPACE_B_MAX_DURATION_MINUTES` (90) with the same margin Space A's
+# own shape keeps, so `max_duration` stays the rule that arbitrates a
+# too-long booking in manual QA rather than the shape.
+SPACE_B_SHAPE = {
+    "version": 1,
+    "operating_blocks": [
+        {
+            "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
+            "start_time": "09:00",
+            "end_time": "21:00",
+            "allowed_durations_mins": [30, 60, 90, 120, 150, 180],
+        }
+    ],
+    "blackout_windows": [],
+}
 # Its first Resource is the one `create_space` auto-creates for every fresh
 # Space (`service.FIRST_RESOURCE_NAME`); a second, identical sibling is added
 # below (mirroring Space A's own Court 1 / Court 2 pair) so the weekly cap's
@@ -388,6 +438,29 @@ def _clear_rule(session: Session, space: Space, rule_type: str) -> None:
     session.commit()
 
 
+def _set_live_shape(session: Session, space: Space, document: dict) -> None:
+    """Overwrite this Space's live shape document in place.
+
+    ``create_space`` (task 10.2) already wrote one live row holding
+    ``DEFAULT_SHAPE`` in the same transaction that created the Space, so — as
+    with ``_set_rule`` above — "the" live row is unambiguous for a Space this
+    seed just built. Task 10.3's availability gate now runs ahead of the rule
+    engine on every booking, so a Space's shape has to keep offering
+    everything its own ``space_rules`` canon relies on being reachable: the
+    gate refuses first, and a shape narrower than the rules below it would
+    silently deny bookings this seed's own callers — the E2E suite among
+    them — still expect the rule engine, not the grid, to arbitrate.
+    """
+    row = session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one()
+    row.document = document
+    session.commit()
+
+
 def run(session: Session) -> None:
     """Reset the sandbox and (re)plant every interesting state, once.
 
@@ -439,6 +512,7 @@ def run(session: Session) -> None:
         {"max_consecutive_minutes": SPACE_A_MAX_CONSECUTIVE_MINUTES},
     )
     _set_rule(session, space_a, "booking_horizon", {"days": SPACE_A_BOOKING_HORIZON_DAYS})
+    _set_live_shape(session, space_a, SPACE_A_SHAPE)
 
     _add_membership(session, space_a, admin, MembershipRole.ADMIN)
     _add_membership(session, space_a, member, MembershipRole.MEMBER)
@@ -486,6 +560,7 @@ def run(session: Session) -> None:
         "max_bookings_per_week",
         {"max_bookings": SPACE_B_MAX_BOOKINGS_PER_WEEK},
     )
+    _set_live_shape(session, space_b, SPACE_B_SHAPE)
 
     # `create_space` auto-created one Resource ("Main"); add an identical
     # sibling so a manual verification of the weekly cap can put its third
