@@ -1,90 +1,168 @@
 /**
- * Tests for drag-selection range arithmetic.
+ * Tests for selection arithmetic over the shape projection's own offered
+ * starts.
  *
- * The two claims worth defending: dragging backwards works exactly as well as
- * dragging forwards, and a drag stops at an obstruction rather than selecting
- * through it.
+ * The claims worth defending: a click takes the smallest duration offered at
+ * a start; a drag takes the largest duration that both fits under the drag
+ * head and clears obstructions, direction-agnostic exactly like the old
+ * index-based `rangeBetween`; and a start not in `offered_starts` yields
+ * `null` rather than inventing a selection the projection never offered.
  */
 
 import { describe, expect, it } from 'vitest'
 
-import { isInSelection, rangeBetween, rangeLength } from './selection'
+import { buildWeekProjection } from './shape'
+import { clickSelection, dragSelection, isStartInSelection } from './selection'
 
-/** Every slot selectable — the plain case. */
+/** Every candidate span free — the plain case. */
 const allFree = () => true
 
-describe('rangeBetween', () => {
-  it('selects a single slot when the head is the anchor', () => {
-    expect(rangeBetween(4, 4, allFree)).toEqual({ start: 4, end: 4 })
+/** Teacher example: 18:00-20:00, 20-minute slots, a 19:30-19:40 "Break". */
+const TEACHER_DAY = buildWeekProjection(
+  [
+    {
+      date: '2026-08-18',
+      operating_intervals: [
+        { start_minutes: 18 * 60, end_minutes: 20 * 60, allowed_durations_mins: [20] },
+      ],
+      blackout_intervals: [{ start_minutes: 19 * 60 + 30, end_minutes: 19 * 60 + 40, reason: 'Break' }],
+      offered_starts: [
+        { start_minutes: 18 * 60, durations_mins: [20] },
+        { start_minutes: 18 * 60 + 20, durations_mins: [20] },
+        { start_minutes: 18 * 60 + 40, durations_mins: [20] },
+        { start_minutes: 19 * 60 + 40, durations_mins: [20] },
+      ],
+      bookable: true,
+    },
+  ],
+  'Europe/Berlin',
+).forDate('2026-08-18')
+
+/** Music room example: 08:00-14:00 [60], 14:00-22:00 [60, 120]. */
+const MUSIC_ROOM_DAY = buildWeekProjection(
+  [
+    {
+      date: '2026-08-18',
+      operating_intervals: [
+        { start_minutes: 8 * 60, end_minutes: 14 * 60, allowed_durations_mins: [60] },
+        { start_minutes: 14 * 60, end_minutes: 22 * 60, allowed_durations_mins: [60, 120] },
+      ],
+      blackout_intervals: [],
+      offered_starts: [
+        ...Array.from({ length: 6 }, (_, i) => ({
+          start_minutes: (8 + i) * 60,
+          durations_mins: [60],
+        })),
+        ...Array.from({ length: 8 }, (_, i) => ({
+          start_minutes: (14 + i) * 60,
+          durations_mins: [60, 120],
+        })),
+      ],
+      bookable: true,
+    },
+  ],
+  'Europe/Berlin',
+).forDate('2026-08-18')
+
+describe('clickSelection', () => {
+  it('takes the smallest duration offered at the start', () => {
+    expect(clickSelection(MUSIC_ROOM_DAY, 18 * 60)).toEqual({
+      dateKey: '2026-08-18',
+      startMinutes: 18 * 60,
+      durationMinutes: 60,
+    })
   })
 
-  it('selects downward', () => {
-    expect(rangeBetween(4, 8, allFree)).toEqual({ start: 4, end: 8 })
-  })
-
-  it('selects upward', () => {
-    // Dragging backwards is the case a "collect slots as they are entered"
-    // implementation gets wrong; the range is normalised to ascending order.
-    expect(rangeBetween(8, 4, allFree)).toEqual({ start: 4, end: 8 })
-  })
-
-  it('produces the same range in either direction', () => {
-    expect(rangeBetween(2, 9, allFree)).toEqual(rangeBetween(9, 2, allFree))
-  })
-
-  it('returns null when the anchor itself is not selectable', () => {
-    expect(rangeBetween(3, 6, () => false)).toBeNull()
-  })
-
-  it('stops before a blocked slot when dragging down', () => {
-    const blockedAt7 = (i: number) => i !== 7
-    expect(rangeBetween(4, 10, blockedAt7)).toEqual({ start: 4, end: 6 })
-  })
-
-  it('stops before a blocked slot when dragging up', () => {
-    const blockedAt7 = (i: number) => i !== 7
-    expect(rangeBetween(10, 4, blockedAt7)).toEqual({ start: 8, end: 10 })
-  })
-
-  it('does not reach past a blocked slot even when the far side is free', () => {
-    // The negative control for the two above: without the early break the
-    // range would run to 10, silently spanning a booked slot.
-    const blockedAt7 = (i: number) => i !== 7
-    const range = rangeBetween(4, 10, blockedAt7)
-    expect(range).not.toBeNull()
-    expect(range!.end).toBeLessThan(7)
-  })
-
-  it('collapses to the anchor when the very next slot is blocked', () => {
-    expect(rangeBetween(4, 10, (i) => i === 4)).toEqual({ start: 4, end: 4 })
+  it('returns null for a start not in offered_starts', () => {
+    // 19:20 — the teacher's grid never offers this start, since 19:20+20
+    // would straddle the 19:30 blackout.
+    expect(clickSelection(TEACHER_DAY, 19 * 60 + 20)).toBeNull()
   })
 })
 
-describe('isInSelection', () => {
-  const selection = { dateKey: '2026-07-20', start: 3, end: 5 }
-
-  it('includes both endpoints', () => {
-    expect(isInSelection(selection, '2026-07-20', 3)).toBe(true)
-    expect(isInSelection(selection, '2026-07-20', 5)).toBe(true)
+describe('dragSelection', () => {
+  it('stretches to the largest duration offered that fits under the drag head', () => {
+    // Anchor 18:00, head 19:00 in the evening block — 120 fits exactly
+    // (18:00-20:00), matching the head's own 19:00-20:00 end.
+    const selection = dragSelection(MUSIC_ROOM_DAY, 18 * 60, 19 * 60, allFree)
+    expect(selection).toEqual({ dateKey: '2026-08-18', startMinutes: 18 * 60, durationMinutes: 120 })
   })
 
-  it('excludes slots outside the range', () => {
-    expect(isInSelection(selection, '2026-07-20', 2)).toBe(false)
-    expect(isInSelection(selection, '2026-07-20', 6)).toBe(false)
+  it('never exceeds 60 in the morning block, since only 60 is ever offered there', () => {
+    const selection = dragSelection(MUSIC_ROOM_DAY, 8 * 60, 11 * 60, allFree)
+    expect(selection).toEqual({ dateKey: '2026-08-18', startMinutes: 8 * 60, durationMinutes: 60 })
   })
 
-  it('excludes the same indices on another day', () => {
-    expect(isInSelection(selection, '2026-07-21', 4)).toBe(false)
+  it('is direction-agnostic: dragging backwards from the anchor produces the same span', () => {
+    const forward = dragSelection(MUSIC_ROOM_DAY, 18 * 60, 19 * 60, allFree)
+    const backward = dragSelection(MUSIC_ROOM_DAY, 19 * 60, 18 * 60, allFree)
+    expect(backward).toEqual(forward)
+  })
+
+  it('falls back to the click selection when no wider duration clears an obstruction', () => {
+    // Everything from 19:00 onward is obstructed, so only the anchor's own
+    // 60-minute click unit (18:00-19:00) survives.
+    const isFree = (_start: number, end: number) => end <= 19 * 60
+    const selection = dragSelection(MUSIC_ROOM_DAY, 18 * 60, 20 * 60, isFree)
+    expect(selection).toEqual({ dateKey: '2026-08-18', startMinutes: 18 * 60, durationMinutes: 60 })
+  })
+
+  it('cannot be built across a blackout: the grid never offers a straddling start at all', () => {
+    // Dragging from 18:40 toward 19:40 in the teacher's example: nothing
+    // wider than the anchor's own 20-minute click unit is offered, because
+    // 19:20 (which would need to exist to widen through) was never offered.
+    const selection = dragSelection(TEACHER_DAY, 18 * 60 + 40, 19 * 60 + 40, allFree)
+    expect(selection).toEqual({
+      dateKey: '2026-08-18',
+      startMinutes: 18 * 60 + 40,
+      durationMinutes: 20,
+    })
+  })
+
+  it('returns null when the earlier start is not offered at all', () => {
+    expect(dragSelection(TEACHER_DAY, 19 * 60 + 20, 19 * 60 + 40, allFree)).toBeNull()
+  })
+
+  it('dragging backwards onto an obstructed start keeps the anchor, never the obstruction', () => {
+    // Anchor 18:00, dragged back over 17:00, which is already booked. The
+    // earlier start offers nothing free, so the selection stays on the
+    // anchor's own click unit rather than proposing booked minutes — what
+    // the old index-walking `rangeBetween` did by stopping at the obstruction.
+    const isFree = (start: number) => start >= 18 * 60
+    expect(dragSelection(MUSIC_ROOM_DAY, 18 * 60, 17 * 60, isFree)).toEqual({
+      dateKey: '2026-08-18',
+      startMinutes: 18 * 60,
+      durationMinutes: 60,
+    })
+  })
+
+  it('proposes nothing when the anchor itself is obstructed', () => {
+    const nothingFree = () => false
+    expect(dragSelection(MUSIC_ROOM_DAY, 18 * 60, 17 * 60, nothingFree)).toBeNull()
+  })
+})
+
+describe('isStartInSelection', () => {
+  const selection = { dateKey: '2026-08-18', startMinutes: 18 * 60, durationMinutes: 120 }
+
+  it('includes the start itself and every start within the span', () => {
+    expect(isStartInSelection(selection, '2026-08-18', 18 * 60)).toBe(true)
+    expect(isStartInSelection(selection, '2026-08-18', 19 * 60)).toBe(true)
+  })
+
+  it('excludes the start exactly at the end of the span', () => {
+    expect(isStartInSelection(selection, '2026-08-18', 20 * 60)).toBe(false)
+  })
+
+  it('excludes a start before the span', () => {
+    expect(isStartInSelection(selection, '2026-08-18', 17 * 60)).toBe(false)
+  })
+
+  it('excludes the same minute on another day', () => {
+    expect(isStartInSelection(selection, '2026-08-19', 19 * 60)).toBe(false)
   })
 
   it('is false when nothing is selected', () => {
-    expect(isInSelection(null, '2026-07-20', 4)).toBe(false)
-  })
-})
-
-describe('rangeLength', () => {
-  it('counts inclusively', () => {
-    expect(rangeLength({ start: 3, end: 3 })).toBe(1)
-    expect(rangeLength({ start: 3, end: 5 })).toBe(3)
+    expect(isStartInSelection(null, '2026-08-18', 19 * 60)).toBe(false)
   })
 })

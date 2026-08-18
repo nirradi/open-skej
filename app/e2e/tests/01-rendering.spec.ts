@@ -1,12 +1,15 @@
 /**
  * Test 1 — UI rendering.
  *
- * The calendar loads and the grid it draws matches the configured slot size.
+ * The calendar loads and the grid it draws matches the shape the Space
+ * actually holds.
  *
- * The expected slot count is imported from `app/frontend/src/config.ts` rather
- * than written as `34`. The plan's promise is that changing `sessionMinutes` from
- * 30 to 10 re-renders correctly with no other edit; a hardcoded 34 here would
- * turn keeping that promise into a test failure, which is precisely backwards.
+ * The expected count of offered starts comes from `fixtures.ts`'s
+ * `SLOTS_PER_DAY`, which mirrors `sandbox_seed.py`'s `SPACE_A_SHAPE` rather
+ * than any frontend constant — there is no client-side slot size left to
+ * import. What a date offers is the server's answer (`GET
+ * /spaces/{public_id}/calendar`, `.claude/rules/calendar-shape.md`), so the
+ * seed's own document is the only honest source for what this grid must draw.
  */
 
 import {
@@ -15,44 +18,49 @@ import {
   gotoResourceCalendar,
   renderedDateKeys,
   slotId,
-  slotsPerDay,
+  SLOTS_PER_DAY,
   test,
 } from './fixtures'
-import { formatSlotLabel } from '../../frontend/src/config'
+import { formatMinutesLabel } from '../../frontend/src/config'
 import { DAYS_PER_WEEK } from '../../frontend/src/calendar/week'
 
-test('the calendar renders a grid matching the configured slot size', async ({ page }) => {
+test('the calendar renders a grid matching the shape the Space holds', async ({ page }) => {
   await gotoResourceCalendar(page)
 
   await expect(page.getByTestId('calendar')).toBeVisible()
   const grid = page.getByTestId('calendar-grid')
   await expect(grid).toBeVisible()
 
-  // The component publishes what it thinks the slot count is; assert it agrees
-  // with the config the app was built from.
-  await expect(grid).toHaveAttribute('data-slots-per-day', String(slotsPerDay))
-
   await expect(page.locator('[data-testid^="calendar-day-"]')).toHaveCount(DAYS_PER_WEEK)
 
-  // And assert the slots were actually drawn, not just counted in an attribute.
   const dateKeys = await renderedDateKeys(page)
   const firstDay = dateKeys[0]
 
-  await expect(page.getByTestId(slotId(firstDay, 0))).toBeVisible()
-  await expect(page.getByTestId(slotId(firstDay, slotsPerDay - 1))).toBeVisible()
-  // One past the last: proves the count is a real bound, not a lower bound.
-  await expect(page.getByTestId(slotId(firstDay, slotsPerDay))).toHaveCount(0)
+  // Each day column publishes how many starts it was offered; assert it agrees
+  // with the shape the sandbox seed wrote.
+  await expect(page.getByTestId(`calendar-column-${firstDay}`)).toHaveAttribute(
+    'data-offered-starts',
+    String(SLOTS_PER_DAY),
+  )
 
-  // The first label is midnight, whatever the Space's own hours are: task 5.9
-  // made the grid render the full day and grey what falls outside opening
-  // hours, rather than clipping the day to them. Clipping meant a booking made
-  // before an admin narrowed the hours had no row left to sit on and vanished
-  // from a calendar it was still on.
+  // And assert the starts were actually drawn, not just counted in an
+  // attribute.
+  await expect(page.getByTestId(slotId(firstDay, 0))).toBeVisible()
+  await expect(page.getByTestId(slotId(firstDay, SLOTS_PER_DAY - 1))).toBeVisible()
+  // Local midnight is the day boundary: a start at or past 1440 is never
+  // drawn, whatever the shape represents (`ops/done/stream-7/passed-midnight.md`).
+  await expect(page.getByTestId(`slot-${firstDay}-1440`)).toHaveCount(0)
+
+  // The first label is midnight, because Space A's own shape opens there. The
+  // grid still renders the whole day whatever a Space offers — closed time is
+  // painted rather than clipped away, so a booking made before an admin
+  // narrowed the shape still has canvas to sit on instead of vanishing from a
+  // calendar it is genuinely still on.
   await expect(page.getByTestId(slotId(firstDay, 0))).toHaveAttribute(
     'aria-label',
-    `${firstDay} ${formatSlotLabel(0)}`,
+    `${firstDay} ${formatMinutesLabel(0)}`,
   )
-  expect(formatSlotLabel(0)).toBe('00:00')
+  expect(formatMinutesLabel(0)).toBe('00:00')
 })
 
 test('the week label and navigation bounds reflect the booking horizon', async ({ page }) => {

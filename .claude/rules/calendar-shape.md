@@ -268,13 +268,61 @@ from local midnight throughout, never `DayScheduleRead`'s `HH:MM:SS` wall-clock 
 converting from minutes to a wall clock and back is two chances to disagree with the gate that
 enforces the identical table.
 
-This endpoint replaces `GET /spaces/{public_id}/schedule` in role but does not remove it; both
-serve the calendar grid until task 10.4 moves the frontend across and 10.5 retires the schedule
-endpoint along with the two rule types it resolved.
+This endpoint is what the calendar grid reads, and the only thing it reads. `GET
+/spaces/{public_id}/schedule` still exists and nothing renders it any more; it is retired along
+with the two rule types it resolves (10.5, below).
+
+## What the grid draws, and what it deliberately does not know
+
+`CalendarGrid` (`app/frontend/src/calendar/CalendarGrid.tsx`) draws one week from
+`GET /spaces/{public_id}/calendar` and from nothing else. A day column is a **minute canvas** — one
+box 1440 minutes tall — with four layers positioned into it: closed time as the canvas's own
+background, the operating intervals painted over it, the blackout intervals greyed over those
+**with their own `reason` rendered**, and one button per `offered_starts` entry. Existing bookings
+are drawn last, unchanged.
+
+**Closed is the default state of a minute; being open is the positive statement.** The grid used to
+render all 24 hours as bookable and grey whatever fell outside an `availability_hours` row, so a
+Space whose hours came from anywhere else was drawn wide open — the reported defect this stream
+exists to close. Painting the operating region instead means the grid can only ever offer what the
+projection offered, and a date the server did not send projects as **closed**: `WeekProjection`'s
+own lookup (`app/frontend/src/calendar/shape.ts`) falls back to a closed day, the deliberate
+inversion of the permissive fallback the retired per-date schedule carried. Fail closed reaches the
+client too.
+
+**A selection is one offered start plus one duration offered there** — a lookup into the same
+`offered_starts` table the gate answers `permits` from, never arithmetic over a uniform slot grid.
+That is what makes a length this Space does not offer *unconstructable* rather than merely refused
+after submission, which is the structural half of
+`ops/pending/bugs/calendar-does-not-reflect-the-rule-set.md`'s symptom 2. A click takes the
+smallest duration offered at that start; a drag takes the largest one that ends no later than the
+drag head and clears every booking in the way, so dragging past an existing booking shortens the
+selection instead of spanning it.
+
+**The grid knows nothing about policy rules, and that is the design rather than a residue.** A
+Space configuring a 120-minute `max_duration` beside a shape offering 180 still lets a member build
+a selection the server refuses. The shape says what the venue offers; a rule says who may take it
+and how much of it (`ops/plans/stream-10/OVERVIEW.md`, decision 2), and only one of those two is
+drawable. Projecting the whole rule set onto the calendar is the repair this stream rejected
+outright: a slot-guesser can hide a bookable slot as easily as offer an unbookable one, and the
+first is the worse failure of the two.
+
+**A start button is as tall as its own click unit, capped at the next offered start.** Two blocks
+with different anchors keep two independent grids, so two starts can sit closer together than
+either one's shortest booking; capping the height is what keeps every offered start clickable
+instead of letting one paint over its neighbour.
+
+**A window past local midnight is clamped, never drawn.** An `end_time` above `24:00` is
+representable (decision 2 above) and the grid does not render the wrap: regions are clipped at 1440
+minutes and a start at or past it is not drawn at all. `ops/done/stream-7/passed-midnight.md`
+records the identical limit for the pre-shape calendar, and this stream does not lift it.
+
+**`showBookings` is the seam the chat preview reuses this component through.** With it off the grid
+issues no booking request and draws no booking layer, so the component a member books on is the one
+a draft is previewed with — one grid, not a second implementation that could disagree with it.
 
 ## What later tasks in this stream add here
 
-* **10.4** — how the grid draws blocks, blackouts and allowed durations from the projection.
 * **10.5** — the retirement of `availability_hours` and `session_length`, and where the run's gap
   tolerance is re-sourced from once `resolve_day_schedule` is gone.
 * **10.6** — the shape agent: one prompt, one validated document, one retry against

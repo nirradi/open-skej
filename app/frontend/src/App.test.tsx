@@ -22,7 +22,8 @@ import App from './App'
 import * as api from './api'
 import type { Booking } from './api'
 import { AuthModeContext, SessionContext, type Session } from './auth'
-import { bookingTestId, slotTestId } from './calendar'
+import { addDays, bookingTestId, slotTestId, toDateKey } from './calendar'
+import { openDayRead } from './calendar/fixtures'
 
 // A calendar-date carrier (see `calendar/week.ts`'s docblock), independent
 // of whichever zone the host running this suite happens to be in — `slotOn`
@@ -37,7 +38,7 @@ const MONDAY = new Date(2026, 6, 20)
 // different real instant on every machine, and once the grid stopped taking
 // its clock from the host and started taking it from the Space (this task),
 // a `NOW` that drifted relative to UTC could land on a different calendar
-// day than `MONDAY` on some hosts and break every index below. Built as UTC,
+// day than `MONDAY` on some hosts and break every start below. Built as UTC,
 // this is unambiguously "Monday, 09:00 on the Space's own clock" everywhere.
 const NOW = new Date(Date.UTC(2026, 6, 20, 9, 0))
 
@@ -107,13 +108,21 @@ function renderApp() {
       },
     ],
   })
-  // `ResourceCalendarPage` fetches `GET /spaces/{public_id}/schedule` for the
-  // visible week; with no entries it falls back to the shipped default — no
-  // hours restriction, the default slot size — which is what this suite's
-  // assertions about the grid assume. Unmocked, this is a real `fetch` with no
-  // server behind it, precisely what hung this suite before this spy was
-  // added.
-  vi.spyOn(api, 'getSpaceSchedule').mockResolvedValue({ outcome: 'ok', data: [] })
+  // `ResourceCalendarPage` fetches `GET /spaces/{public_id}/calendar` for the
+  // visible week and hands the grid the projection it answers with — with no
+  // projection at all the grid renders every date **closed** and this suite
+  // would have nothing to click, which is the fail-closed default and not a
+  // state worth asserting here. So it is handed an open week: 30-minute
+  // starts, each offering 30 through 120 minutes, the shape the sandbox
+  // seed's own Space A holds. Unmocked, this is a real `fetch` with no server
+  // behind it, precisely what hung this suite before this spy was added.
+  vi.spyOn(api, 'getSpaceCalendar').mockImplementation(async (_publicId, from, to) => ({
+    outcome: 'ok',
+    data: Array.from(
+      { length: Math.round((to.getTime() - from.getTime()) / 86400_000) + 1 },
+      (_, i) => openDayRead(toDateKey(addDays(from, i))),
+    ),
+  }))
   return render(
     <AuthModeContext value={{ kind: 'sandbox' }}>
       <SessionContext value={AUTHENTICATED_SESSION}>
@@ -123,10 +132,15 @@ function renderApp() {
   )
 }
 
-function slotOn(dayOffset: number, index: number): HTMLElement {
+/**
+ * The offered-start button at `startMinutes` (minutes from that date's own
+ * local midnight, the unit the whole projection is in) on the day `dayOffset`
+ * days after Monday.
+ */
+function slotOn(dayOffset: number, startMinutes: number): HTMLElement {
   const day = new Date(MONDAY)
   day.setDate(day.getDate() + dayOffset)
-  return screen.getByTestId(slotTestId(day, index))
+  return screen.getByTestId(slotTestId(day, startMinutes))
 }
 
 function bookingAt(dayOffset: number, startHour: number, endHour: number): Booking {
@@ -182,13 +196,13 @@ afterEach(() => {
  * precondition returned, and three tests started failing for a reason that
  * had nothing to do with what they assert.
  */
-async function slotIsSelectable(dayOffset: number, index: number) {
-  await waitFor(() => expect((slotOn(dayOffset, index) as HTMLButtonElement).disabled).toBe(false))
+async function slotIsSelectable(dayOffset: number, startMinutes: number) {
+  await waitFor(() => expect((slotOn(dayOffset, startMinutes) as HTMLButtonElement).disabled).toBe(false))
 }
 
 /** Selects one slot by driving the pointer events the grid actually listens for. */
-function selectSlot(dayOffset: number, index: number) {
-  const cell = slotOn(dayOffset, index)
+function selectSlot(dayOffset: number, startMinutes: number) {
+  const cell = slotOn(dayOffset, startMinutes)
   fireEvent.pointerDown(cell)
   fireEvent.pointerUp(window)
 }
@@ -204,9 +218,9 @@ describe('booking end to end through the app shell', () => {
 
     renderApp()
     await screen.findByTestId('calendar')
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
 
-    selectSlot(2, 20)
+    selectSlot(2, 600)
     await screen.findByTestId('booking-confirm')
     fireEvent.click(screen.getByTestId('booking-confirm'))
 
@@ -225,9 +239,9 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'ok', data: created })
 
     renderApp()
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
 
-    selectSlot(2, 20)
+    selectSlot(2, 600)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     // The refetch is what puts it on screen; nothing reloads the document.
@@ -241,9 +255,9 @@ describe('booking end to end through the app shell', () => {
     vi.spyOn(api, 'createResourceBooking').mockResolvedValue({ outcome: 'rule_denied', message })
 
     renderApp()
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
 
-    selectSlot(2, 20)
+    selectSlot(2, 600)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     const denied = await screen.findByTestId('booking-denied')
@@ -256,9 +270,9 @@ describe('booking end to end through the app shell', () => {
   it('does not open the cancel panel for a range selection', async () => {
     vi.spyOn(api, 'listResourceBookings').mockResolvedValue({ outcome: 'ok', data: [] })
     renderApp()
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
 
-    selectSlot(2, 20)
+    selectSlot(2, 600)
     await screen.findByTestId('booking-confirm')
     // The two panels answer different questions and must not both be asking.
     expect(screen.queryByTestId('cancel-panel')).toBeNull()
@@ -275,9 +289,9 @@ describe('booking end to end through the app shell', () => {
     })
 
     renderApp()
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
 
-    selectSlot(2, 20)
+    selectSlot(2, 600)
     fireEvent.click(await screen.findByTestId('booking-confirm'))
 
     await screen.findByTestId('booking-conflict')
@@ -316,18 +330,18 @@ describe('cancelling end to end through the app shell', () => {
     })
 
     renderApp()
-    // 10:00–11:00 is indices 8 and 9 from a 06:00 open at 30-minute slots.
-    await waitFor(() => expect((slotOn(2, 20) as HTMLButtonElement).disabled).toBe(true))
+    // 600 minutes from local midnight is 10:00, where the booking sits.
+    await waitFor(() => expect((slotOn(2, 600) as HTMLButtonElement).disabled).toBe(true))
 
     await cancelVisibleBooking(existing)
 
     await screen.findByTestId('cancel-success')
     // The refetch — not a reload — is what removes it.
     await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
 
     // And the freed time is genuinely bookable again, not merely un-greyed.
-    selectSlot(2, 20)
+    selectSlot(2, 600)
     expect(await screen.findByTestId('booking-confirm')).toBeTruthy()
   })
 
@@ -370,7 +384,7 @@ describe('cancelling end to end through the app shell', () => {
     expect(screen.queryByRole('alert')).toBeNull()
     // The end state the user wanted holds, so the calendar must show it.
     await waitFor(() => expect(screen.queryByTestId(bookingTestId(existing.id))).toBeNull())
-    await slotIsSelectable(2, 20)
+    await slotIsSelectable(2, 600)
   })
 
   it('clears a stale block on not_found without alarming the user', async () => {
@@ -404,7 +418,7 @@ describe('cancelling end to end through the app shell', () => {
     // Nothing was cancelled, so nothing may look cancelled — the opposite
     // mistake to the one `already_cancelled` invites.
     expect(screen.getByTestId(bookingTestId(existing.id))).toBeTruthy()
-    expect((slotOn(2, 20) as HTMLButtonElement).disabled).toBe(true)
+    expect((slotOn(2, 600) as HTMLButtonElement).disabled).toBe(true)
     expect(api.listResourceBookings).toHaveBeenCalledTimes(1)
   })
 
@@ -418,9 +432,11 @@ describe('cancelling end to end through the app shell', () => {
     fireEvent.click(await screen.findByTestId(bookingTestId(existing.id)))
     await screen.findByTestId('cancel-panel')
 
-    // Index 24 is 12:00, clear of the 10:00–11:00 booking.
-    fireEvent.pointerDown(slotOn(2, 24))
-    fireEvent.pointerOver(slotOn(2, 26))
+    // 720 minutes from local midnight is 12:00, clear of the 10:00–11:00
+    // booking; dragging to 13:00 takes the widest duration offered at 12:00
+    // that still ends by the head's own 13:30 — 90 minutes.
+    fireEvent.pointerDown(slotOn(2, 720))
+    fireEvent.pointerOver(slotOn(2, 780))
     fireEvent.pointerUp(window)
 
     const summary = await screen.findByTestId('booking-time')

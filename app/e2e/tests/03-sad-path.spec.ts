@@ -22,17 +22,25 @@
  * that never comes.
  */
 
-import { expect, gotoNextWeek, listAllBookings, slotId, test } from './fixtures'
-import { calendarConfig } from '../../frontend/src/config'
+import {
+  expect,
+  gotoNextWeek,
+  listAllBookings,
+  slotId,
+  SPACE_A_STEP_MINUTES,
+  test,
+} from './fixtures'
 import { formatDuration as formatDurationForUi } from '../../frontend/src/booking/summary'
 import { dragAcrossSlots } from './pointer'
 
 /** Mirrors `MAX_BOOKING_DURATION` in `app/backend/app/rules_stub.py`. */
 const MAX_BOOKING_MINUTES = 120
 
-/** The shortest selection that breaks the rule, whatever a slot is worth. */
-const SLOTS_TO_EXCEED_MAX =
-  Math.floor(MAX_BOOKING_MINUTES / calendarConfig.sessionMinutes) + 1
+/** The shortest selection that breaks the rule, whatever a start is worth. */
+const SLOTS_TO_EXCEED_MAX = Math.floor(MAX_BOOKING_MINUTES / SPACE_A_STEP_MINUTES) + 1
+
+/** What that selection comes to — the copy the grid renders is in minutes now. */
+const SELECTED_MINUTES = SLOTS_TO_EXCEED_MAX * SPACE_A_STEP_MINUTES
 
 const FIRST_SLOT = 4
 
@@ -64,17 +72,18 @@ test('an over-long booking is denied with the engine\'s own message', async ({ p
   // The drag really did select the whole range — otherwise a denial could be
   // caused by something other than duration and the test would prove nothing.
   await expect(page.getByTestId('calendar-selection')).toContainText(
-    `Selected ${SLOTS_TO_EXCEED_MAX} slots`,
+    `Selected ${SELECTED_MINUTES} minutes`,
   )
 
-  const selectedMinutes = SLOTS_TO_EXCEED_MAX * calendarConfig.sessionMinutes
-  await expect(page.getByTestId('booking-duration')).toHaveText(formatDurationForUi(selectedMinutes))
+  await expect(page.getByTestId('booking-duration')).toHaveText(
+    formatDurationForUi(SELECTED_MINUTES),
+  )
 
   await page.getByTestId('booking-confirm').click()
 
   const expectedMessage =
     `Bookings can be at most ${formatDurationForMessage(MAX_BOOKING_MINUTES)} long,` +
-    ` and this one is ${formatDurationForMessage(selectedMinutes)}.` +
+    ` and this one is ${formatDurationForMessage(SELECTED_MINUTES)}.` +
     ' Please shorten it and try again.'
 
   const denial = page.getByTestId('booking-denied')

@@ -454,6 +454,12 @@ export interface SpaceRuleCreateInput {
  * Mirrors `DayScheduleRead` — one date's resolved schedule, as
  * `GET /spaces/{public_id}/schedule` serves it (task 6.9).
  *
+ * **Nothing renders this any more.** The calendar grid draws a Space's own
+ * shape projection instead (`DayProjectionRead` below,
+ * `GET /spaces/{public_id}/calendar` — `.claude/rules/calendar-shape.md`).
+ * This endpoint and its type stay in the client only because task 10.5, not
+ * this one, retires them from the backend.
+ *
  * `opens_at` / `closes_at` are the Space's own **local** wall-clock times
  * (`HH:MM:SS`, Python's `time` serialised by FastAPI) — this endpoint never
  * converts to UTC, since it has no instant to judge, only a calendar date to
@@ -486,6 +492,66 @@ export interface DayScheduleRead {
   closes_at: string | null
   coherence_issue: string | null
   anchor_minutes: number | null
+}
+
+// --- The shape projection (task 10.3), as the calendar grid reads it (task 10.4). --------------
+//
+// Mirrors `app/backend/app/identity/schemas.py`'s `OfferedStartRead` / `OperatingIntervalRead` /
+// `BlackoutIntervalRead` / `DayProjectionRead` field for field, in the package's own vocabulary —
+// minutes from local midnight throughout, never `DayScheduleRead`'s `HH:MM:SS` wall-clock strings.
+// The grid needs minutes to lay out starts, and converting from minutes to a wall clock and back
+// is two chances to disagree with the availability gate that enforces the identical table
+// (`.claude/rules/calendar-shape.md`).
+
+/**
+ * Mirrors `OfferedStartRead`. One grid-aligned local minute a booking may
+ * begin at, and every duration offered there — the authoritative table a
+ * booking is judged against, so the calendar can never draw a start the
+ * availability gate would then refuse, or grey out one it would allow.
+ */
+export interface OfferedStartRead {
+  start_minutes: number
+  durations_mins: number[]
+}
+
+/**
+ * Mirrors `OperatingIntervalRead`. One merged region of operating time in
+ * force on a date — a structural summary of what is nominally offered across
+ * the merged region, not itself grid- or blackout-aware; `offered_starts` is
+ * the exact, per-minute answer.
+ */
+export interface OperatingIntervalRead {
+  start_minutes: number
+  end_minutes: number
+  allowed_durations_mins: number[]
+}
+
+/**
+ * Mirrors `BlackoutIntervalRead`. One blackout window in force on a date,
+ * with its own `reason` — the one piece of admin-authored text this
+ * endpoint ever serves verbatim, and the required field that makes a hole in
+ * the day legible ("Break", "Cooldown") instead of alarming.
+ */
+export interface BlackoutIntervalRead {
+  start_minutes: number
+  end_minutes: number
+  reason: string
+}
+
+/**
+ * Mirrors `DayProjectionRead` — one local date's shape projection, as
+ * `GET /spaces/{public_id}/calendar` serves it (task 10.3).
+ *
+ * `bookable` is `bool(offered_starts)`, reported directly rather than left
+ * for the client to derive — this whole endpoint's "the server projects, the
+ * client never does" rule, carried into every field on this type.
+ */
+export interface DayProjectionRead {
+  date: string
+  operating_intervals: OperatingIntervalRead[]
+  blackout_intervals: BlackoutIntervalRead[]
+  offered_starts: OfferedStartRead[]
+  bookable: boolean
 }
 
 /**

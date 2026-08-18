@@ -1,66 +1,111 @@
 /**
- * Drag-selection range arithmetic.
+ * Selection arithmetic over the shape projection's own offered starts.
  *
- * A selection is an anchor (where the pointer went down) and a head (the slot
- * it is currently over), both within one day. Deriving the range from that pair
- * rather than accumulating slots as they are entered is what makes dragging
- * *backwards* work for free: the range is simply the span between the two, in
- * whichever order they happen to sit.
+ * A selection used to be a contiguous run of indices into a *uniform* slot
+ * grid, so a click-and-drag was index arithmetic (`rangeBetween`) and its
+ * length fell out of the two endpoints (`rangeLength`). That grid does not
+ * exist any more. A day's `offered_starts` (`calendar/shape.ts`) is a table
+ * of independent local minutes, each with its own set of offered durations —
+ * two operating blocks with different anchors (the music-room example: a
+ * 60-minute morning grid and a {60, 120}-minute evening one) put two starts
+ * closer together than either one's own shortest booking, so there is no
+ * single "index spacing" a range could walk. A selection is therefore
+ * resolved directly against `offered_starts`, never against a position in an
+ * array: **one offered start plus one duration offered at that start**, and
+ * nothing else is constructable.
  */
 
-/** A contiguous run of slot indices, inclusive at both ends. */
-export interface SlotRange {
-  /** Index of the first slot in the run. */
-  start: number
-  /** Index of the last slot in the run. */
-  end: number
-}
+import { durationsAt, smallestDurationAt, type DayProjection } from './shape'
 
-/** An in-progress or completed selection, pinned to one day. */
-export interface Selection extends SlotRange {
+/** One offered start, paired with one duration offered there — nothing else is buildable. */
+export interface Selection {
   /** `toDateKey` of the day the selection lives on. */
   dateKey: string
+  startMinutes: number
+  durationMinutes: number
 }
 
 /**
- * The clamped range between `anchor` and `head`.
+ * The selection a plain click on `startMinutes` proposes: the **smallest**
+ * duration offered there, or `null` if that start is not offered at all.
  *
- * Walks outward from the anchor toward the head and stops *before* the first
- * slot `isSelectable` rejects, so a drag across a booked or past slot selects
- * the contiguous run up to the obstruction instead of swallowing it. Returns
- * `null` when the anchor itself is not selectable.
- *
- * Direction-agnostic by construction: `head < anchor` walks down, `head >
- * anchor` walks up, and both produce a range in ascending order.
+ * The smallest duration is the honest "one unit" a single click can offer:
+ * one click proposes one booking of the shortest length this venue sells at
+ * that time, and a start offering several durations is widened by dragging,
+ * never by guessing which of them the click meant.
  */
-export function rangeBetween(
-  anchor: number,
-  head: number,
-  isSelectable: (index: number) => boolean,
-): SlotRange | null {
-  if (!isSelectable(anchor)) return null
+export function clickSelection(day: DayProjection, startMinutes: number): Selection | null {
+  const duration = smallestDurationAt(day, startMinutes)
+  if (duration === null) return null
+  return { dateKey: day.dateKey, startMinutes, durationMinutes: duration }
+}
 
-  const step = head >= anchor ? 1 : -1
-  let last = anchor
-  for (let i = anchor + step; step > 0 ? i <= head : i >= head; i += step) {
-    if (!isSelectable(i)) break
-    last = i
+/**
+ * The selection a drag between `anchorStartMinutes` and `headStartMinutes`
+ * proposes.
+ *
+ * Direction-agnostic: the earlier of the two starts is always where the
+ * resulting selection begins, so dragging backwards from the anchor works
+ * exactly as dragging forwards does, matching the old `rangeBetween`.
+ *
+ * The candidate duration is the **largest** one offered at the earlier start
+ * that both (a) ends no later than the drag head's own end — `headStartMinutes`
+ * plus the smallest duration offered *there* — and (b) is free of obstruction
+ * across its whole span, per the caller's `isFree` predicate (bookings, past,
+ * horizon).
+ *
+ * When nothing at the earlier start clears both checks it falls back to the
+ * **anchor's** own click unit, not the earlier start's — and only while that
+ * unit is itself free. The two differ exactly when a drag runs *backwards*
+ * onto an obstructed start: falling back to the earlier start there would
+ * propose a selection over minutes `isFree` has just refused (already booked,
+ * already past), which is the one thing a drag must never construct. Keeping
+ * the anchor instead reproduces what the old slot-index `rangeBetween` did by
+ * walking outward from the anchor and stopping before the obstruction.
+ */
+export function dragSelection(
+  day: DayProjection,
+  anchorStartMinutes: number,
+  headStartMinutes: number,
+  isFree: (startMinutes: number, endMinutes: number) => boolean,
+): Selection | null {
+  const earlier = Math.min(anchorStartMinutes, headStartMinutes)
+  const later = Math.max(anchorStartMinutes, headStartMinutes)
+
+  /** The anchor's own click unit, kept only while it is still unobstructed. */
+  const anchorFallback = (): Selection | null => {
+    const proposed = clickSelection(day, anchorStartMinutes)
+    if (proposed === null) return null
+    const end = proposed.startMinutes + proposed.durationMinutes
+    return isFree(proposed.startMinutes, end) ? proposed : null
   }
 
-  return { start: Math.min(anchor, last), end: Math.max(anchor, last) }
+  const headDuration = smallestDurationAt(day, later)
+  if (headDuration === null) return anchorFallback()
+  const headEnd = later + headDuration
+
+  const durations = durationsAt(day, earlier)
+  let best: number | null = null
+  for (const duration of durations) {
+    const end = earlier + duration
+    if (end > headEnd) continue
+    if (!isFree(earlier, end)) continue
+    if (best === null || duration > best) best = duration
+  }
+
+  if (best === null) return anchorFallback()
+  return { dateKey: day.dateKey, startMinutes: earlier, durationMinutes: best }
 }
 
-/** Whether `index` on `dateKey` falls inside `selection`. */
-export function isInSelection(
+/** Whether `startMinutes` on `dateKey` falls inside `selection`'s span. */
+export function isStartInSelection(
   selection: Selection | null,
   dateKey: string,
-  index: number,
+  startMinutes: number,
 ): boolean {
   if (selection === null || selection.dateKey !== dateKey) return false
-  return index >= selection.start && index <= selection.end
-}
-
-/** How many slots a range covers. */
-export function rangeLength(range: SlotRange): number {
-  return range.end - range.start + 1
+  return (
+    startMinutes >= selection.startMinutes &&
+    startMinutes < selection.startMinutes + selection.durationMinutes
+  )
 }

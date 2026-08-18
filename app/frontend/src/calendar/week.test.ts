@@ -23,8 +23,8 @@ import {
   intervalsOverlap,
   isSlotBeyondHorizon,
   isSlotInPast,
+  localMinutesToInstant,
   parseWeekStartParam,
-  slotInterval,
   slotTestId,
   startOfDay,
   startOfWeek,
@@ -200,87 +200,60 @@ describe('slot horizon predicates', () => {
   })
 })
 
-describe('slotInterval', () => {
-  it('spans exactly one slot length', () => {
-    // Slot 0 is always midnight now (the grid renders the full day); index 12
-    // at 30-minute slots is 06:00.
-    const config = {
-      sessionMinutes: 30,
-      openMinutes: null,
-      closeMinutes: null,
-      timeZone: SYSTEM_TZ,
-      anchorMinutes: 0,
-    }
-    const { start, end } = slotInterval(THIS_WEEK, 12, config)
-    expect(start.getHours()).toBe(6)
-    expect((end.getTime() - start.getTime()) / 60_000).toBe(30)
+describe('localMinutesToInstant', () => {
+  it('places a minute count on the given calendar date at the Space\'s wall-clock time', () => {
+    const instant = localMinutesToInstant(new Date(2026, 6, 20, 17, 45), 6 * 60, SYSTEM_TZ)
+    expect(instant.getFullYear()).toBe(2026)
+    expect(instant.getMonth()).toBe(6)
+    expect(instant.getDate()).toBe(20)
+    expect(instant.getHours()).toBe(6)
+    expect(instant.getMinutes()).toBe(0)
   })
 
-  it('follows the configured granularity', () => {
-    // Index 39 at 10-minute slots, from midnight, is 06:30.
-    const { start, end } = slotInterval(THIS_WEEK, 39, {
-      sessionMinutes: 10,
-      openMinutes: null,
-      closeMinutes: null,
-      timeZone: SYSTEM_TZ,
-      anchorMinutes: 0,
-    })
-    expect(start.getHours()).toBe(6)
-    expect(start.getMinutes()).toBe(30)
-    expect((end.getTime() - start.getTime()) / 60_000).toBe(10)
+  it('discards the time component of the day it is given', () => {
+    const morning = localMinutesToInstant(new Date(2026, 6, 20, 1, 0), 3 * 60, SYSTEM_TZ)
+    const evening = localMinutesToInstant(new Date(2026, 6, 20, 23, 59), 3 * 60, SYSTEM_TZ)
+    expect(morning.getTime()).toBe(evening.getTime())
   })
 
-  // One click is one session: the `session_length` rule requires both bounds
-  // on the grid, so there is no floor left to widen a click past.
-  describe('one click is one session', () => {
-    const config = (sessionMinutes: number, anchorMinutes = 0) => ({
-      sessionMinutes,
-      openMinutes: null,
-      closeMinutes: null,
-      timeZone: SYSTEM_TZ,
-      anchorMinutes,
-    })
+  it('resolves through the Space\'s own timezone, not the viewer\'s', () => {
+    // The DEFERRED.md item 19 repro: a Space at 13:00 in `Europe/Berlin`
+    // (UTC+2 in July) must resolve to 11:00Z regardless of what zone this
+    // suite happens to run in — never a fixed offset computed once.
+    const instant = localMinutesToInstant(new Date(2026, 7, 3), 13 * 60, 'Europe/Berlin')
+    expect(instant.toISOString()).toBe('2026-08-03T11:00:00.000Z')
+  })
 
-    it('spans exactly one session on a 30-minute grid', () => {
-      const { start, end } = slotInterval(THIS_WEEK, 12, config(30))
-      expect((end.getTime() - start.getTime()) / 60_000).toBe(30)
-    })
+  it('resolves a venue behind UTC correctly too — not just ahead', () => {
+    const instant = localMinutesToInstant(new Date(2026, 7, 3), 8 * 60, 'Pacific/Honolulu')
+    expect(instant.toISOString()).toBe('2026-08-03T18:00:00.000Z')
+  })
 
-    it('spans exactly one session on a 60-minute grid', () => {
-      const { start, end } = slotInterval(THIS_WEEK, 6, config(60))
-      expect((end.getTime() - start.getTime()) / 60_000).toBe(60)
-    })
+  it('resolves the identical wall-clock minute to different instants across a DST boundary', () => {
+    // Mirrors `rules_stub.py`'s own docstring example: 07:00 Europe/Berlin is
+    // 05:00Z in July (CEST, UTC+2) and 06:00Z in January (CET, UTC+1) — the
+    // same minute count, only the date changes.
+    const july = localMinutesToInstant(new Date(2026, 6, 20), 7 * 60, 'Europe/Berlin')
+    const january = localMinutesToInstant(new Date(2026, 0, 20), 7 * 60, 'Europe/Berlin')
+    expect(july.toISOString()).toBe('2026-07-20T05:00:00.000Z')
+    expect(january.toISOString()).toBe('2026-01-20T06:00:00.000Z')
+  })
 
-    it('starts on the grid line the anchor puts it on, not on the hour', () => {
-      // A venue opening at 09:15 with hour-long sessions: the grid runs
-      // 00:15, 01:15, ... so session 9 is 09:15 — the first session of the
-      // day starting exactly when the venue opens.
-      const { start, end } = slotInterval(THIS_WEEK, 9, config(60, 9 * 60 + 15))
-      expect(start.getHours()).toBe(9)
-      expect(start.getMinutes()).toBe(15)
-      expect((end.getTime() - start.getTime()) / 60_000).toBe(60)
-    })
-
-    it('is unshifted when the anchor already lands on the grid', () => {
-      const { start } = slotInterval(THIS_WEEK, 12, config(30, 9 * 60))
-      expect(start.getHours()).toBe(6)
-      expect(start.getMinutes()).toBe(0)
-    })
+  it('resolves a minute count past local midnight onto the following calendar date', () => {
+    // 1500 minutes is 25:00 — a venue open past midnight (the shape schema
+    // permits this). The instant must land on the *next* date's 01:00, not
+    // wrap back onto the given date's own clock.
+    const past1440 = localMinutesToInstant(new Date(2026, 6, 20), 25 * 60, SYSTEM_TZ)
+    const nextDay0100 = localMinutesToInstant(new Date(2026, 6, 21), 1 * 60, SYSTEM_TZ)
+    expect(past1440.getTime()).toBe(nextDay0100.getTime())
   })
 })
 
 describe('dayBounds', () => {
   it('spans midnight to midnight on the Space\'s own clock', () => {
-    const config = {
-      sessionMinutes: 30,
-      openMinutes: null,
-      closeMinutes: null,
-      timeZone: SYSTEM_TZ,
-      anchorMinutes: 0,
-    }
-    const { start, end } = dayBounds(THIS_WEEK, config)
-    expect(start.getTime()).toBe(slotInterval(THIS_WEEK, 0, config).start.getTime())
-    expect(end.getTime()).toBe(slotInterval(addDays(THIS_WEEK, 1), 0, config).start.getTime())
+    const { start, end } = dayBounds(THIS_WEEK, SYSTEM_TZ)
+    expect(start.getTime()).toBe(localMinutesToInstant(THIS_WEEK, 0, SYSTEM_TZ).getTime())
+    expect(end.getTime()).toBe(localMinutesToInstant(addDays(THIS_WEEK, 1), 0, SYSTEM_TZ).getTime())
   })
 
   it('is 23 real hours on the day the Space\'s zone springs forward', () => {
@@ -289,14 +262,7 @@ describe('dayBounds', () => {
     // real span between its midnight and the next is an hour short. A
     // fixed-offset day (`+ 24h`) would get this wrong; going through the
     // zone for both bounds does not.
-    const config = {
-      sessionMinutes: 30,
-      openMinutes: null,
-      closeMinutes: null,
-      timeZone: 'Europe/Berlin',
-      anchorMinutes: 0,
-    }
-    const { start, end } = dayBounds(new Date(2026, 2, 29), config)
+    const { start, end } = dayBounds(new Date(2026, 2, 29), 'Europe/Berlin')
     expect((end.getTime() - start.getTime()) / (60 * 60 * 1000)).toBe(23)
   })
 })
@@ -398,8 +364,9 @@ describe('formatClockTime', () => {
 })
 
 describe('slot test ids', () => {
-  it('are derivable from a date and a slot index', () => {
-    expect(slotTestId(new Date(2026, 6, 20, 18, 45), 12)).toBe('slot-2026-07-20-12')
+  it('are derivable from a date and minutes from local midnight', () => {
+    // 18:00 is 1080 minutes from midnight.
+    expect(slotTestId(new Date(2026, 6, 20, 18, 45), 18 * 60)).toBe('slot-2026-07-20-1080')
   })
 
   it('zero-pad the month and day so ids sort and match predictably', () => {

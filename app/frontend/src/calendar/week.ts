@@ -5,8 +5,10 @@
  * click are plain functions over `Date`s, testable without a DOM. The component
  * asks these questions; it does not answer them itself.
  *
- * Everything about slot *layout* still comes from `config.ts` — nothing here
- * knows how many slots a day has or when the day opens.
+ * **What the grid draws is the server's projection** (`calendar/shape.ts`) —
+ * nothing here decides what is bookable. The functions below resolve calendar
+ * dates to instants through a zone, compute the booking horizon, and tell
+ * whether a slot is in the past. They do not know when the venue opens.
  *
  * ## Keep in sync with the backend
  *
@@ -31,8 +33,8 @@
  *
  * A carrier stops being zone-agnostic the moment it needs to become a real
  * instant — a slot's start, a day's opening and closing bound — and that
- * conversion happens through the Space's own `timeZone`, via `config.ts`'s
- * `slotStart` and this module's `dayBounds`, both of which go through
+ * conversion happens through the Space's own `timeZone`, via this module's
+ * `localMinutesToInstant` and `dayBounds`, both of which go through
  * `timezone.ts`'s `zonedTimeToInstant`. The other place a zone enters is the
  * reverse direction: turning `now` — a real instant — into "today"'s carrier,
  * which `canGoToPreviousWeek`, `canGoToNextWeek` and `parseWeekStartParam` do
@@ -40,8 +42,8 @@
  * parameter, so that "this week" means the Space's today, not the viewer's.
  */
 
-import { calendarConfig, dayStartInstant, slotStart, type CalendarConfig } from '../config'
-import { zonedCalendarDate, zonedParts } from '../timezone'
+import { MINUTES_PER_DAY, MINUTES_PER_HOUR } from '../config'
+import { zonedCalendarDate, zonedParts, zonedTimeToInstant } from '../timezone'
 
 /** Days in a rendered week. Not configurable — a week view shows a week. */
 export const DAYS_PER_WEEK = 7
@@ -131,8 +133,21 @@ export function canGoToNextWeek(weekStart: Date, now: Date, timeZone: string): b
   )
 }
 
-/** Why a slot cannot be selected, or `null` when it can. */
-export type SlotBlockedReason = 'past' | 'beyond-horizon' | 'booked' | 'unavailable' | 'out-of-hours'
+/**
+ * Why a start cannot be selected, or `null` when it can.
+ *
+ * **Deliberately has no `'blackout'` or `'out-of-hours'` member.** Both used
+ * to be reasons a *button* carried, disabled but still rendered on the grid.
+ * Under the shape projection neither is a button state any more: closed time
+ * and blackout time are painted *regions* on the minute canvas
+ * (`CalendarGrid.tsx`) with no offered-start button inside them at all — the
+ * grid is drawn from `offered_starts`, and a start the projection did not
+ * offer simply has no button to disable. What remains here are the four
+ * reasons an *offered* start can still be refused: it has already passed, it
+ * sits beyond the booking horizon, it collides with an existing booking, or
+ * the week's data has not loaded (or failed to).
+ */
+export type SlotBlockedReason = 'past' | 'beyond-horizon' | 'booked' | 'unavailable'
 
 /**
  * Whether a slot has already started.
@@ -158,15 +173,19 @@ export function toDateKey(day: Date): string {
 }
 
 /**
- * The `data-testid` of one slot cell.
+ * The `data-testid` of one offered-start button.
  *
- * Deterministic and derivable from a date plus a slot index, so task 1.9's
- * Playwright suite can address "the 09:00 slot next Tuesday" by computing the
- * id rather than by scraping the DOM for a label. Exported so the E2E suite and
- * the component cannot drift apart.
+ * `startMinutes` is **minutes from that date's local midnight** — the same
+ * unit the shape projection's `offered_starts` table uses throughout
+ * (`calendar/shape.ts`), not a slot index into a uniform grid. `slot-
+ * 2026-08-18-1080` is the button at 18:00, whatever duration or durations are
+ * offered there. Deterministic and derivable from a date plus a start, so
+ * task 1.9's Playwright suite can address "the 18:00 slot next Tuesday" by
+ * computing the id rather than by scraping the DOM for a label. Exported so
+ * the E2E suite and the component cannot drift apart.
  */
-export function slotTestId(day: Date, index: number): string {
-  return `slot-${toDateKey(day)}-${index}`
+export function slotTestId(day: Date, startMinutes: number): string {
+  return `slot-${toDateKey(day)}-${startMinutes}`
 }
 
 /** The `data-testid` of a rendered booking block. */
@@ -230,10 +249,10 @@ export function parseWeekStartParam(value: string | null, now: Date, timeZone: s
  * A wall-clock time as `HH:MM`, in an explicit `timeZone`.
  *
  * Forced to 24-hour rather than left to the locale, so that every time in the
- * UI reads the same way. `formatSlotLabel` renders the time axis as `HH:MM`
- * unconditionally; a locale-dependent formatter alongside it produced a grid
- * whose axis said `12:00` while the booking sitting on that row said
- * `12:00 PM`, which looks like two different times at a glance.
+ * UI reads the same way. `config.ts`'s `formatMinutesLabel` renders the hour
+ * axis as `HH:MM` unconditionally; a locale-dependent formatter alongside it
+ * produced a grid whose axis said `12:00` while the booking sitting on that
+ * row said `12:00 PM`, which looks like two different times at a glance.
  *
  * Every caller in the grid itself passes the Space's own `timeZone`, per the
  * module docblock — a booking block reads the same clock the slot it sits on
@@ -249,41 +268,50 @@ export function formatClockTime(value: Date, timeZone: string): string {
 }
 
 /**
- * The half-open interval `[start, end)` a click starting at session `index`
- * would submit.
+ * The real instant at which local wall-clock `minutes` (minutes from `day`'s
+ * own local midnight) occurs, in `timeZone`.
  *
- * Exactly one session, always. The server's `session_length` rule requires a
- * booking to start *and* end on the date's own grid, so one session is both
- * the smallest bookable thing and the only length a single click can honestly
- * offer — there is no separate floor left to widen it past, and no rounding to
- * do. `isSlotOutOfHours` (`config.ts`) measures the same one session for the
- * same reason, so the two cannot disagree about what one click means.
+ * The one conversion the grid performs — every other computation in this
+ * module and in `calendar/shape.ts` stays in plain local minutes, and this is
+ * where a minute count finally becomes an instant a booking request or a
+ * bookings-window fetch can use. `minutes` may legitimately exceed 1440 (an
+ * `offered_starts` entry past local midnight, though `CalendarGrid` does not
+ * draw one — see its own module docblock), and `Math.floor`/`%` below resolve
+ * that correctly onto the following calendar date rather than wrapping.
+ * Resolved through `zonedTimeToInstant`, which asks `Intl.DateTimeFormat` for
+ * the zone's actual offset at that specific date, so the same wall-clock
+ * minute resolves to a different UTC instant in July than in January.
  */
-export function slotInterval(
-  day: Date,
-  index: number,
-  config: CalendarConfig = calendarConfig,
-): { start: Date; end: Date } {
-  const start = slotStart(day, index, config)
-  return { start, end: new Date(start.getTime() + config.sessionMinutes * 60 * 1000) }
+export function localMinutesToInstant(day: Date, minutes: number, timeZone: string): Date {
+  const wholeDaysAhead = Math.floor(minutes / MINUTES_PER_DAY)
+  const minutesOfDay = ((minutes % MINUTES_PER_DAY) + MINUTES_PER_DAY) % MINUTES_PER_DAY
+  const onDate = wholeDaysAhead === 0 ? day : addDays(day, wholeDaysAhead)
+  return zonedTimeToInstant(
+    onDate.getFullYear(),
+    onDate.getMonth(),
+    onDate.getDate(),
+    Math.floor(minutesOfDay / MINUTES_PER_HOUR),
+    minutesOfDay % MINUTES_PER_HOUR,
+    timeZone,
+  )
 }
 
 /**
  * The real instants at which the calendar date `day` begins and ends, on the
- * Space's own clock — midnight to midnight in `config.timeZone`.
+ * Space's own clock — midnight to midnight in `timeZone`.
  *
  * This is what a day *column* actually spans as an interval, and it is what
  * booking-grouping and pixel-positioning in `CalendarGrid` compare against —
  * both need the Space's midnight, not the environment's. Built from
- * `config.ts`'s `dayStartInstant`, which resolves midnight through the same
- * `zonedTimeToInstant` path `slotStart` uses, so a day's bounds and its
- * sessions can never disagree about what midnight resolved to. It is
- * deliberately *not* `slotStart(day, 0, config)` any more: session 0 is the
- * grid's first line, which is midnight only when the date's anchor already
- * falls on a whole number of sessions from it.
+ * `localMinutesToInstant` at minute 0 of `day` and of the following date, so a
+ * day's bounds can never disagree with any other local-minutes computation
+ * about what midnight resolved to.
  */
-export function dayBounds(day: Date, config: CalendarConfig = calendarConfig): { start: Date; end: Date } {
-  return { start: dayStartInstant(day, config), end: dayStartInstant(addDays(day, 1), config) }
+export function dayBounds(day: Date, timeZone: string): { start: Date; end: Date } {
+  return {
+    start: localMinutesToInstant(day, 0, timeZone),
+    end: localMinutesToInstant(addDays(day, 1), 0, timeZone),
+  }
 }
 
 /**

@@ -32,7 +32,6 @@
 
 import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test'
 
-import { slotStartMinutes, slotsPerDay } from '../../frontend/src/config'
 import { dateFromKey, slotTestId } from '../../frontend/src/calendar/week'
 import { zonedParts, zonedTimeToInstant } from '../../frontend/src/timezone'
 
@@ -40,8 +39,8 @@ export const BACKEND_URL = 'http://localhost:8000'
 
 /**
  * `src/auth/sandboxToken.ts`'s `SANDBOX_SUB_STORAGE_KEY`, mirrored as a
- * literal rather than imported. Unlike `slotStartMinutes` and `slotTestId`
- * above, that module sits behind the `auth` barrel, which pulls in the api
+ * literal rather than imported. Unlike `slotTestId` above, that module sits
+ * behind the `auth` barrel, which pulls in the api
  * client and its `import.meta.env` reference — meaningful under Vite, not
  * under the plain esbuild transform Playwright loads this file with. The two
  * copies must change together if the storage key ever does.
@@ -75,6 +74,25 @@ const SANDBOX_SPACE_A_NAME = 'Sandbox Space A (Berlin)'
  * a slot's wall-clock time through.
  */
 const SANDBOX_SPACE_A_TIMEZONE = 'Europe/Berlin'
+
+/**
+ * The grid step Space A's own calendar shape produces, mirrored from
+ * `app/backend/app/sandbox_seed.py`'s `SPACE_A_SHAPE` for the same reason as
+ * the two constants above: that module is Python and this is TypeScript.
+ *
+ * The shape is open 00:00-24:00 every day at
+ * `allowed_durations_mins: [30, 60, ..., 240]`, and the projection chunks a
+ * block forward by its own smallest declared duration
+ * (`.claude/rules/calendar-shape.md`) — so starts are 30 minutes apart and a
+ * drag across *n* of them selects `n * 30` minutes, up to the 240 the shape
+ * offers. Nothing in the frontend can be imported for this any more, and that
+ * is the point: what a date offers is the *server's* answer now, not a
+ * client-side config constant.
+ */
+export const SPACE_A_STEP_MINUTES = 30
+
+/** Offered starts per day under `SPACE_A_STEP_MINUTES` — 1440 / 30. */
+export const SLOTS_PER_DAY = 1440 / SPACE_A_STEP_MINUTES
 
 export interface Booking {
   id: number
@@ -337,6 +355,11 @@ export async function signInAsSandbox(page: Page, sub: string = SANDBOX_OWNER_SU
  * what today is — and that disagreement would show up as a test that passes in
  * CI and fails in Tel Aviv. Asking the page which days it drew removes the
  * question.
+ *
+ * The selector is a **prefix** match, so nothing else in the grid may carry a
+ * testid beginning `calendar-day-`. The day columns are `calendar-column-`
+ * for exactly that reason — an id extending this prefix reads as an eighth
+ * header here, and the count below is what catches it.
  */
 export async function renderedDateKeys(page: Page): Promise<string[]> {
   const headers = page.locator('[data-testid^="calendar-day-"]')
@@ -347,9 +370,19 @@ export async function renderedDateKeys(page: Page): Promise<string[]> {
   return ids.map((id) => id.replace('calendar-day-', ''))
 }
 
-/** The `data-testid` of slot `index` on the day identified by `key`. */
+/**
+ * The `data-testid` of the `index`-th offered start on the day identified by
+ * `key`.
+ *
+ * `slotTestId` addresses a start by **minutes from local midnight**, not by an
+ * index into a uniform grid — a day's offered starts are a table now, and two
+ * operating blocks can put two of them closer together than either one's
+ * shortest booking. This suite keeps counting in indices because every test
+ * here books against Space A, whose shape is one all-day block on a single
+ * 30-minute grid, and `index * SPACE_A_STEP_MINUTES` is exactly that grid.
+ */
 export function slotId(key: string, index: number): string {
-  return slotTestId(dateFromKey(key), index)
+  return slotTestId(dateFromKey(key), index * SPACE_A_STEP_MINUTES)
 }
 
 /**
@@ -366,7 +399,7 @@ export function slotId(key: string, index: number): string {
  */
 export function slotInstant(key: string, index: number): Date {
   const [year, month, day] = key.split('-').map(Number)
-  const minutes = slotStartMinutes(index)
+  const minutes = index * SPACE_A_STEP_MINUTES
   return zonedTimeToInstant(
     year,
     month - 1,
@@ -423,6 +456,40 @@ export function berlinWeekdayMondayFirst(instant: Date): number {
 }
 
 /**
+ * Waits until the grid is drawn from the server's own answer rather than from
+ * the closed fallback it starts on.
+ *
+ * The grid draws one week from `GET /spaces/{public_id}/calendar` **and from
+ * nothing else** (`.claude/rules/calendar-shape.md`), so until that answer
+ * arrives — and again for as long as a week change or a zone change leaves the
+ * one in hand stale — every date renders closed, offers no start at all, and
+ * lays its column out at the fallback pixel scale. `ResourceCalendarPage`
+ * bootstraps on the viewer's zone until the Space's own arrives with its
+ * header, and that swap re-keys the projection request, so a freshly opened
+ * calendar genuinely settles twice: once against the placeholder, once against
+ * `Europe/Berlin`.
+ *
+ * Waiting on `calendar-loading` alone used to be enough and is not any more,
+ * which is the whole reason this exists. That element reports the *bookings*
+ * fetch and is absent in the gap between the two settles, so a helper waiting
+ * only for it could return while the grid was still closed — and every pixel a
+ * spec measured then moved under it when the real projection landed, which a
+ * real mouse spec reads as a click on the neighbouring start. Three signals
+ * together pin the final state: the timezone note naming Space A's own zone
+ * (so the projection in hand is the one keyed to it and not the placeholder),
+ * a day column reporting its full table of offered starts (so a projection is
+ * rendered at all), and no bookings fetch outstanding.
+ */
+export async function waitForCalendarSettled(page: Page): Promise<void> {
+  await expect(page.getByTestId('calendar-timezone-note')).toContainText(SANDBOX_SPACE_A_TIMEZONE)
+  await expect(page.locator('[data-testid^="calendar-column-"]').first()).toHaveAttribute(
+    'data-offered-starts',
+    String(SLOTS_PER_DAY),
+  )
+  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+}
+
+/**
  * Signs in as the seeded **member** and navigates to Space A's calendar for
  * the same Resource every other fixture in this file discovers — a member
  * clicking through from `/s/{public_id}` lands here, so this is the UI-driven
@@ -441,6 +508,7 @@ export async function gotoResourceCalendar(
   await signInAsSandbox(page, SANDBOX_MEMBER_SUB)
   await page.goto(`/s/${publicId}/resources/${resourceId}`)
   await expect(page.getByTestId('calendar-grid')).toBeVisible()
+  await waitForCalendarSettled(page)
 
   return { publicId, resourceId }
 }
@@ -461,13 +529,13 @@ export async function gotoNextWeek(page: Page): Promise<string[]> {
   await expect(next).toBeEnabled()
   await next.click()
 
-  // The grid re-fetches on navigation and disables every slot until the new
-  // week's bookings are known, so waiting for the loader to clear is what makes
-  // the first click land on an enabled button.
-  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  // The grid re-fetches both its projection and the week's bookings on
+  // navigation, and draws a closed week offering nothing until the first of
+  // those lands — so waiting for the whole grid to settle is what makes the
+  // first click land on an enabled button that is still where it was measured.
+  await waitForCalendarSettled(page)
 
   return renderedDateKeys(page)
 }
 
-/** Slot count per day, derived from the frontend config rather than hardcoded. */
-export { slotsPerDay }
+
