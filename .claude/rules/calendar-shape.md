@@ -268,9 +268,9 @@ from local midnight throughout, never `DayScheduleRead`'s `HH:MM:SS` wall-clock 
 converting from minutes to a wall clock and back is two chances to disagree with the gate that
 enforces the identical table.
 
-This endpoint replaces `GET /spaces/{public_id}/schedule` in role but does not remove it; both
-serve the calendar grid until task 10.4 moves the frontend across and 10.5 retires the schedule
-endpoint along with the two rule types it resolved.
+This endpoint is what the calendar grid reads, and the only thing it reads. `GET
+/spaces/{public_id}/schedule` still exists and nothing renders it any more; it is retired along
+with the two rule types it resolves (10.5, below).
 
 ## What the grid draws, and what it deliberately does not know
 
