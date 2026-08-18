@@ -8,6 +8,12 @@
  * panel changed something is what tells the grid to refetch, rather than a
  * second mechanism for the second panel.
  *
+ * Fetches `GET /spaces/{public_id}/calendar` (task 10.3) for the visible week
+ * and hands `CalendarGrid` the resulting `WeekProjection` — the shape's own
+ * projection, never a re-derivation of what a date offers
+ * (`.claude/rules/calendar-shape.md`). `GET .../schedule` is not called here
+ * any more.
+ *
  * Reached only through `ResourceCalendarRoute` below, which is what `App.tsx`
  * mounts: this component itself does no auth gating and assumes a member is
  * already confirmed, since `ResourceCalendarRoute` renders it as
@@ -29,7 +35,7 @@ import { Link, useParams, useSearchParams } from 'react-router-dom'
 
 import {
   getSpace,
-  getSpaceSchedule,
+  getSpaceCalendar,
   listResources,
   type Booking,
   type Resource,
@@ -37,14 +43,16 @@ import {
 } from '../api'
 import { BookingPanel, CancelPanel } from '../booking'
 import {
+  addDays,
+  buildWeekProjection,
   CalendarGrid,
   DAYS_PER_WEEK,
   parseWeekStartParam,
   startOfWeek,
   toDateKey,
   type SelectedInterval,
+  type WeekProjection,
 } from '../calendar'
-import { buildWeekSchedule, type WeekSchedule } from '../config'
 import { SYSTEM_TIME_ZONE, zonedCalendarDate } from '../timezone'
 import { NotFoundCard, SpaceAccessGate } from './SpaceAccessGate'
 
@@ -90,8 +98,8 @@ export function ResourceCalendarRoute() {
 
 type HeaderLoad = { space: Space; resource: Resource | null; resourceCount: number } | null
 
-/** Copy for a `/schedule` fetch that failed in a way the user cannot act on. */
-const SCHEDULE_LOAD_ERROR_FALLBACK = "We couldn't load this Space's schedule."
+/** Copy for a `/calendar` fetch that failed in a way the user cannot act on. */
+const CALENDAR_LOAD_ERROR_FALLBACK = "We couldn't load this Space's calendar."
 
 export function ResourceCalendarPage() {
   const { publicId, resourceId: resourceIdParam } = useParams<{
@@ -230,9 +238,9 @@ export function ResourceCalendarPage() {
     header !== null && (header.space.my_role === 'admin' || header.space.my_role === 'owner')
 
   /**
-   * `GET /spaces/{public_id}/schedule` for the visible week — the
-   * server-resolved per-date slot size and operating window `CalendarGrid`
-   * renders instead of re-deriving rule semantics itself (task 6.9). Keyed on
+   * `GET /spaces/{public_id}/calendar` for the visible week — the shape's own
+   * projection `CalendarGrid` renders instead of re-deriving what a date
+   * offers itself (task 10.3, `.claude/rules/calendar-shape.md`). Keyed on
    * `weekStart` and `timeZone` by value, the same idiom `CalendarGrid`'s own
    * `requestKey` uses for its booking fetch: a re-render with an equal-but-
    * new `weekStart` object (see the stabilisation comment above) must not
@@ -240,10 +248,10 @@ export function ResourceCalendarPage() {
    * `timeZone` moving off its bootstrapping placeholder once the header
    * resolves — must.
    */
-  const scheduleKey = `${weekStart.getTime()}:${timeZone}`
+  const calendarKey = `${weekStart.getTime()}:${timeZone}`
 
-  const [scheduleState, setScheduleState] = useState<
-    | { status: 'ok'; key: string; schedule: WeekSchedule }
+  const [calendarState, setCalendarState] = useState<
+    | { status: 'ok'; key: string; week: WeekProjection }
     | { status: 'error'; key: string; message: string }
     | null
   >(null)
@@ -252,42 +260,45 @@ export function ResourceCalendarPage() {
     if (!validParams || !publicId) return
     let cancelled = false
 
-    void getSpaceSchedule(publicId, weekStart, DAYS_PER_WEEK).then((result) => {
-      if (cancelled) return
-      if (result.outcome === 'ok') {
-        setScheduleState({
-          status: 'ok',
-          key: scheduleKey,
-          schedule: buildWeekSchedule(result.data, timeZone),
-        })
-        return
-      }
-      // Every failure outcome here is a genuine "we don't know this Space's
-      // schedule" — unlike a per-day `coherence_issue` (advisory, rendered
-      // inside `CalendarGrid` itself), this is the one case task 6.9 keeps a
-      // whole-grid notice for: with no resolved schedule at all there is
-      // nothing honest to render as a grid.
-      const message =
-        result.outcome === 'invalid_request' ? SCHEDULE_LOAD_ERROR_FALLBACK : result.message
-      setScheduleState({ status: 'error', key: scheduleKey, message })
-    })
+    // `to` is inclusive on the endpoint, so the last day of the week is
+    // `weekStart + 6`, not `+ 7`.
+    void getSpaceCalendar(publicId, weekStart, addDays(weekStart, DAYS_PER_WEEK - 1)).then(
+      (result) => {
+        if (cancelled) return
+        if (result.outcome === 'ok') {
+          setCalendarState({
+            status: 'ok',
+            key: calendarKey,
+            week: buildWeekProjection(result.data, timeZone),
+          })
+          return
+        }
+        // Every failure outcome here is a genuine "we don't know this Space's
+        // shape" — with no projection at all there is nothing honest to
+        // render as a grid, so this is the one case that gets a whole-grid
+        // notice rather than a per-day one.
+        const message =
+          result.outcome === 'invalid_request' ? CALENDAR_LOAD_ERROR_FALLBACK : result.message
+        setCalendarState({ status: 'error', key: calendarKey, message })
+      },
+    )
 
     return () => {
       cancelled = true
     }
     // `weekStart` and `timeZone` are read inside this effect only to compute
-    // the request, and `scheduleKey` already encodes both by value — see its
+    // the request, and `calendarKey` already encodes both by value — see its
     // own docblock. Listing the values themselves here instead would risk
     // re-firing on a fresh-but-equal `Date`, the same hazard `CalendarGrid`'s
     // own booking fetch already guards against one layer down.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publicId, scheduleKey, validParams])
+  }, [publicId, calendarKey, validParams])
 
   // Stale once the visible week or zone has moved on from the request this
   // state answers — derived during render, not reset by an effect, so a page
-  // navigating to a new week does not flash last week's resolved schedule
+  // navigating to a new week does not flash last week's resolved projection
   // against this week's grid before the new fetch settles.
-  const schedule = scheduleState !== null && scheduleState.key === scheduleKey ? scheduleState : null
+  const calendar = calendarState !== null && calendarState.key === calendarKey ? calendarState : null
 
   // The route pattern makes this unreachable in practice; TypeScript does not
   // know the params are well-formed, and a crash here is not worth asserting
@@ -351,13 +362,13 @@ export function ResourceCalendarPage() {
 
       <div className="mt-6 flex flex-col gap-6 lg:flex-row lg:items-start">
         <div className="min-w-0 flex-1">
-          {schedule?.status === 'error' ? (
+          {calendar?.status === 'error' ? (
             <p
               role="alert"
               data-testid="calendar-config-notice"
               className="rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800"
             >
-              {schedule.message} Try again shortly, or contact this Space&rsquo;s admin if it keeps
+              {calendar.message} Try again shortly, or contact this Space&rsquo;s admin if it keeps
               happening.
             </p>
           ) : (
@@ -366,7 +377,7 @@ export function ResourceCalendarPage() {
               resourceId={resourceId}
               now={now}
               weekStart={weekStart}
-              schedule={schedule?.status === 'ok' ? schedule.schedule : undefined}
+              week={calendar?.status === 'ok' ? calendar.week : undefined}
               onWeekChange={handleWeekChange}
               onSelectionChange={handleSelectionChange}
               onBookingSelect={handleBookingSelect}

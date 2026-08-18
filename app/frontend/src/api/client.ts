@@ -17,6 +17,7 @@ import type {
   CancelResourceBookingResult,
   CreateResourceBookingResult,
   CurrentUser,
+  DayProjectionRead,
   DayScheduleRead,
   GetCurrentUserResult,
   Invitation,
@@ -894,11 +895,12 @@ function formatDateParam(date: Date): string {
  * against the Space's own `space_rules` rows (task 6.9). Member+, the same
  * gate as `listSpaceRules`.
  *
- * **This is what the calendar grid reads instead of re-deriving rule
- * semantics itself.** `applies_to` means a week no longer has one answer, and
- * a single `CalendarConfig` covering the whole week cannot express "Tuesdays
- * are different" — so this endpoint reports the *resolved* answer per date and
- * the frontend only renders it (`config.ts`'s `buildWeekSchedule`).
+ * **Nothing renders this any more.** The calendar grid reads
+ * `GET /spaces/{public_id}/calendar` (`getSpaceCalendar` below) instead —
+ * see `.claude/rules/calendar-shape.md` for the shape that endpoint projects
+ * and why this one no longer drives anything. This function and its type
+ * stay in the client only because task 10.5, not this one, retires them from
+ * the backend.
  *
  * `from` is a calendar date, not an instant — deliberately not passed
  * through `toISOString()` the way `listResourceBookings` passes its window,
@@ -917,6 +919,38 @@ export async function getSpaceSchedule(
   const query = new URLSearchParams({ from: formatDateParam(from), days: String(days) })
   return authenticatedRequest<DayScheduleRead[]>(
     `/spaces/${encodeURIComponent(publicId)}/schedule?${query}`,
+  )
+}
+
+/**
+ * `GET /spaces/{public_id}/calendar?from=&to=` — the shape's own projection
+ * (task 10.3) for each local date in `[from, to]`. Member+ for the live
+ * shape; this client never requests `draft=true`, since only the shape
+ * studio (task 10.9) previews a draft and it is not built yet.
+ *
+ * **This is what the calendar grid reads.** `shape.project_day` resolves the
+ * operating intervals, blackouts and offered starts for a date server-side,
+ * from the Space's own shape, and this client only renders the table it was
+ * sent — `CalendarGrid.tsx`'s whole module docblock is about why the client
+ * never re-derives any of it. See `.claude/rules/calendar-shape.md`.
+ *
+ * `from` and `to` are calendar dates, not instants — the identical reasoning
+ * `getSpaceSchedule` already gives for not passing them through
+ * `toISOString()`. `to` is **inclusive**, matching the shape schema's own
+ * `effective_from`/`effective_to` convention — this is a calendar range a
+ * human typed, not a half-open instant window. The range is bounded by the
+ * same `MAX_SCHEDULE_DAYS` the schedule endpoint uses, unvalidated here for
+ * the same reason: an out-of-range value is a client bug the server's own
+ * 400 reports.
+ */
+export async function getSpaceCalendar(
+  publicId: string,
+  from: Date,
+  to: Date,
+): Promise<AuthenticatedResult<DayProjectionRead[]>> {
+  const query = new URLSearchParams({ from: formatDateParam(from), to: formatDateParam(to) })
+  return authenticatedRequest<DayProjectionRead[]>(
+    `/spaces/${encodeURIComponent(publicId)}/calendar?${query}`,
   )
 }
 

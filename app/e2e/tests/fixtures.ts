@@ -32,7 +32,6 @@
 
 import { test as base, expect, type APIRequestContext, type Page } from '@playwright/test'
 
-import { slotStartMinutes, slotsPerDay } from '../../frontend/src/config'
 import { dateFromKey, slotTestId } from '../../frontend/src/calendar/week'
 import { zonedParts, zonedTimeToInstant } from '../../frontend/src/timezone'
 
@@ -40,8 +39,8 @@ export const BACKEND_URL = 'http://localhost:8000'
 
 /**
  * `src/auth/sandboxToken.ts`'s `SANDBOX_SUB_STORAGE_KEY`, mirrored as a
- * literal rather than imported. Unlike `slotStartMinutes` and `slotTestId`
- * above, that module sits behind the `auth` barrel, which pulls in the api
+ * literal rather than imported. Unlike `slotTestId` above, that module sits
+ * behind the `auth` barrel, which pulls in the api
  * client and its `import.meta.env` reference — meaningful under Vite, not
  * under the plain esbuild transform Playwright loads this file with. The two
  * copies must change together if the storage key ever does.
@@ -75,6 +74,25 @@ const SANDBOX_SPACE_A_NAME = 'Sandbox Space A (Berlin)'
  * a slot's wall-clock time through.
  */
 const SANDBOX_SPACE_A_TIMEZONE = 'Europe/Berlin'
+
+/**
+ * The grid step Space A's own calendar shape produces, mirrored from
+ * `app/backend/app/sandbox_seed.py`'s `SPACE_A_SHAPE` for the same reason as
+ * the two constants above: that module is Python and this is TypeScript.
+ *
+ * The shape is open 00:00-24:00 every day at
+ * `allowed_durations_mins: [30, 60, ..., 240]`, and the projection chunks a
+ * block forward by its own smallest declared duration
+ * (`.claude/rules/calendar-shape.md`) — so starts are 30 minutes apart and a
+ * drag across *n* of them selects `n * 30` minutes, up to the 240 the shape
+ * offers. Nothing in the frontend can be imported for this any more, and that
+ * is the point: what a date offers is the *server's* answer now, not a
+ * client-side config constant.
+ */
+export const SPACE_A_STEP_MINUTES = 30
+
+/** Offered starts per day under `SPACE_A_STEP_MINUTES` — 1440 / 30. */
+export const SLOTS_PER_DAY = 1440 / SPACE_A_STEP_MINUTES
 
 export interface Booking {
   id: number
@@ -347,9 +365,19 @@ export async function renderedDateKeys(page: Page): Promise<string[]> {
   return ids.map((id) => id.replace('calendar-day-', ''))
 }
 
-/** The `data-testid` of slot `index` on the day identified by `key`. */
+/**
+ * The `data-testid` of the `index`-th offered start on the day identified by
+ * `key`.
+ *
+ * `slotTestId` addresses a start by **minutes from local midnight**, not by an
+ * index into a uniform grid — a day's offered starts are a table now, and two
+ * operating blocks can put two of them closer together than either one's
+ * shortest booking. This suite keeps counting in indices because every test
+ * here books against Space A, whose shape is one all-day block on a single
+ * 30-minute grid, and `index * SPACE_A_STEP_MINUTES` is exactly that grid.
+ */
 export function slotId(key: string, index: number): string {
-  return slotTestId(dateFromKey(key), index)
+  return slotTestId(dateFromKey(key), index * SPACE_A_STEP_MINUTES)
 }
 
 /**
@@ -366,7 +394,7 @@ export function slotId(key: string, index: number): string {
  */
 export function slotInstant(key: string, index: number): Date {
   const [year, month, day] = key.split('-').map(Number)
-  const minutes = slotStartMinutes(index)
+  const minutes = index * SPACE_A_STEP_MINUTES
   return zonedTimeToInstant(
     year,
     month - 1,
@@ -469,5 +497,4 @@ export async function gotoNextWeek(page: Page): Promise<string[]> {
   return renderedDateKeys(page)
 }
 
-/** Slot count per day, derived from the frontend config rather than hardcoded. */
-export { slotsPerDay }
+

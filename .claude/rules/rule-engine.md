@@ -289,13 +289,15 @@ The resolution is read from
 its combining rule (the LCM of every matching row's own length) — a second
 implementation of "what session length governs this date" would be exactly the drift this document
 keeps warning about. That same field is also reported over the wire by `GET
-/spaces/{public_id}/schedule` (`identity-and-access.md`), which is where its own coherence case
-against the operating window lives: a resolved session length longer than the resolved operating
-window means nothing on that date is bookable at all.
+/spaces/{public_id}/schedule`, along with a per-date coherence issue — a resolved session length
+longer than the resolved operating window means nothing on that date is bookable at all. **Nothing
+renders that endpoint any more**: the calendar grid draws a Space's own shape projection instead
+(`.claude/rules/calendar-shape.md`), so what is left of `resolve_day_schedule` is the gap tolerance
+this paragraph is about.
 
 `rules_stub.py` also holds one thing that is not a fifth translation onto `evaluate_request` — it
-never calls it. `resolve_day_schedule`, called by `GET /spaces/{public_id}/schedule`
-(`identity-and-access.md`), reports what a booking on a given date *would* be judged against — the
+never calls it. `resolve_day_schedule`, called by `GET /spaces/{public_id}/schedule` and by the run's
+own gap tolerance above, reports what a booking on a given date *would* be judged against — the
 slot size and operating window, resolved from that Space's own `space_rules` rows — for display, not
 judgment. It reuses `row_applies`, the identical `applies_to` matching `_build_canon` uses, so
 "which rows govern this date" cannot drift between the two call paths, but it never touches

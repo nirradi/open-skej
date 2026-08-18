@@ -32,6 +32,7 @@ import {
   listAllBookings,
   slotId,
   slotInstant,
+  SPACE_A_STEP_MINUTES,
   test,
 } from './fixtures'
 import { bookingTestId } from '../../frontend/src/calendar/week'
@@ -85,7 +86,9 @@ test('drag-to-select across free slots still works with a booking on the grid', 
   await dragAcrossSlots(page, slotIds)
 
   // A multi-slot range produced by real mouse travel, not a synthetic event.
-  await expect(page.getByTestId('calendar-selection')).toContainText(`Selected ${FREE_COUNT} slots`)
+  await expect(page.getByTestId('calendar-selection')).toContainText(
+    `Selected ${FREE_COUNT * SPACE_A_STEP_MINUTES} minutes`,
+  )
 
   for (const id of slotIds) {
     await expect(page.getByTestId(id)).toHaveAttribute('data-selected', 'true')
@@ -120,7 +123,9 @@ test('a drag beginning on the slot directly below a booking selects normally', a
   const adjacent = [slotId(day, 2), slotId(day, 3)]
   await dragAcrossSlots(page, adjacent)
 
-  await expect(page.getByTestId('calendar-selection')).toContainText('Selected 2 slots')
+  await expect(page.getByTestId('calendar-selection')).toContainText(
+    `Selected ${2 * SPACE_A_STEP_MINUTES} minutes`,
+  )
   await expect(page.getByTestId('booking-panel')).toBeVisible()
 })
 
@@ -140,6 +145,6 @@ test('a drag cannot span the slots a booking occupies', async ({ page, api }) =>
 
   const selection = page.getByTestId('calendar-selection')
   await expect(selection).toBeVisible()
-  await expect(selection).toContainText('Selected 2 slots')
+  await expect(selection).toContainText(`Selected ${2 * SPACE_A_STEP_MINUTES} minutes`)
   await expect(page.getByTestId(slotId(day, 9))).not.toHaveAttribute('data-selected', 'true')
 })

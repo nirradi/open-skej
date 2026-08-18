@@ -1,58 +1,65 @@
 /**
  * The week-view booking grid.
  *
- * ## What drives the layout
+ * ## What the grid is drawn from
  *
- * Slot count, slot labels, row height and the vertical position of a booking
- * block all derive from a `WeekSchedule` (`config.ts`) — the server-resolved
- * per-date slot size and operating window `GET /spaces/{public_id}/schedule`
- * reports (task 6.9), never re-derived here. There is exactly one hardcoded
- * dimension in this file — `SLOT_ROW_HEIGHT_PX`, the height of *one row on
- * the shared axis*, whatever that row's own duration happens to be.
+ * Every day column is a **minute canvas**: one relatively-positioned box
+ * `1440 * pxPerMinute` tall, painted in four layers plus the bookings —
+ * closed background, operating intervals, blackouts, offered-start buttons,
+ * bookings — from the shape's own projection (`calendar/shape.ts`,
+ * `GET /spaces/{public_id}/calendar`, `.claude/rules/calendar-shape.md`).
+ * Nothing here re-derives what is bookable: the server projects, this
+ * component renders exactly the table it was sent.
  *
- * ## A heterogeneous week (task 6.9)
+ * **Closed is the canvas's own background; being open is the positive
+ * statement.** Rendering all 24 hours as bookable and greying whatever two
+ * rule types read by name said was outside hours is what drew a Space whose
+ * hours came from anywhere else — a generated rule, say — as wide open, and
+ * that is the reported defect this stream closes. Painting the *operating*
+ * region instead means
+ * the canvas can only ever offer what the projection offered. A date the
+ * server did not project (`WeekProjection.forDate`'s `closedDay` fallback)
+ * renders exactly like a date with an empty shape: closed, nothing offered.
+ * Fail closed reaches the client too.
  *
- * `applies_to` means two days in the same week can resolve to different slot
- * sizes and different operating windows — "Saturdays are 15-minute slots,
- * every other day is 30" is an ordinary configuration, not an edge case. The
- * grid copes with this in three parts:
+ * ## Selection is a lookup, not arithmetic
  *
- * 1. **One shared time axis, at the finest configured slot size in the
- *    visible week** (`finestSessionMinutes`). Every day's own slot buttons are
- *    laid out in normal document flow at *that day's own* `sessionMinutes`, and
- *    since every resolved `sessionMinutes` divides 1440 (guaranteed by
- *    `resolve_day_schedule` — the LCM of divisors of 1440 always divides
- *    1440), a day's own buttons always sum to exactly the shared
- *    `dayHeight` with no absolute positioning needed to make them fit. They
- *    land flush with the axis rows only when the day's own `sessionMinutes` is
- *    a *multiple* of the axis granularity — a 30-minute day beside a
- *    20-minute one shares a `dayHeight` but does not share row lines. That
- *    is a real readability limit of a mixed week, recorded rather than
- *    hidden: see the PR description for what it looks like on screen.
- * 2. **Each day greys its own slots against its own resolved hours**
- *    (`isSlotOutOfHours`, called once per day with that day's own
- *    `CalendarConfig` — `calendarConfigForDay`), not a Space-wide value.
- * 3. **Selection snaps to the day it starts on, at that day's own slot
- *    size.** This was already true before 6.9 — a drag has always been
- *    confined to the day it began on (`extendTo` below) — task 6.9 only
- *    changes what "that day's own slot size" can be.
+ * A day's `offered_starts` is not a uniform grid — two operating blocks with
+ * different anchors (the music-room worked example: a 60-minute morning
+ * block and a {60, 120}-minute evening one) can put two starts closer
+ * together than either one's own shortest booking. `selection.ts` resolves a
+ * click or a drag directly against that table: one offered start plus one
+ * duration offered there, and nothing else is constructable. A drag that
+ * cannot widen past its anchor's click unit — because a wider duration is
+ * not offered, or because it would collide with a booking or the horizon —
+ * simply does not widen; there is no fallback slot-index math underneath it
+ * any more.
  *
- * A day's `coherence_issue` (opening/closing time not landing on that day's
- * own resolved slot grid) is advisory only, and deliberately does not block
- * anything: `resolve_day_schedule` guarantees every resolved `sessionMinutes`
- * divides 1440, so a day can never fail to describe *some* grid to draw.
- * And `isSlotOutOfHours` already greys any slot that only partially
- * overlaps the open window, whether or not that window lines up with the
- * grid — so a misaligned bound never lets the grid *offer* a slot the
- * backend would refuse; it is just wasted capacity an admin might want to
- * tidy up. It is surfaced as a small per-day note in that day's header
- * (`data-testid="calendar-notice-{dateKey}"` — deliberately *not* under the
- * `calendar-day-` prefix, which the E2E suite selects on to count the seven
- * day headers) rather than a notice that replaces the grid. A whole-grid
- * notice is still right one level up, in `ResourceCalendarPage`, for a
- * `/schedule` fetch that fails outright — with no resolved schedule at all
- * there is nothing honest to draw — but it is the wrong shape here, where
- * every other day is describable and this one is merely untidy.
+ * ## What this component deliberately does not know
+ *
+ * **Policy rules are invisible to this grid, by design** — the deliberate
+ * replacement for the "project the whole rule set onto the calendar"
+ * approach `ops/plans/stream-10/OVERVIEW.md` rejects outright (decision 2).
+ * A shape says what the venue *offers*; a rule says who may take it and how
+ * much of it, and only the first of those is drawable without knowing who is
+ * asking. A Space configuring a 120-minute `max_duration` beside a shape
+ * offering 180 still lets a member build a selection the server refuses —
+ * that is correct, not a bug this component owes a fix for. This grid
+ * selects; it does not book, does not cancel, and does not know a single
+ * policy rule exists.
+ *
+ * ## A window past local midnight is clamped, never drawn
+ *
+ * A shape's `end_time` may legitimately exceed `24:00` (a venue open past
+ * midnight), and the projection represents that. This component does not
+ * attempt to render the wrap: an operating or blackout interval whose
+ * `end_minutes` exceeds 1440 is clipped at the day boundary, and an
+ * `offered_starts` entry at or past 1440 is simply not drawn.
+ * `ops/done/stream-7/passed-midnight.md` and `resolve_day_schedule`'s own
+ * (now-retired) docstring record the identical limit for the pre-shape
+ * calendar, and `ops/plans/stream-10/OVERVIEW.md`'s "out of scope,
+ * deliberately" carries it forward — the shape can *represent* a wrapping
+ * window; this grid is not asked to draw one.
  *
  * ## What this component does not do
  *
@@ -60,23 +67,29 @@
  * selection upward — a free range via `onSelectionChange`, and an existing
  * booking via `onBookingSelect` — and leaves both round trips to the panels.
  *
+ * `showBookings` (default `true`) is the seam a chat preview (task 10.9) reuses
+ * this component through: with it off, the component issues no booking
+ * request at all and draws no booking layer, so the surface a member books on
+ * and the surface a draft shape is previewed with are the same component
+ * rather than two implementations that could disagree.
+ *
  * ## Why booking blocks can be clicked without eating the drag (task 1.8)
  *
- * Booking blocks are absolutely positioned over the slot buttons, so until 1.8
- * they carried `pointer-events-none` to stop them shadowing the drag handlers
- * underneath. Simply removing that would be a real hazard — except that a block
- * can only ever cover slots that are already unselectable.
+ * Booking blocks are absolutely positioned over the offered-start buttons, so
+ * until 1.8 they carried `pointer-events-none` to stop them shadowing the drag
+ * handlers underneath. Simply removing that would be a real hazard — except
+ * that a block can only ever cover starts that are already unselectable.
  *
  * The block's rectangle is derived from the same interval that `blockedReason`
- * reads: every slot the interval overlaps reports `'booked'` and renders
- * `disabled`, and the block is laid out from exactly those minutes. So every
- * pixel a block occupies belongs to a slot that would have refused the drag
- * anyway, and the events it now intercepts are events that previously did
- * nothing. Dragging *past* a booking is unchanged too: `rangeBetween` already
- * refused to span a blocked slot, so a range that stopped short of a booking
- * before still stops short of it now.
+ * reads: every offered start the interval overlaps reports `'booked'` and
+ * renders `disabled`, and the block is laid out from exactly those minutes. So
+ * every pixel a block occupies belongs to a start that would have refused the
+ * drag anyway, and the events it now intercepts are events that previously did
+ * nothing. Dragging *past* a booking is unchanged too: `dragSelection` already
+ * refuses to span a blocked interval via its `isFree` predicate, so a range
+ * that stopped short of a booking before still stops short of it now.
  *
- * That invariant — a block never covers a selectable slot — is what makes this
+ * That invariant — a block never covers a selectable start — is what makes this
  * safe, so it is asserted directly in `CalendarGrid.test.tsx` rather than left
  * to this comment. jsdom has no layout and `fireEvent` dispatches straight at
  * its target, so no test can observe CSS hit-testing; testing the invariant is
@@ -87,19 +100,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 
 import { listResourceBookings } from '../api'
 import type { Booking } from '../api'
-import {
-  calendarConfig,
-  calendarConfigForDay,
-  finestSessionMinutes,
-  formatSlotLabel,
-  gridOffsetMinutes,
-  isSlotOutOfHours,
-  slotStart,
-  slotsPerDayFor,
-  uniformWeekSchedule,
-  type CalendarConfig,
-  type WeekSchedule,
-} from '../config'
+import { MINUTES_PER_DAY, formatMinutesLabel, pxPerMinuteFor } from '../config'
 import {
   addDays,
   bookingTestId,
@@ -112,23 +113,21 @@ import {
   intervalsOverlap,
   isSlotBeyondHorizon,
   isSlotInPast,
-  slotInterval,
+  localMinutesToInstant,
   slotTestId,
   startOfWeek,
   toDateKey,
   type SlotBlockedReason,
 } from './week'
-import { isInSelection, rangeBetween, rangeLength, type Selection } from './selection'
+import { clickSelection, dragSelection, isStartInSelection, type Selection } from './selection'
+import {
+  buildWeekProjection,
+  finestDurationMinutes,
+  nextStartAfter,
+  smallestDurationAt,
+  type WeekProjection,
+} from './shape'
 import { SYSTEM_TIME_ZONE, zonedCalendarDate } from '../timezone'
-
-/**
- * Height of a single slot row, in pixels.
- *
- * Per *slot*, not per half-hour: at a 10-minute granularity the day is three
- * times as tall, which is the honest consequence of asking for three times the
- * resolution.
- */
-const SLOT_ROW_HEIGHT_PX = 28
 
 const MS_PER_MINUTE = 60 * 1000
 
@@ -140,6 +139,14 @@ export interface SelectedInterval {
   start: Date
   end: Date
 }
+
+/**
+ * A projection that is closed on every date — the default `week` prop, and
+ * the fail-closed answer for a caller that has not yet resolved a Space's
+ * real shape. Built once at module scope so it does not churn identity on
+ * every render of an omitted prop.
+ */
+const CLOSED_WEEK: WeekProjection = buildWeekProjection([], SYSTEM_TIME_ZONE)
 
 export interface CalendarGridProps {
   /** The Space this calendar's Resource belongs to. */
@@ -161,13 +168,23 @@ export interface CalendarGridProps {
    */
   now?: Date
   /**
-   * The week's resolved layout — one `DaySchedule` per date plus a shared
-   * `timeZone` (`config.ts`). Defaults to `uniformWeekSchedule(calendarConfig)`
-   * when omitted: every date resolves to the shipped default (no hours
-   * restriction, the default slot size), matching the pre-6.9 fallback a
-   * caller with no `config` prop got.
+   * The week's shape projection — one `DayProjection` per date plus a shared
+   * `timeZone` (`calendar/shape.ts`). Defaults to `CLOSED_WEEK` when omitted:
+   * every date resolves to closed, nothing offered — **fail closed**, never
+   * the permissive "whole day, default slot size" a caller with no prop used
+   * to get.
    */
-  schedule?: WeekSchedule
+  week?: WeekProjection
+  /**
+   * Whether this grid fetches and draws bookings at all. Defaults to `true`.
+   *
+   * With it `false`, the component issues no `listResourceBookings` request
+   * and renders no booking layer — the seam the chat preview (task 10.9)
+   * reuses this component through, so the surface a member books on and the
+   * surface a draft shape is previewed with cannot disagree about what the
+   * shape itself draws.
+   */
+  showBookings?: boolean
   /**
    * Notified when Previous, Next or "This week" is clicked, with the week
    * start it wants shown. This component does not act on its own click —
@@ -198,7 +215,7 @@ export interface CalendarGridProps {
    * what the server actually holds; the cost is one request, and the benefit is
    * that the optimistic and authoritative views cannot drift apart.
    *
-   * Both selections are dropped with it. For a range, the slots it covers have
+   * Both selections are dropped with it. For a range, the minutes it covers have
    * just become unbookable — either we booked them or somebody else did. For a
    * booking, it has just been cancelled and is about to stop existing, so
    * leaving it selected would offer a second cancel of a booking that is gone.
@@ -220,6 +237,12 @@ type LoadState =
 
 /** Copy for a fetch that failed in a way the user cannot act on. */
 const LOAD_ERROR_FALLBACK = "We couldn't load this week's bookings."
+
+/** Where a drag started: one offered start, pinned to the day it began on. */
+interface Anchor {
+  dateKey: string
+  startMinutes: number
+}
 
 // `dayHeaderFormat` / `weekLabelFormat` format calendar-date carriers (see
 // `week.ts`'s docblock), not real instants tied to a Space — formatting one
@@ -249,38 +272,28 @@ export function CalendarGrid({
   resourceId,
   weekStart,
   now: nowProp,
-  schedule,
+  week,
+  showBookings = true,
   onWeekChange,
   onSelectionChange,
   onBookingSelect,
   refreshToken = 0,
 }: CalendarGridProps) {
-  const resolvedSchedule = schedule ?? uniformWeekSchedule(calendarConfig)
-  // A config carrying only `resolvedSchedule.timeZone`, used everywhere only
-  // the zone matters and not any one day's own hours or slot size: the
-  // booking-window fetch below, week navigation bounds, "is this the current
-  // week". Its own `anchorMinutes` is 0, so `slotStartMinutes(0, config)` is
-  // midnight here whatever any day's real anchor is, and `dayBounds` through
-  // this config is correct for every day, not just the axis's own.
-  const zoneConfig: CalendarConfig = {
-    sessionMinutes: 1,
-    openMinutes: null,
-    closeMinutes: null,
-    timeZone: resolvedSchedule.timeZone,
-    anchorMinutes: 0,
-  }
+  const resolvedWeek = week ?? CLOSED_WEEK
+  const timeZone = resolvedWeek.timeZone
+
   const [fallbackNow] = useState(() => new Date())
   const now = nowProp ?? fallbackNow
 
   const [reloadNonce, setReloadNonce] = useState(0)
   const [settled, setSettled] = useState<LoadState | null>(null)
-  const [anchor, setAnchor] = useState<{ dateKey: string; index: number } | null>(null)
+  const [anchor, setAnchor] = useState<Anchor | null>(null)
   const [selection, setSelection] = useState<Selection | null>(null)
   const [selectedBookingId, setSelectedBookingId] = useState<number | null>(null)
 
   // Drop both selections when the parent asks for a refresh. Adjusted during
   // render rather than in an effect: an effect would let one frame paint with a
-  // selection highlighting slots that are about to come back as booked.
+  // selection highlighting minutes that are about to come back as booked.
   const [seenRefreshToken, setSeenRefreshToken] = useState(refreshToken)
   if (seenRefreshToken !== refreshToken) {
     setSeenRefreshToken(refreshToken)
@@ -291,13 +304,13 @@ export function CalendarGrid({
 
   // Drop both selections when the displayed week changes, by whatever means —
   // the buttons below, but just as much Back, a pasted link, or a parent that
-  // re-resolves `?week=` for any other reason. A selection is slot indices
-  // plus a date key, and carrying it across to a week that may not even share
-  // that date would leave it pointing at nothing on screen. Keyed off the prop
-  // itself, in render, rather than an effect on it or a clear inside the
-  // button handlers below: this component cannot tell "the buttons changed
-  // it" apart from "the caller changed it", and after task 5.8 it must not
-  // need to.
+  // re-resolves `?week=` for any other reason. A selection is a start plus a
+  // duration plus a date key, and carrying it across to a week that may not
+  // even share that date would leave it pointing at nothing on screen. Keyed
+  // off the prop itself, in render, rather than an effect on it or a clear
+  // inside the button handlers below: this component cannot tell "the
+  // buttons changed it" apart from "the caller changed it", and after task
+  // 5.8 it must not need to.
   const weekKey = weekStart.getTime()
   const [seenWeekKey, setSeenWeekKey] = useState(weekKey)
   if (seenWeekKey !== weekKey) {
@@ -310,58 +323,46 @@ export function CalendarGrid({
   /**
    * Identifies the fetch the grid currently wants an answer to.
    *
-   * Includes `resolvedSchedule.timeZone` alongside `weekStart`: the fetch
-   * window below is resolved through it, so a schedule swap (the placeholder
-   * zone giving way to the Space's real one, before `weekStart` or either
-   * token has changed) is a genuinely different request, not the same one
-   * settling twice.
+   * Includes `timeZone`: the fetch window below is resolved through it, so a
+   * zone swap (the placeholder zone giving way to the Space's real one,
+   * before `weekStart` or either token has changed) is a genuinely different
+   * request, not the same one settling twice.
    */
-  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}:${resolvedSchedule.timeZone}`
-  const load: LoadState | { status: 'loading' } =
-    settled !== null && settled.key === requestKey ? settled : { status: 'loading' }
+  const requestKey = `${weekStart.getTime()}:${reloadNonce}:${refreshToken}:${timeZone}`
+  const load: LoadState | { status: 'loading' } = !showBookings
+    ? { status: 'ok', key: requestKey, bookings: NO_BOOKINGS }
+    : settled !== null && settled.key === requestKey
+      ? settled
+      : { status: 'loading' }
 
   const days = useMemo(() => daysOfWeek(weekStart), [weekStart])
   const dateKeys = useMemo(() => days.map(toDateKey), [days])
+  const dayProjections = useMemo(
+    () => dateKeys.map((key) => resolvedWeek.forDate(key)),
+    [resolvedWeek, dateKeys],
+  )
 
   /**
-   * The shared row axis's granularity — the finest (smallest) `sessionMinutes`
-   * resolved for any day in the visible week (`config.ts`'s
-   * `finestSessionMinutes`; see this file's module docblock for why the finest
-   * value is what a heterogeneous week shares). A uniform week (every day
-   * resolving to the same `sessionMinutes`, the common case and everything this
-   * suite tested before 6.9) makes this identical to that one value, so
-   * `slotsPerDay` below is unchanged for every pre-6.9 assertion.
+   * The shared minute-canvas pixel scale — the finest duration offered
+   * anywhere in the visible week (`calendar/shape.ts`'s `finestDurationMinutes`;
+   * see this file's module docblock for why the grid is no longer a uniform
+   * slot count). At the pre-shape default (30-minute steps), this renders at
+   * exactly the height the old slot grid did.
    */
-  const axisSessionMinutes = useMemo(
-    () => finestSessionMinutes(resolvedSchedule, dateKeys),
-    [resolvedSchedule, dateKeys],
-  )
-  const axisConfig: CalendarConfig = {
-    sessionMinutes: axisSessionMinutes,
-    openMinutes: null,
-    closeMinutes: null,
-    timeZone: resolvedSchedule.timeZone,
-    anchorMinutes: 0,
-  }
-  const slotsPerDay = slotsPerDayFor(axisConfig)
+  const finestMinutes = useMemo(() => finestDurationMinutes(resolvedWeek, dateKeys), [resolvedWeek, dateKeys])
+  const pxPerMinute = pxPerMinuteFor(finestMinutes)
+  const dayHeight = MINUTES_PER_DAY * pxPerMinute
 
   // ---- Loading the week's bookings -------------------------------------
 
   useEffect(() => {
+    if (!showBookings) return
     let cancelled = false
     // Midnight-to-midnight on the Space's own clock, not the environment's —
     // the same reason `bookingsByDay` below goes through `dayBounds` rather
-    // than `weekStart` / `addDays` directly. A raw calendar-date instant
-    // would ask the server for the wrong window whenever the Space's zone
-    // isn't the environment's: a booking in the first few hours of the
-    // Space's week could sit before an environment-midnight `from`, or one in
-    // the last few hours could sit at or after an environment-midnight `to`,
-    // and either way never reach this component to be drawn at all.
-    // `zoneConfig` carries the right zone; which day's own `sessionMinutes` it
-    // otherwise names is irrelevant here — `dayBounds` reads index 0, always
-    // midnight regardless of `sessionMinutes`.
-    const from = dayBounds(weekStart, zoneConfig).start
-    const to = dayBounds(addDays(weekStart, DAYS_PER_WEEK - 1), zoneConfig).end
+    // than `weekStart` / `addDays` directly.
+    const from = dayBounds(weekStart, timeZone).start
+    const to = dayBounds(addDays(weekStart, DAYS_PER_WEEK - 1), timeZone).end
 
     void listResourceBookings(publicId, resourceId, from, to).then((result) => {
       // A response for a week the user has already navigated away from would
@@ -396,22 +397,19 @@ export function CalendarGrid({
     return () => {
       cancelled = true
     }
-    // `weekStart` and `zoneConfig` are read inside this effect only to
-    // compute `from` / `to`, and `requestKey` already encodes both by value
-    // (`weekStart.getTime()`, `resolvedSchedule.timeZone`) — see its own
-    // docblock. Listing the objects themselves here instead would re-fire
-    // this fetch on a fresh-but-equal `Date` or config object, which is
-    // exactly the hazard `ResourceCalendarPage`'s own `weekStart` stabiliser
-    // exists to prevent one layer up; this effect must not reintroduce it
-    // one layer down.
+    // `weekStart` and `timeZone` are read inside this effect only to compute
+    // `from` / `to`, and `requestKey` already encodes both by value — see its
+    // own docblock. Listing them here instead would re-fire this fetch on a
+    // fresh-but-equal `Date`, exactly the hazard `ResourceCalendarPage`'s own
+    // `weekStart` stabiliser exists to prevent one layer up.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [publicId, requestKey, resourceId])
+  }, [publicId, requestKey, resourceId, showBookings])
 
   /**
    * The bookings shown, per day.
    *
    * Empty while loading and on error — but note the grid does *not* then render
-   * as a week of free slots: `blockedReason` treats both states as unselectable,
+   * as a week of free starts: `blockedReason` treats both states as unselectable,
    * so a failed fetch cannot be mistaken for an empty calendar and clicked into
    * a double booking.
    */
@@ -424,42 +422,36 @@ export function CalendarGrid({
       end: new Date(booking.end_at),
     }))
 
-    return days.map((day, dayIndex) => {
+    return days.map((day) => {
       // Midnight to midnight on the Space's own clock — a booking that
       // straddles the environment's midnight but not the Space's must still
-      // group with the one day column it actually belongs to. Any day's own
-      // config resolves midnight identically (only the zone matters — see
-      // `zoneConfig`), so which one is used here is arbitrary.
-      const { start: dayStart, end: dayEnd } = dayBounds(
-        day,
-        calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex]),
-      )
+      // group with the one day column it actually belongs to.
+      const { start: dayStart, end: dayEnd } = dayBounds(day, timeZone)
       return parsed.filter((entry) => intervalsOverlap(entry.start, entry.end, dayStart, dayEnd))
     })
-  }, [bookings, dateKeys, days, resolvedSchedule])
+  }, [bookings, days, timeZone])
 
   // ---- What a user may click -------------------------------------------
 
+  /**
+   * Whether the offered start at `startMinutes` on day `dayIndex` may be
+   * selected, and if not, why — asked about the start plus its own click
+   * unit (the smallest duration offered there), never a slot index.
+   */
   const blockedReason = useCallback(
-    (dayIndex: number, index: number): SlotBlockedReason | null => {
-      // Until the week's bookings are known, every slot is unselectable. The
+    (dayIndex: number, startMinutes: number): SlotBlockedReason | null => {
+      // Until the week's bookings are known, every start is unselectable. The
       // alternative — an optimistically empty grid — invites a booking against
       // data we do not have.
       if (load.status !== 'ok') return 'unavailable'
 
-      // That day's own resolved hours and slot size — never a Space-wide
-      // value, since `applies_to` can make two days in this same week
-      // disagree about both.
-      const dayConfig = calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex])
-
-      // Checked before the time-based reasons below: whether a slot sits
-      // inside the Space's operating hours does not depend on `now`, only on
-      // the config, and greying it is what replaces the old clipped grid —
-      // the row still exists so a booking sitting on it stays visible.
-      if (isSlotOutOfHours(index, dayConfig)) return 'out-of-hours'
-
       const day = days[dayIndex]
-      const { start, end } = slotInterval(day, index, dayConfig)
+      const dayProjection = dayProjections[dayIndex]
+      const duration = smallestDurationAt(dayProjection, startMinutes)
+      if (duration === null) return 'unavailable'
+
+      const start = localMinutesToInstant(day, startMinutes, timeZone)
+      const end = localMinutesToInstant(day, startMinutes + duration, timeZone)
       if (isSlotInPast(start, now)) return 'past'
       if (isSlotBeyondHorizon(start, now)) return 'beyond-horizon'
 
@@ -468,7 +460,7 @@ export function CalendarGrid({
       )
       return covering ? 'booked' : null
     },
-    [bookingsByDay, dateKeys, days, load.status, now, resolvedSchedule],
+    [bookingsByDay, dayProjections, days, load.status, now, timeZone],
   )
 
   // ---- Selection --------------------------------------------------------
@@ -477,24 +469,11 @@ export function CalendarGrid({
     if (selection === null) return null
     const dayIndex = days.findIndex((day) => toDateKey(day) === selection.dateKey)
     if (dayIndex === -1) return null
-    const dayConfig = calendarConfigForDay(resolvedSchedule, dateKeys[dayIndex])
     const day = days[dayIndex]
-    const start = slotStart(day, selection.start, dayConfig)
-    // The dragged range's own natural end — one slot past its last row, at
-    // that row's own width, unwidened — versus the minimum-duration click
-    // unit anchored at the *first* selected row, whichever reaches further.
-    // A plain click (`selection.start === selection.end`) is exactly the
-    // click-unit case (`slotInterval`'s own docblock); a drag already at or
-    // beyond the minimum must not be stretched further by it, and one
-    // shorter than the minimum is clamped up to it, the same way a single
-    // click is.
-    const naturalEnd = new Date(
-      slotStart(day, selection.end, dayConfig).getTime() + dayConfig.sessionMinutes * MS_PER_MINUTE,
-    )
-    const clickEnd = slotInterval(day, selection.start, dayConfig).end
-    const end = naturalEnd.getTime() > clickEnd.getTime() ? naturalEnd : clickEnd
+    const start = localMinutesToInstant(day, selection.startMinutes, timeZone)
+    const end = localMinutesToInstant(day, selection.startMinutes + selection.durationMinutes, timeZone)
     return { start, end }
-  }, [dateKeys, days, resolvedSchedule, selection])
+  }, [days, selection, timeZone])
 
   useEffect(() => {
     onSelectionChange?.(selectedInterval)
@@ -529,29 +508,42 @@ export function CalendarGrid({
   }, [])
 
   const extendTo = useCallback(
-    (dayIndex: number, index: number) => {
+    (dayIndex: number, startMinutes: number) => {
       if (anchor === null) return
       const day = days[dayIndex]
       // Selection is confined to the day it started on: a booking is one
-      // interval, and slot indices on another column are a different day.
+      // interval, and starts on another column are a different day.
       if (toDateKey(day) !== anchor.dateKey) return
 
-      const range = rangeBetween(anchor.index, index, (i) => blockedReason(dayIndex, i) === null)
-      if (range === null) return
-      setSelection({ dateKey: anchor.dateKey, ...range })
+      const dayProjection = dayProjections[dayIndex]
+      const isFree = (s: number, e: number): boolean => {
+        const start = localMinutesToInstant(day, s, timeZone)
+        const end = localMinutesToInstant(day, e, timeZone)
+        if (isSlotInPast(start, now)) return false
+        if (isSlotBeyondHorizon(start, now)) return false
+        return !bookingsByDay[dayIndex].some((entry) =>
+          intervalsOverlap(start, end, entry.start, entry.end),
+        )
+      }
+
+      const next = dragSelection(dayProjection, anchor.startMinutes, startMinutes, isFree)
+      if (next === null) return
+      setSelection(next)
     },
-    [anchor, blockedReason, days],
+    [anchor, bookingsByDay, dayProjections, days, now, timeZone],
   )
 
   const beginAt = useCallback(
-    (dayIndex: number, index: number) => {
-      if (blockedReason(dayIndex, index) !== null) return
+    (dayIndex: number, startMinutes: number) => {
+      if (blockedReason(dayIndex, startMinutes) !== null) return
       const dateKey = toDateKey(days[dayIndex])
-      setAnchor({ dateKey, index })
-      setSelection({ dateKey, start: index, end: index })
+      const next = clickSelection(dayProjections[dayIndex], startMinutes)
+      if (next === null) return
+      setAnchor({ dateKey, startMinutes })
+      setSelection(next)
       setSelectedBookingId(null)
     },
-    [blockedReason, days],
+    [blockedReason, dayProjections, days],
   )
 
   // The drag ends wherever the pointer is released, including outside the grid
@@ -570,16 +562,16 @@ export function CalendarGrid({
 
   // ---- Navigation -------------------------------------------------------
 
-  const canPrev = canGoToPreviousWeek(weekStart, now, resolvedSchedule.timeZone)
-  const canNext = canGoToNextWeek(weekStart, now, resolvedSchedule.timeZone)
-  const thisWeek = startOfWeek(zonedCalendarDate(now, resolvedSchedule.timeZone))
+  const canPrev = canGoToPreviousWeek(weekStart, now, timeZone)
+  const canNext = canGoToNextWeek(weekStart, now, timeZone)
+  const thisWeek = startOfWeek(zonedCalendarDate(now, timeZone))
   const isCurrentWeek = weekStart.getTime() === thisWeek.getTime()
 
   // Shown only when it differs from the Space's own zone (the module
   // docblock's "secondary hint, never a second version of the grid") — the
   // one place the viewer's own zone appears in this component at all.
   const viewerTimeZone = SYSTEM_TIME_ZONE
-  const showViewerTimeZoneHint = viewerTimeZone !== resolvedSchedule.timeZone
+  const showViewerTimeZoneHint = viewerTimeZone !== timeZone
 
   /** Reports the week `deltaWeeks` away from the one currently shown. */
   const goToWeek = (deltaWeeks: number) => {
@@ -590,13 +582,6 @@ export function CalendarGrid({
   const goToThisWeek = () => {
     if (!isCurrentWeek) onWeekChange?.(thisWeek)
   }
-
-  // Shared across every day column — the row axis's own granularity, per
-  // this file's module docblock. A day whose own `sessionMinutes` differs still
-  // sums to exactly `dayHeight` in normal document flow (see the docblock
-  // for why), so no day column needs its own height.
-  const dayHeight = slotsPerDay * SLOT_ROW_HEIGHT_PX
-  const pxPerMinute = SLOT_ROW_HEIGHT_PX / axisSessionMinutes
 
   return (
     <section className="flex flex-col gap-3" data-testid="calendar">
@@ -636,7 +621,7 @@ export function CalendarGrid({
       </header>
 
       <p className="text-xs text-slate-500" data-testid="calendar-timezone-note">
-        Times shown in {resolvedSchedule.timeZone}
+        Times shown in {timeZone}
         {showViewerTimeZoneHint && ` — your own zone is ${viewerTimeZone}`}
       </p>
 
@@ -669,58 +654,40 @@ export function CalendarGrid({
 
       <div
         data-testid="calendar-grid"
-        data-slots-per-day={slotsPerDay}
         className="flex select-none overflow-x-auto rounded border border-slate-200 bg-white"
       >
-        {/* Time axis. One label per slot, at the shared axis granularity — see
-            the module docblock for why the axis is always the week's finest
-            configured slot size. The spacer height (h-12) matches the day
-            header + notice row below so axis rows stay aligned with every
-            day column. */}
+        {/* Time axis. One label per hour, sized in minutes on the shared
+            pixel scale — a heterogeneous day cannot be labelled per-slot the
+            way a uniform grid could. The spacer height (h-12) matches the
+            day header row below so axis rows stay aligned with every day
+            column. */}
         <div className="sticky left-0 z-10 shrink-0 border-r border-slate-200 bg-white">
           <div className="h-12 border-b border-slate-200" />
-          {Array.from({ length: slotsPerDay }, (_, index) => (
+          {Array.from({ length: 24 }, (_, hour) => (
             <div
-              key={index}
-              style={{ height: SLOT_ROW_HEIGHT_PX }}
+              key={hour}
+              style={{ height: 60 * pxPerMinute }}
               className="flex items-start justify-end px-2 text-[10px] leading-none text-slate-400 tabular-nums"
             >
-              {formatSlotLabel(index, axisConfig)}
+              {formatMinutesLabel(hour * 60)}
             </div>
           ))}
         </div>
 
         {days.map((day, dayIndex) => {
           const dateKey = toDateKey(day)
-          // That day's own resolved schedule — hours, slot size and any
-          // coherence issue — never a Space-wide value (see the module
-          // docblock: `applies_to` can make two days in this same week
-          // disagree about both).
-          const daySchedule = resolvedSchedule.forDate(dateKey)
-          const dayConfig = calendarConfigForDay(resolvedSchedule, dateKey)
-          const daySlotCount = slotsPerDayFor(dayConfig)
-          // A day's own button height relative to the shared axis row: a day
-          // whose sessionMinutes is coarser than the axis renders fewer, taller
-          // buttons that still sum to exactly `dayHeight` in normal document
-          // flow (see the module docblock's "no absolute positioning needed
-          // to make them fit").
-          const daySlotHeight = SLOT_ROW_HEIGHT_PX * (dayConfig.sessionMinutes / axisSessionMinutes)
-          // The minutes between midnight and this day's first grid line, when
-          // its own opening time does not fall on a whole number of sessions
-          // from midnight (`config.ts`'s `gridOffsetMinutes`). Rendered as a
-          // spacer above the buttons so they still sit at the wall-clock time
-          // they name; zero — and so absent — for every day whose anchor
-          // already lands on the grid, which is the ordinary case.
-          const dayOffsetHeight = gridOffsetMinutes(dayConfig) * pxPerMinute
+          const dayProjection = dayProjections[dayIndex]
+          // Not drawn past local midnight — see the module docblock's
+          // "clamped, never wrapped" section.
+          const offeredStarts = dayProjection.offeredStarts.filter(
+            (offered) => offered.startMinutes < MINUTES_PER_DAY,
+          )
           // Midnight on the Space's own clock — see `bookingsByDay` above for
           // why this must not be the environment's midnight.
-          const { start: dayStart } = dayBounds(day, dayConfig)
+          const { start: dayStart } = dayBounds(day, timeZone)
 
           return (
-            <div
-              key={dateKey}
-              className="min-w-24 flex-1 border-r border-slate-200 last:border-r-0"
-            >
+            <div key={dateKey} className="min-w-24 flex-1 border-r border-slate-200 last:border-r-0">
               <div className="border-b border-slate-200">
                 <div
                   className="flex h-8 items-center justify-center text-xs font-medium text-slate-600"
@@ -728,105 +695,152 @@ export function CalendarGrid({
                 >
                   {dayHeaderFormat.format(day)}
                 </div>
-                {/* Advisory only, per this file's module docblock: a
-                    misaligned availability bound never blocks the grid or
-                    replaces it. Always rendered at a fixed height so a day
-                    with no issue does not shift any other column's row
-                    alignment. */}
-                <div
-                  className="flex h-4 items-center justify-center truncate px-1 text-[9px] leading-none text-amber-700"
-                  data-testid={`calendar-notice-${dateKey}`}
-                  title={daySchedule.coherenceIssue ?? undefined}
-                >
-                  {daySchedule.coherenceIssue}
-                </div>
               </div>
 
-              <div className="relative" style={{ height: dayHeight }}>
-                {dayOffsetHeight > 0 && <div style={{ height: dayOffsetHeight }} />}
-                {Array.from({ length: daySlotCount }, (_, index) => {
-                  const blocked = blockedReason(dayIndex, index)
-                  const selected = isInSelection(selection, dateKey, index)
-
+              <div
+                className="relative bg-slate-100"
+                style={{ height: dayHeight }}
+                data-testid={`calendar-day-column-${dateKey}`}
+                data-offered-starts={offeredStarts.length}
+              >
+                {/* Operating intervals — painted over the closed background.
+                    Clipped to [0, 1440]: an interval whose end exceeds it
+                    represents a window past local midnight (the shape
+                    schema permits this) which this grid does not draw. */}
+                {dayProjection.operatingIntervals.map((interval, index) => {
+                  const start = Math.max(0, interval.startMinutes)
+                  const end = Math.min(MINUTES_PER_DAY, interval.endMinutes)
+                  if (end <= start) return null
                   return (
-                    <button
+                    <div
                       key={index}
-                      type="button"
-                      data-testid={slotTestId(day, index)}
-                      data-blocked={blocked ?? undefined}
-                      data-selected={selected || undefined}
-                      aria-pressed={selected}
-                      aria-label={`${dateKey} ${formatSlotLabel(index, dayConfig)}`}
-                      disabled={blocked !== null}
-                      style={{ height: daySlotHeight }}
-                      className={[
-                        'block w-full border-b border-slate-100 text-left',
-                        selected
-                          ? 'bg-sky-500'
-                          : blocked === null
-                            ? 'hover:bg-sky-100'
-                            : 'cursor-not-allowed bg-slate-100',
-                      ].join(' ')}
-                      onPointerDown={() => beginAt(dayIndex, index)}
-                      onPointerOver={() => extendTo(dayIndex, index)}
+                      className="absolute inset-x-0 bg-white"
+                      style={{ top: start * pxPerMinute, height: (end - start) * pxPerMinute }}
                     />
                   )
                 })}
 
-                {bookingsByDay[dayIndex].map(({ booking, start, end }) => {
-                  // Minutes from midnight — the grid always renders the full
-                  // day starting there, whatever the Space's own hours are.
-                  const startMinutes = (start.getTime() - dayStart.getTime()) / MS_PER_MINUTE
-                  const endMinutes = (end.getTime() - dayStart.getTime()) / MS_PER_MINUTE
-                  const top = Math.max(0, startMinutes * pxPerMinute)
-                  const bottom = Math.min(dayHeight, endMinutes * pxPerMinute)
-                  // A booking rendered on a day it did not start on is a
-                  // continuation, and must not duplicate the canonical testid.
-                  const isContinuation = start.getTime() < dayStart.getTime()
-                  const isSelected = booking.id === selectedBookingId
+                {/* Blackouts — greyed over the operating paint, with their
+                    own reason rendered visibly (and as `title`), clipped the
+                    same way. */}
+                {dayProjection.blackoutIntervals.map((interval, index) => {
+                  const start = Math.max(0, interval.startMinutes)
+                  const end = Math.min(MINUTES_PER_DAY, interval.endMinutes)
+                  if (end <= start) return null
+                  return (
+                    <div
+                      key={index}
+                      data-testid={`blackout-${dateKey}-${interval.startMinutes}`}
+                      title={interval.reason}
+                      className="absolute inset-x-0 flex items-center justify-center overflow-hidden bg-slate-400/70 px-1 text-center text-[9px] leading-tight text-slate-800"
+                      style={{ top: start * pxPerMinute, height: (end - start) * pxPerMinute }}
+                    >
+                      {interval.reason}
+                    </div>
+                  )
+                })}
+
+                {/* Offered starts — one button per `offered_starts` entry.
+                    Height is that start's own click unit (the smallest
+                    duration offered there), capped so it never runs past the
+                    next offered start — two blocks with different anchors
+                    can put two starts closer together than either one's
+                    shortest booking, and every offered start must stay
+                    clickable. */}
+                {offeredStarts.map((offered) => {
+                  const startMinutes = offered.startMinutes
+                  const clickDuration = smallestDurationAt(dayProjection, startMinutes) ?? 0
+                  const nextStart = nextStartAfter(dayProjection, startMinutes)
+                  const cappedDuration =
+                    nextStart !== null ? Math.min(clickDuration, nextStart - startMinutes) : clickDuration
+                  const top = startMinutes * pxPerMinute
+                  const height = Math.max(
+                    0,
+                    Math.min(cappedDuration, MINUTES_PER_DAY - startMinutes) * pxPerMinute,
+                  )
+                  const blocked = blockedReason(dayIndex, startMinutes)
+                  const selected = isStartInSelection(selection, dateKey, startMinutes)
 
                   return (
                     <button
-                      key={booking.id}
+                      key={startMinutes}
                       type="button"
-                      data-testid={
-                        isContinuation
-                          ? `${bookingTestId(booking.id)}-continued`
-                          : bookingTestId(booking.id)
-                      }
-                      data-booking-id={booking.id}
-                      data-selected={isSelected || undefined}
-                      data-mine={booking.mine || undefined}
-                      aria-pressed={isSelected}
-                      aria-label={
-                        booking.mine
-                          ? `Booked ${formatClockTime(start, dayConfig.timeZone)} to ${formatClockTime(end, dayConfig.timeZone)}`
-                          : `Booked by someone else, ${formatClockTime(start, dayConfig.timeZone)} to ${formatClockTime(end, dayConfig.timeZone)}`
-                      }
-                      // Interactive as of 1.8, and safe to be: see the note at
-                      // the top of this file on why intercepting these pointer
-                      // events cannot cost the grid a drag. Not-mine bookings
-                      // stay clickable too — selection is how an admin sees
-                      // when it runs before acting on it, and the ownership
-                      // check that actually gates cancelling lives server-side
-                      // and in `CancelPanel`, not here.
+                      data-testid={slotTestId(day, startMinutes)}
+                      data-blocked={blocked ?? undefined}
+                      data-selected={selected || undefined}
+                      aria-pressed={selected}
+                      aria-label={`${dateKey} ${formatMinutesLabel(startMinutes)}`}
+                      disabled={blocked !== null}
+                      style={{ top, height }}
                       className={[
-                        'absolute inset-x-0.5 overflow-hidden rounded px-1 text-left text-[10px] leading-tight text-white',
-                        booking.mine
-                          ? isSelected
-                            ? 'bg-indigo-700 ring-2 ring-indigo-900'
-                            : 'bg-indigo-500 hover:bg-indigo-600'
-                          : isSelected
-                            ? 'bg-slate-600 ring-2 ring-slate-800'
-                            : 'bg-slate-400 hover:bg-slate-500',
+                        'absolute inset-x-0 block border-b border-slate-100 text-left',
+                        selected
+                          ? 'bg-sky-500'
+                          : blocked === null
+                            ? 'hover:bg-sky-100'
+                            : 'cursor-not-allowed bg-transparent',
                       ].join(' ')}
-                      style={{ top, height: Math.max(0, bottom - top) }}
-                      onClick={() => toggleBooking(booking.id)}
-                    >
-                      {formatClockTime(start, dayConfig.timeZone)}
-                    </button>
+                      onPointerDown={() => beginAt(dayIndex, startMinutes)}
+                      onPointerOver={() => extendTo(dayIndex, startMinutes)}
+                    />
                   )
                 })}
+
+                {showBookings &&
+                  bookingsByDay[dayIndex].map(({ booking, start, end }) => {
+                    // Minutes from midnight — the grid always renders the full
+                    // day starting there, whatever the Space's own hours are.
+                    const startMinutes = (start.getTime() - dayStart.getTime()) / MS_PER_MINUTE
+                    const endMinutes = (end.getTime() - dayStart.getTime()) / MS_PER_MINUTE
+                    const top = Math.max(0, startMinutes * pxPerMinute)
+                    const bottom = Math.min(dayHeight, endMinutes * pxPerMinute)
+                    // A booking rendered on a day it did not start on is a
+                    // continuation, and must not duplicate the canonical testid.
+                    const isContinuation = start.getTime() < dayStart.getTime()
+                    const isSelected = booking.id === selectedBookingId
+
+                    return (
+                      <button
+                        key={booking.id}
+                        type="button"
+                        data-testid={
+                          isContinuation
+                            ? `${bookingTestId(booking.id)}-continued`
+                            : bookingTestId(booking.id)
+                        }
+                        data-booking-id={booking.id}
+                        data-selected={isSelected || undefined}
+                        data-mine={booking.mine || undefined}
+                        aria-pressed={isSelected}
+                        aria-label={
+                          booking.mine
+                            ? `Booked ${formatClockTime(start, timeZone)} to ${formatClockTime(end, timeZone)}`
+                            : `Booked by someone else, ${formatClockTime(start, timeZone)} to ${formatClockTime(end, timeZone)}`
+                        }
+                        // Interactive as of 1.8, and safe to be: see the note at
+                        // the top of this file on why intercepting these pointer
+                        // events cannot cost the grid a drag. Not-mine bookings
+                        // stay clickable too — selection is how an admin sees
+                        // when it runs before acting on it, and the ownership
+                        // check that actually gates cancelling lives server-side
+                        // and in `CancelPanel`, not here.
+                        className={[
+                          'absolute inset-x-0.5 overflow-hidden rounded px-1 text-left text-[10px] leading-tight text-white',
+                          booking.mine
+                            ? isSelected
+                              ? 'bg-indigo-700 ring-2 ring-indigo-900'
+                              : 'bg-indigo-500 hover:bg-indigo-600'
+                            : isSelected
+                              ? 'bg-slate-600 ring-2 ring-slate-800'
+                              : 'bg-slate-400 hover:bg-slate-500',
+                        ].join(' ')}
+                        style={{ top, height: Math.max(0, bottom - top) }}
+                        onClick={() => toggleBooking(booking.id)}
+                      >
+                        {formatClockTime(start, timeZone)}
+                      </button>
+                    )
+                  })}
               </div>
             </div>
           )
@@ -835,9 +849,9 @@ export function CalendarGrid({
 
       {selection !== null && selectedInterval !== null && (
         <p className="text-sm text-slate-700" data-testid="calendar-selection">
-          Selected {rangeLength(selection)} slot{rangeLength(selection) === 1 ? '' : 's'}:{' '}
-          {formatZonedDateTime(selectedInterval.start, resolvedSchedule.timeZone)} –{' '}
-          {formatClockTime(selectedInterval.end, resolvedSchedule.timeZone)}
+          Selected {selection.durationMinutes} minute{selection.durationMinutes === 1 ? '' : 's'}:{' '}
+          {formatZonedDateTime(selectedInterval.start, timeZone)} –{' '}
+          {formatClockTime(selectedInterval.end, timeZone)}
         </p>
       )}
     </section>

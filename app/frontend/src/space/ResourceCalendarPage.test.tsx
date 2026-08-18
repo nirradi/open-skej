@@ -15,8 +15,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createMemoryRouter, MemoryRouter, Route, RouterProvider, Routes } from 'react-router-dom'
 
-import { getSpace, getSpaceSchedule, listResourceBookings, listResources } from '../api'
-import type { ApiOk, DayScheduleRead, Resource, Space } from '../api'
+import { getSpace, getSpaceCalendar, listResourceBookings, listResources } from '../api'
+import type { ApiOk, DayProjectionRead, Resource, Space } from '../api'
+import { openDayRead } from '../calendar/fixtures'
 import {
   addDays,
   dayBounds,
@@ -34,7 +35,7 @@ vi.mock('../api', () => ({
   createResourceBooking: vi.fn(),
   cancelResourceBooking: vi.fn(),
   getSpace: vi.fn(),
-  getSpaceSchedule: vi.fn(),
+  getSpaceCalendar: vi.fn(),
   listResources: vi.fn(),
 }))
 
@@ -70,26 +71,22 @@ function ok<T>(data: T): ApiOk<T> {
 }
 
 /**
- * `DayScheduleRead[]` for every date in `[from, from+days)`, all identical —
- * the uniform-week shape most of this suite's tests want from
- * `getSpaceSchedule`, built from whatever window the page actually requests
- * rather than a hardcoded one, so it stays correct whichever week a test
- * navigates to.
+ * `DayProjectionRead[]` for every date in `[from, to]` — **inclusive on both
+ * ends**, which is the endpoint's own convention (`.claude/rules/calendar-
+ * shape.md`) and therefore what a mock standing in for it has to reproduce.
+ *
+ * Built from whatever window the page actually requests rather than a
+ * hardcoded one, so it stays correct whichever week a test navigates to; the
+ * options are passed through to `openDayRead`, so a test that needs a real
+ * operating window states only that.
  */
-function uniformScheduleEntries(
+function calendarEntries(
   from: Date,
-  days: number,
-  overrides: Partial<Omit<DayScheduleRead, 'date'>> = {},
-): DayScheduleRead[] {
-  return Array.from({ length: days }, (_, i) => ({
-    date: toDateKey(addDays(from, i)),
-    session_minutes: null,
-    opens_at: null,
-    closes_at: null,
-    coherence_issue: null,
-    anchor_minutes: null,
-    ...overrides,
-  }))
+  to: Date,
+  options: Parameters<typeof openDayRead>[1] = {},
+): DayProjectionRead[] {
+  const days = Math.round((to.getTime() - from.getTime()) / 86400_000) + 1
+  return Array.from({ length: days }, (_, i) => openDayRead(toDateKey(addDays(from, i)), options))
 }
 
 function renderAt(path: string) {
@@ -150,10 +147,10 @@ async function waitForSettledWeekStart(): Promise<Date> {
 beforeEach(() => {
   vi.mocked(listResourceBookings).mockResolvedValue(ok([]))
   vi.mocked(getSpace).mockResolvedValue(ok(SPACE))
-  // Unrestricted by default — no hours bound, the shipped default slot size.
-  // A test that needs a real window overrides this per case.
-  vi.mocked(getSpaceSchedule).mockImplementation(async (_publicId, from, days) =>
-    ok(uniformScheduleEntries(from, days)),
+  // Open all day by default, 30-minute starts. A test that needs a real
+  // operating window overrides this per case.
+  vi.mocked(getSpaceCalendar).mockImplementation(async (_publicId, from, to) =>
+    ok(calendarEntries(from, to)),
   )
   // Two active Resources by default, so the generic header tests exercise
   // the "there is a real picker to go back to" case; the back-link tests
@@ -279,38 +276,56 @@ describe('scoping the calendar and the panels', () => {
   })
 })
 
-describe("the Space's schedule", () => {
-  it("greys the grid outside the Space's configured hours", async () => {
-    vi.mocked(getSpaceSchedule).mockImplementation(async (_publicId, from, days) =>
-      ok(uniformScheduleEntries(from, days, { session_minutes: 30, opens_at: '09:00:00', closes_at: '17:00:00' })),
+describe("the Space's shape", () => {
+  it('draws only the starts the projection offered, and nothing outside them', async () => {
+    vi.mocked(getSpaceCalendar).mockImplementation(async (_publicId, from, to) =>
+      ok(
+        calendarEntries(from, to, {
+          stepMinutes: 30,
+          durationsMins: [30],
+          openFromMinutes: 9 * 60,
+          openUntilMinutes: 17 * 60,
+        }),
+      ),
     )
-    // Next week's Monday, not this one — this test cares about the
-    // out-of-hours reason, not the past one, and this week's Monday may
-    // already be behind `now` depending on which day the suite runs.
+    // Next week's Monday, not this one — this test cares about what the shape
+    // offers, not about the past, and this week's Monday may already be behind
+    // `now` depending on which day the suite runs.
     const monday = addDays(startOfWeek(new Date()), DAYS_PER_WEEK)
     renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}?week=${toDateKey(monday)}`)
 
-    // 08:30 (index 17) is one slot before the configured 09:00 opening;
-    // 09:00 (index 18) is the first open slot. Waiting on the first covers
-    // the schedule fetch resolving and the grid re-rendering with the
-    // resolved schedule — the second is safe to read synchronously once it
-    // has.
-    await waitFor(() =>
-      expect(screen.getByTestId(slotTestId(monday, 17)).dataset.blocked).toBe('out-of-hours'),
-    )
-    expect(screen.getByTestId(slotTestId(monday, 18)).dataset.blocked).toBeUndefined()
+    // 09:00 is the first offered start. Waiting on it covers the calendar
+    // fetch resolving and the grid re-rendering with the projection — the
+    // rest is safe to read synchronously once it has.
+    await waitFor(() => expect(screen.getByTestId(slotTestId(monday, 9 * 60))).toBeTruthy())
+    // 08:30 is closed time: a painted region with no button in it, not a
+    // disabled button carrying a reason.
+    expect(screen.queryByTestId(slotTestId(monday, 8 * 60 + 30))).toBeNull()
+    // 16:30 is the last start that still ends by 17:00; 17:00 itself is not
+    // offered, since a booking may end at closing but never begin there.
+    expect(screen.getByTestId(slotTestId(monday, 16 * 60 + 30))).toBeTruthy()
+    expect(screen.queryByTestId(slotTestId(monday, 17 * 60))).toBeNull()
   })
 
-  it("shows a notice instead of the grid when the Space's schedule can't be loaded", async () => {
-    // A genuine `/schedule` fetch failure — never a per-day coherence issue,
-    // which is advisory only and rendered inside `CalendarGrid` itself
-    // without replacing the grid (see `CalendarGrid.test.tsx`'s own
-    // "heterogeneous week" suite for that case).
-    vi.mocked(getSpaceSchedule).mockResolvedValue({ outcome: 'failed', message: 'Nope.' })
+  it("shows a notice instead of the grid when the Space's calendar can't be loaded", async () => {
+    // With no projection at all there is nothing honest to draw as a grid:
+    // rendering one anyway would either invent availability or show a week
+    // that looks closed when the truth is that we do not know.
+    vi.mocked(getSpaceCalendar).mockResolvedValue({ outcome: 'failed', message: 'Nope.' })
     renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}`)
 
     await waitFor(() => expect(screen.getByTestId('calendar-config-notice')).toBeTruthy())
     expect(screen.queryByTestId('calendar-grid')).toBeNull()
+  })
+
+  it('asks for the seven dates of the visible week, inclusive on both ends', async () => {
+    const monday = addDays(startOfWeek(new Date()), DAYS_PER_WEEK)
+    renderAt(`/s/${PUBLIC_ID}/resources/${RESOURCE_ID}?week=${toDateKey(monday)}`)
+
+    await waitFor(() => expect(getSpaceCalendar).toHaveBeenCalled())
+    const [, from, to] = vi.mocked(getSpaceCalendar).mock.calls[0]
+    expect(toDateKey(from as Date)).toBe(toDateKey(monday))
+    expect(toDateKey(to as Date)).toBe(toDateKey(addDays(monday, DAYS_PER_WEEK - 1)))
   })
 })
 
@@ -344,13 +359,7 @@ describe('the week in the URL', () => {
    * rather than a carrier's own (environment-zone) `getTime()`.
    */
   const fetchStart = (weekStartCarrier: Date) =>
-    dayBounds(weekStartCarrier, {
-      sessionMinutes: 30,
-      openMinutes: null,
-      closeMinutes: null,
-      timeZone: SPACE.timezone,
-      anchorMinutes: 0,
-    }).start
+    dayBounds(weekStartCarrier, SPACE.timezone).start
 
   it('renders the week named by `?week=`, not the current one', async () => {
     const target = twoWeeksOut()

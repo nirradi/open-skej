@@ -413,44 +413,29 @@ can act on. Paging pushes rather than replaces, so Back walks week by week; the 
 redirect above replaces, and the two differing is what stops Back walking into that redirect.
 
 **The grid's layout is resolved by the server, per date, and the frontend only renders it.**
-`GET /spaces/{public_id}/schedule?from=&days=` (`app.rules_stub.resolve_day_schedule`) reports, for
-every date in the requested range, the session length, the operating window, and the grid anchor a
-booking on that date would actually be judged against — the flat-AND of that date's own
-matching `space_rules` rows (every matching row of a type combines rather than one being picked,
-exactly as the engine itself combines rules), in the Space's own local wall clock.
-`DayScheduleRead.session_minutes` and `anchor_minutes` are plain minute counts, not wall-clock
-`time`s: one names a duration and the other a point measured from local midnight, so neither is
-folded through the minutes-to-wire-time conversion `opens_at` / `closes_at` go through.
-`anchor_minutes` is that date's own resolved opening time, reported rather than left for the client
-to derive from `opens_at` — which rows govern a date is the server's question alone. This exists
-because a rule's `applies_to`
-(`rule-engine.md`) can narrow it to particular weekdays or dates, so a Space no longer has one
-session length or one operating window good for the whole week — a single `CalendarConfig` covering
-the whole week cannot express "Tuesdays are different". The frontend never re-derives this resolution
-itself: a second implementation of "which rules govern this date" in TypeScript is exactly the
-duplication `DEFERRED.md` item 13 warns against, since the engine must stay the sole validator and
-the grid stays advisory. A week's own days can resolve to different session lengths and different
-anchors; the grid's shared time axis renders at the finest session length configured anywhere in the
-visible week, and each day lays out its own rows at its own resolved length, offset to its own
-anchor, and is greyed against its own resolved window, never a Space-wide value. A day whose anchor
-does not agree with the shared axis renders rows that do not sit flush with it — the same
-degradation a day whose session length is coarser than the axis already shows, and reconciling the
-two is deferred with the rest of the week-axis work.
+`GET /spaces/{public_id}/calendar?from=&to=` serves one `DayProjection` per local date — the
+operating intervals in force, the blackouts in force with their reasons, and the exact table of
+starts a booking may begin at with the durations offered at each — projected from that Space's own
+calendar shape (`.claude/rules/calendar-shape.md`, which owns the projection and what the grid
+makes of it). Every value on it is minutes from that date's local midnight, so the grid lays itself
+out in the same unit the availability gate enforces in. The frontend never re-derives any of it: a
+second implementation of "what is bookable on this date" in TypeScript is exactly the duplication
+`DEFERRED.md` item 13 warns against, and it is the specific way the grid was wrong before — it read
+two rule types by name and drew a Space whose hours came from anywhere else as wide open.
 
-The grid always renders the whole day regardless of what any date resolves to — there are no
-compile-time slot or opening-hour constants, because an admin edits the rules behind this endpoint
-and a build-time value could only ever be a stale copy. Hours outside a date's own resolved window
-are **greyed, never absent**: clipping the day to `[opens_at, closes_at)` would leave a booking made
-before the hours were narrowed with no row to sit on, so it would vanish from a calendar it is still
-on. A date with no matching row of a type resolves that field to `null`, meaning the corresponding
-rule is not enforced on that date at all, so it renders the whole day bookable rather than falling
-back to an invented window. The greying is the same advisory line everything else on this screen
-draws: it must never offer what the server would refuse, and it is never what refuses a booking.
+The grid still renders the whole day, and there are no compile-time slot or opening-hour constants:
+an admin edits the shape behind this endpoint and a build-time value could only ever be a stale
+copy. Time outside every operating interval is drawn as **closed rather than absent** — clipping the
+day to the operating region would leave a booking made before the hours were narrowed with no
+canvas to sit on, so it would vanish from a calendar it is still on. A date the projection offers
+nothing on renders closed and offers nothing, which is the honest answer rather than an invented
+window; a date the server never sent renders closed too, because a client that filled that gap in
+would be inventing availability.
 
-**Every clock the grid draws is the Space's own, never the viewer's.** The day columns, the slot
-axis, the greyed hours, and the instant a click submits all resolve through the Space's own
-`timezone` — the same zone the backend resolves `LocalFrame` against (`rule-engine.md`) — via
-`Intl.DateTimeFormat`
+**Every clock the grid draws is the Space's own, never the viewer's.** The day columns, the hour
+axis, the operating and closed regions, and the instant a click submits all resolve through the
+Space's own `timezone` — the same zone the backend resolves `LocalFrame` against
+(`rule-engine.md`) — via `Intl.DateTimeFormat`
 with an explicit zone, asked fresh per date rather than cached as an offset, for the identical reason
 the backend conversion is repeated per date rather than done once at write time. A viewer whose own
 zone differs from the Space's sees that only as a secondary hint alongside the grid, never a second
@@ -459,24 +444,12 @@ what a slot means without translating. A per-viewer clock was considered and rej
 two members read different times for the same slot, and it makes the operating window wrap midnight
 for anyone far enough from the venue.
 
-**A resolved session length longer than the resolved operating window gets an advisory note, never a
-blocked calendar.** A real (non-zero-width) window paired with a session length that exceeds its own
-length means nothing on that date could ever be booked at all, which `resolve_day_schedule` reports
-as that date's own `coherence_issue` rather than refusing to describe the date. The calendar
-surfaces it as a small note in that date's own header and changes nothing else about that day.
-This is the **only** coherence case there is, and a misaligned bound is not another one: the grid is
-anchored on the opening time itself, so an opening time cannot miss a grid built on it, and a closing
-time leaving a tail too short for one more session is ordinary wasted capacity rather than a
-misconfiguration worth reporting.
-
-This check runs server-side, per date, inside
-`resolve_day_schedule` rather than at boot — it once threw at import time, which was right for a
-constant nobody could mistype and is wrong for data an admin typed: one bad Space would white-screen
-the app for everyone, including the members of every other Space. That reasoning still holds one
-level up: a `/schedule` request that fails outright (the server unreachable, not a per-date coherence
-issue) is the one case left that still degrades to a notice replacing the *whole* calendar — with no
-resolved schedule at all there is nothing honest to render as a grid — and even then it is scoped to
-that Space's own calendar, never a page that takes the rest of the app down with it.
+**A calendar request that fails outright degrades to a notice replacing that Space's calendar, and
+nothing wider.** With no projection at all there is nothing honest to render as a grid, so the page
+says so where the grid would be — scoped to that Space's own calendar, never a page that takes the
+rest of the app down with it. This is the same reasoning that moved the old boot-time schedule
+check server-side and per date: one badly configured Space must not white-screen the app for the
+members of every other Space.
 
 **One session seam, two implementations.** `useSession()` returns `{ status: 'loading' |
 'authenticated' | 'unauthenticated', login, logout }` — the shape every route reads, regardless of

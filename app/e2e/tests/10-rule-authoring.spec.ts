@@ -114,7 +114,7 @@ test.describe('writing a rule in English', () => {
       await dragAcrossSlots(page, overCap)
       // The drag really selected all three slots (90 minutes) — otherwise a
       // denial could be caused by something other than duration.
-      await expect(page.getByTestId('calendar-selection')).toContainText('Selected 3 slots')
+      await expect(page.getByTestId('calendar-selection')).toContainText('Selected 90 minutes')
       await page.getByTestId('booking-confirm').click()
 
       const denial = page.getByTestId('booking-denied')
@@ -126,7 +126,7 @@ test.describe('writing a rule in English', () => {
       // real 60-minute enforcement and not merely "every booking refused".
       const atCap = [0, 1].map((offset) => slotId(day, FIRST_SLOT + offset))
       await dragAcrossSlots(page, atCap)
-      await expect(page.getByTestId('calendar-selection')).toContainText('Selected 2 slots')
+      await expect(page.getByTestId('calendar-selection')).toContainText('Selected 60 minutes')
       await page.getByTestId('booking-confirm').click()
       await expect(page.getByTestId('booking-success')).toBeVisible()
       expect(await listAllBookings(api)).toHaveLength(1)
