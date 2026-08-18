@@ -52,9 +52,16 @@ export function clickSelection(day: DayProjection, startMinutes: number): Select
  * that both (a) ends no later than the drag head's own end — `headStartMinutes`
  * plus the smallest duration offered *there* — and (b) is free of obstruction
  * across its whole span, per the caller's `isFree` predicate (bookings, past,
- * horizon). Falls back to `clickSelection` at the earlier start when no wider
- * duration clears both checks, so a drag can never propose *less* than a plain
- * click at the same start would.
+ * horizon).
+ *
+ * When nothing at the earlier start clears both checks it falls back to the
+ * **anchor's** own click unit, not the earlier start's — and only while that
+ * unit is itself free. The two differ exactly when a drag runs *backwards*
+ * onto an obstructed start: falling back to the earlier start there would
+ * propose a selection over minutes `isFree` has just refused (already booked,
+ * already past), which is the one thing a drag must never construct. Keeping
+ * the anchor instead reproduces what the old slot-index `rangeBetween` did by
+ * walking outward from the anchor and stopping before the obstruction.
  */
 export function dragSelection(
   day: DayProjection,
@@ -65,8 +72,16 @@ export function dragSelection(
   const earlier = Math.min(anchorStartMinutes, headStartMinutes)
   const later = Math.max(anchorStartMinutes, headStartMinutes)
 
+  /** The anchor's own click unit, kept only while it is still unobstructed. */
+  const anchorFallback = (): Selection | null => {
+    const proposed = clickSelection(day, anchorStartMinutes)
+    if (proposed === null) return null
+    const end = proposed.startMinutes + proposed.durationMinutes
+    return isFree(proposed.startMinutes, end) ? proposed : null
+  }
+
   const headDuration = smallestDurationAt(day, later)
-  if (headDuration === null) return clickSelection(day, earlier)
+  if (headDuration === null) return anchorFallback()
   const headEnd = later + headDuration
 
   const durations = durationsAt(day, earlier)
@@ -78,7 +93,7 @@ export function dragSelection(
     if (best === null || duration > best) best = duration
   }
 
-  if (best === null) return clickSelection(day, earlier)
+  if (best === null) return anchorFallback()
   return { dateKey: day.dateKey, startMinutes: earlier, durationMinutes: best }
 }
 

@@ -122,6 +122,24 @@ describe('dragSelection', () => {
   it('returns null when the earlier start is not offered at all', () => {
     expect(dragSelection(TEACHER_DAY, 19 * 60 + 20, 19 * 60 + 40, allFree)).toBeNull()
   })
+
+  it('dragging backwards onto an obstructed start keeps the anchor, never the obstruction', () => {
+    // Anchor 18:00, dragged back over 17:00, which is already booked. The
+    // earlier start offers nothing free, so the selection stays on the
+    // anchor's own click unit rather than proposing booked minutes — what
+    // the old index-walking `rangeBetween` did by stopping at the obstruction.
+    const isFree = (start: number) => start >= 18 * 60
+    expect(dragSelection(MUSIC_ROOM_DAY, 18 * 60, 17 * 60, isFree)).toEqual({
+      dateKey: '2026-08-18',
+      startMinutes: 18 * 60,
+      durationMinutes: 60,
+    })
+  })
+
+  it('proposes nothing when the anchor itself is obstructed', () => {
+    const nothingFree = () => false
+    expect(dragSelection(MUSIC_ROOM_DAY, 18 * 60, 17 * 60, nothingFree)).toBeNull()
+  })
 })
 
 describe('isStartInSelection', () => {
