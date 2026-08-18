@@ -782,13 +782,20 @@ export function CalendarGrid({
                       aria-label={`${dateKey} ${formatMinutesLabel(startMinutes)}`}
                       disabled={blocked !== null}
                       style={{ top, height }}
+                      // A blocked start is greyed rather than left
+                      // transparent: it sits *inside* an operating region, so
+                      // the white paint underneath would otherwise read as
+                      // "open" for time that has already passed or is
+                      // already booked. Grey is the same colour closed time
+                      // carries, which is the honest reading — this minute is
+                      // not available, whatever the venue's hours say.
                       className={[
                         'absolute inset-x-0 block border-b border-slate-100 text-left',
                         selected
                           ? 'bg-sky-500'
                           : blocked === null
                             ? 'hover:bg-sky-100'
-                            : 'cursor-not-allowed bg-transparent',
+                            : 'cursor-not-allowed bg-slate-100',
                       ].join(' ')}
                       onPointerDown={() => beginAt(dayIndex, startMinutes)}
                       onPointerOver={() => extendTo(dayIndex, startMinutes)}
