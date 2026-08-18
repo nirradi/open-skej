@@ -456,6 +456,40 @@ export function berlinWeekdayMondayFirst(instant: Date): number {
 }
 
 /**
+ * Waits until the grid is drawn from the server's own answer rather than from
+ * the closed fallback it starts on.
+ *
+ * The grid draws one week from `GET /spaces/{public_id}/calendar` **and from
+ * nothing else** (`.claude/rules/calendar-shape.md`), so until that answer
+ * arrives — and again for as long as a week change or a zone change leaves the
+ * one in hand stale — every date renders closed, offers no start at all, and
+ * lays its column out at the fallback pixel scale. `ResourceCalendarPage`
+ * bootstraps on the viewer's zone until the Space's own arrives with its
+ * header, and that swap re-keys the projection request, so a freshly opened
+ * calendar genuinely settles twice: once against the placeholder, once against
+ * `Europe/Berlin`.
+ *
+ * Waiting on `calendar-loading` alone used to be enough and is not any more,
+ * which is the whole reason this exists. That element reports the *bookings*
+ * fetch and is absent in the gap between the two settles, so a helper waiting
+ * only for it could return while the grid was still closed — and every pixel a
+ * spec measured then moved under it when the real projection landed, which a
+ * real mouse spec reads as a click on the neighbouring start. Three signals
+ * together pin the final state: the timezone note naming Space A's own zone
+ * (so the projection in hand is the one keyed to it and not the placeholder),
+ * a day column reporting its full table of offered starts (so a projection is
+ * rendered at all), and no bookings fetch outstanding.
+ */
+export async function waitForCalendarSettled(page: Page): Promise<void> {
+  await expect(page.getByTestId('calendar-timezone-note')).toContainText(SANDBOX_SPACE_A_TIMEZONE)
+  await expect(page.locator('[data-testid^="calendar-column-"]').first()).toHaveAttribute(
+    'data-offered-starts',
+    String(SLOTS_PER_DAY),
+  )
+  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+}
+
+/**
  * Signs in as the seeded **member** and navigates to Space A's calendar for
  * the same Resource every other fixture in this file discovers — a member
  * clicking through from `/s/{public_id}` lands here, so this is the UI-driven
@@ -474,6 +508,7 @@ export async function gotoResourceCalendar(
   await signInAsSandbox(page, SANDBOX_MEMBER_SUB)
   await page.goto(`/s/${publicId}/resources/${resourceId}`)
   await expect(page.getByTestId('calendar-grid')).toBeVisible()
+  await waitForCalendarSettled(page)
 
   return { publicId, resourceId }
 }
@@ -494,10 +529,11 @@ export async function gotoNextWeek(page: Page): Promise<string[]> {
   await expect(next).toBeEnabled()
   await next.click()
 
-  // The grid re-fetches on navigation and disables every slot until the new
-  // week's bookings are known, so waiting for the loader to clear is what makes
-  // the first click land on an enabled button.
-  await expect(page.getByTestId('calendar-loading')).toHaveCount(0)
+  // The grid re-fetches both its projection and the week's bookings on
+  // navigation, and draws a closed week offering nothing until the first of
+  // those lands — so waiting for the whole grid to settle is what makes the
+  // first click land on an enabled button that is still where it was measured.
+  await waitForCalendarSettled(page)
 
   return renderedDateKeys(page)
 }
