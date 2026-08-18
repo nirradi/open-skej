@@ -38,7 +38,7 @@ test('the calendar renders a grid matching the shape the Space holds', async ({ 
 
   // Each day column publishes how many starts it was offered; assert it agrees
   // with the shape the sandbox seed wrote.
-  await expect(page.getByTestId(`calendar-day-column-${firstDay}`)).toHaveAttribute(
+  await expect(page.getByTestId(`calendar-column-${firstDay}`)).toHaveAttribute(
     'data-offered-starts',
     String(SLOTS_PER_DAY),
   )

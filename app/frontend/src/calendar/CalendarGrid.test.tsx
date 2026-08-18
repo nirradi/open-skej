@@ -239,7 +239,7 @@ function selectedStarts(dayOffset: number): number[] {
 }
 
 function startButtons(dayOffset: number): HTMLButtonElement[] {
-  const column = screen.getByTestId(`calendar-day-column-${toDateKey(dayFor(dayOffset))}`)
+  const column = screen.getByTestId(`calendar-column-${toDateKey(dayFor(dayOffset))}`)
   // Scoped to the start buttons: a booking block in the same column also
   // carries `data-selected`, and it is a different kind of selection.
   return Array.from(column.querySelectorAll<HTMLButtonElement>('button[data-testid^="slot-"]'))
@@ -272,7 +272,7 @@ describe('the grid is drawn from the projection', () => {
   it('reports each column’s own count of offered starts', async () => {
     await renderGrid({ week: weekWith(4, teacherDay) })
 
-    const column = screen.getByTestId(`calendar-day-column-${toDateKey(dayFor(4))}`)
+    const column = screen.getByTestId(`calendar-column-${toDateKey(dayFor(4))}`)
     expect(column.dataset.offeredStarts).toBe('5')
   })
 
@@ -298,7 +298,7 @@ describe('the grid is drawn from the projection', () => {
 
     expect(offeredStarts(3)).toEqual([])
     expect(
-      screen.getByTestId(`calendar-day-column-${toDateKey(dayFor(3))}`).dataset.offeredStarts,
+      screen.getByTestId(`calendar-column-${toDateKey(dayFor(3))}`).dataset.offeredStarts,
     ).toBe('0')
   })
 
@@ -553,7 +553,7 @@ describe('a window past local midnight', () => {
   it('clips the operating region at the day boundary rather than overflowing it', async () => {
     await renderGrid({ week })
 
-    const column = screen.getByTestId(`calendar-day-column-${dateKey}`)
+    const column = screen.getByTestId(`calendar-column-${dateKey}`)
     const height = parseFloat(column.style.height)
     for (const region of Array.from(column.querySelectorAll<HTMLElement>('div[style]'))) {
       const bottom = parseFloat(region.style.top) + parseFloat(region.style.height)

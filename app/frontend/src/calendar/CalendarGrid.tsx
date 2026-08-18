@@ -707,10 +707,15 @@ export function CalendarGrid({
                 </div>
               </div>
 
+              {/* `calendar-column-`, deliberately *not* `calendar-day-column-`:
+                  the E2E suite addresses the seven day headers above by the
+                  `calendar-day-` prefix (`fixtures.ts`'s `renderedDateKeys`),
+                  and an id that merely extends that prefix is counted as an
+                  eighth through fourteenth header rather than as a column. */}
               <div
                 className="relative bg-slate-100"
                 style={{ height: dayHeight }}
-                data-testid={`calendar-day-column-${dateKey}`}
+                data-testid={`calendar-column-${dateKey}`}
                 data-offered-starts={offeredStarts.length}
               >
                 {/* Operating intervals — painted over the closed background.

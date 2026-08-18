@@ -355,6 +355,11 @@ export async function signInAsSandbox(page: Page, sub: string = SANDBOX_OWNER_SU
  * what today is — and that disagreement would show up as a test that passes in
  * CI and fails in Tel Aviv. Asking the page which days it drew removes the
  * question.
+ *
+ * The selector is a **prefix** match, so nothing else in the grid may carry a
+ * testid beginning `calendar-day-`. The day columns are `calendar-column-`
+ * for exactly that reason — an id extending this prefix reads as an eighth
+ * header here, and the count below is what catches it.
  */
 export async function renderedDateKeys(page: Page): Promise<string[]> {
   const headers = page.locator('[data-testid^="calendar-day-"]')
