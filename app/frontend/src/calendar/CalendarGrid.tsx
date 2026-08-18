@@ -238,6 +238,18 @@ type LoadState =
 /** Copy for a fetch that failed in a way the user cannot act on. */
 const LOAD_ERROR_FALLBACK = "We couldn't load this week's bookings."
 
+/**
+ * The height of the day-header row, shared by the header itself and the time
+ * axis's own spacer above the hour labels.
+ *
+ * One constant rather than the same class written twice: the axis and the day
+ * columns sit side by side in normal flow, so the moment those two heights
+ * disagree every hour label is offset from the minutes it names — a
+ * misalignment jsdom cannot observe (it performs no layout) and no test here
+ * can catch.
+ */
+const HEADER_ROW_HEIGHT_CLASS = 'h-8'
+
 /** Where a drag started: one offered start, pinned to the day it began on. */
 interface Anchor {
   dateKey: string
@@ -658,11 +670,9 @@ export function CalendarGrid({
       >
         {/* Time axis. One label per hour, sized in minutes on the shared
             pixel scale — a heterogeneous day cannot be labelled per-slot the
-            way a uniform grid could. The spacer height (h-12) matches the
-            day header row below so axis rows stay aligned with every day
-            column. */}
+            way a uniform grid could. */}
         <div className="sticky left-0 z-10 shrink-0 border-r border-slate-200 bg-white">
-          <div className="h-12 border-b border-slate-200" />
+          <div className={`${HEADER_ROW_HEIGHT_CLASS} border-b border-slate-200`} />
           {Array.from({ length: 24 }, (_, hour) => (
             <div
               key={hour}
@@ -690,7 +700,7 @@ export function CalendarGrid({
             <div key={dateKey} className="min-w-24 flex-1 border-r border-slate-200 last:border-r-0">
               <div className="border-b border-slate-200">
                 <div
-                  className="flex h-8 items-center justify-center text-xs font-medium text-slate-600"
+                  className={`flex ${HEADER_ROW_HEIGHT_CLASS} items-center justify-center text-xs font-medium text-slate-600`}
                   data-testid={`calendar-day-${dateKey}`}
                 >
                   {dayHeaderFormat.format(day)}
