@@ -278,12 +278,12 @@ class SpaceRule(Base):
     Rule configuration lives here rather than as fixed columns on ``Space``,
     one row per *instance* of a rule type declared in
     ``rules.registry.REGISTRY`` — so a Space can hold any number of
-    instances of a type ("Mon/Wed/Fri 10-15" and "Tue/Thu 8-12" as two
-    ``availability_hours`` rows) instead of one fixed value for the whole
-    venue.
+    instances of a type (a tighter ``max_duration`` on weekday evenings and a
+    looser one on a quiet Sunday morning, as two rows) instead of one fixed
+    value for the whole venue.
 
-    ``rule_type`` is the registry's **stable string id** (``availability_hours``,
-    ``max_duration``, …) — never a Python class name, so renaming the class a
+    ``rule_type`` is the registry's **stable string id** (``max_duration``,
+    ``max_bookings_per_week``, …) — never a Python class name, so renaming the class a
     type happens to be implemented by cannot silently orphan every row that
     named it. ``params`` is the JSONB blob ``RuleType.build`` validates and
     reads; its shape is entirely owned by the registered type, which is what

@@ -32,34 +32,35 @@ run time:
 
 Configuration lives on the **Space**, not on its Resources: a Resource is one
 of N indistinguishable courts and carries no config of its own. The timezone
-is a column; operating hours, slot interval and every rule-engine limit are
-``space_rules`` rows, planted here directly rather than through the rules API,
-since this seed plants fixture state for something else to exercise and is not
-itself an exercise of that API. So the two Spaces below differ from each other
-in their canon, and each Space's own Resources are deliberately identical
-siblings.
+is a column; the operating hours and the booking lengths a venue offers are
+its **calendar shape** (``.claude/rules/calendar-shape.md``); every
+rule-engine limit is a ``space_rules`` row. Both are planted here directly
+rather than through their APIs, since this seed plants fixture state for
+something else to exercise and is not itself an exercise of those APIs. So
+the two Spaces below differ from each other in both their shape and their
+canon, and each Space's own Resources are deliberately identical siblings.
 
 * ``SPACE_A_NAME`` — the Playwright target (``app/e2e``). Zone
-  ``SPACE_A_TIMEZONE`` (``Europe/Berlin``) but **no availability hours** — no
-  ``availability_hours`` row at all: the E2E suite books early-morning
-  slots and asserts a copy-contract denial on duration alone
-  (``03-sad-path``), so this Space's canon is kept to exactly what that suite
-  exercises — ``max_duration_minutes`` matching the suite's hardcoded
-  ``MAX_BOOKING_MINUTES`` and a generous ``booking_horizon_days`` — and
-  nothing that could deny a booking for a different reason (an availability
-  window, a frequency cap) and break the suite's assumption that duration is
-  the only thing standing between it and success. Owner + admin + member. Two
-  identical Resources (courts) sharing the one Space-level schedule. Its live
-  shape (task 10.3) mirrors that same grid — open every day, stepped by
-  ``SPACE_A_SESSION_MINUTES``, offering every multiple of it well past
-  ``SPACE_A_MAX_DURATION_MINUTES`` — so the availability gate never refuses
-  ahead of ``max_duration``; ``DEFAULT_SHAPE``'s own 60-minutes-only grid
-  would.
+  ``SPACE_A_TIMEZONE`` (``Europe/Berlin``) and a **deliberately permissive
+  shape**: open every day 00:00-24:00, stepped by ``SPACE_A_STEP_MINUTES``
+  and offering every multiple of it well past
+  ``SPACE_A_MAX_DURATION_MINUTES``. The E2E suite books early-morning slots
+  and asserts a copy-contract denial on duration alone (``03-sad-path``), so
+  neither the shape nor any rule here may refuse for a different reason: the
+  canon is kept to exactly what that suite exercises —
+  ``max_duration_minutes`` matching the suite's hardcoded
+  ``MAX_BOOKING_MINUTES`` and a generous ``booking_horizon_days`` — and the
+  shape offers a window and a grid nothing the suite selects can fall
+  outside. ``DEFAULT_SHAPE``'s own 60-minutes-only grid would not do; a
+  blackout window or a narrower window would not either, which is why the
+  one this seed demonstrates lands on Space B. Owner + admin + member. Two
+  identical Resources (courts) sharing the one Space-level shape.
 * ``SPACE_B_NAME`` — the manual-QA target for everything Space A deliberately
   does not exercise. Zone ``SPACE_B_TIMEZONE`` (``Australia/Sydney``, not
-  UTC and not Space A's own zone) with real ``opens_at_minutes``/
-  ``closes_at_minutes``, so a non-UTC venue's ordinary hours are visible in
-  manual QA; a ``max_duration_minutes`` of its own; and a
+  UTC and not Space A's own zone) with a shape carrying real operating hours
+  **and a daily blackout window**, so a non-UTC venue's ordinary structure —
+  and the fact that a shape can close part of a day it is otherwise open on
+  — is visible in manual QA; a ``max_duration_minutes`` of its own; and a
   ``max_bookings_per_week`` cap, so
   Space-wide counting across a user's bookings is observable too. Two
   Resources — the frequency cap is Space-wide, and demonstrating that
@@ -145,20 +146,16 @@ PENDING_INVITEE_EMAIL = "invitee@sandbox.open-skej.local"
 SPACE_A_NAME = "Sandbox Space A (Berlin)"
 SPACE_A_DESCRIPTION = "Owner + admin + member; two identical courts on one schedule."
 SPACE_A_TIMEZONE = "Europe/Berlin"
-# No availability window at all — there is no constant to state that, because
-# "not enforced" is the *absence* of an `availability_hours` row and `run`
-# below deletes the one `create_space` seeds. `app/e2e/tests/03-sad-path.spec.
-# ts` books early-morning slots and must see a denial for duration alone,
-# never for an hour outside a UTC-resolved window.
 # A copy-contract constant, like `SPACE_A_MAX_DURATION_MINUTES` below: the E2E
 # suite drags across slots and asserts the resulting duration in words
-# ("30 minutes", "2 hours 30 minutes"), so the grid's session length is part of what
-# those specs assert and not an implementation detail they tolerate. It was 60 —
-# the service's default for a Space that never sets one — which was invisible
-# while the grid laid itself out from a hardcoded frontend constant. Task 5.9
-# made the grid follow the Space, which turned that default into five failing
-# specs. Stated explicitly here so the two sides agree on purpose.
-SPACE_A_SESSION_MINUTES = 30
+# ("30 minutes", "2 hours 30 minutes"), so the step of the grid Space A's shape
+# draws is part of what those specs assert and not an implementation detail
+# they tolerate. It is the smallest entry in `SPACE_A_SHAPE`'s own
+# `allowed_durations_mins`, which is what the projection anchors and steps the
+# grid by (`.claude/rules/calendar-shape.md`, "The projection"). Stated as a
+# constant here, rather than buried in the shape's JSON literal, so the two
+# sides of the contract stay visible to each other.
+SPACE_A_STEP_MINUTES = 30
 # Mirrors `MAX_BOOKING_MINUTES` in `03-sad-path.spec.ts` — a copy-contract
 # constant on both sides, not a coincidence.
 SPACE_A_MAX_DURATION_MINUTES = 120
@@ -177,19 +174,21 @@ SPACE_A_BOOKING_HORIZON_DAYS = 60
 # expects to succeed, for a reason it never asserts on. (A consecutive-
 # duration cap is not a frequency cap in that sense — see above.)
 
-# Task 10.3's availability gate (`.claude/rules/calendar-shape.md`) now runs
-# ahead of the rule engine, so `DEFAULT_SHAPE` — open all day, but offering
-# only 60-minute bookings — is no longer permissive enough for a Space whose
-# own canon is deliberately duration-only: `03-sad-path.spec.ts` drags up to
-# `SLOTS_TO_EXCEED_MAX` 30-minute slots (150 minutes) precisely so it can
-# reach `max_duration` and be refused *there*, with that rule's own copy —
-# not by the shape offering nothing longer than an hour. This document keeps
-# the grid identical to the one `session_length` already drew (every day,
-# anchored at local midnight, stepped by `SPACE_A_SESSION_MINUTES`) and
-# offers every multiple of it up to 240 minutes, comfortably past every
-# duration this seed's own consumers select, so the shape is never the rule
-# that answers and the engine stays exactly as exercised as before this
-# gate existed.
+# Space A's shape is deliberately the most permissive document this seed
+# writes, and must stay that way. The availability gate
+# (`.claude/rules/calendar-shape.md`) runs ahead of the rule engine, so
+# `DEFAULT_SHAPE` — open all day, but offering only 60-minute bookings — is
+# not permissive enough for a Space whose own canon is deliberately
+# duration-only: `03-sad-path.spec.ts` drags up to `SLOTS_TO_EXCEED_MAX`
+# 30-minute slots (150 minutes) precisely so it can reach `max_duration` and
+# be refused *there*, with that rule's own copy — not by the shape offering
+# nothing longer than an hour. Open every day 00:00-24:00, stepped by
+# `SPACE_A_STEP_MINUTES` and offering every multiple of it up to 240 minutes,
+# comfortably past every duration this seed's own consumers select, so the
+# shape is never what answers and the engine stays exactly as exercised as it
+# was when `availability_hours` and `session_length` still existed.
+# `09-space-rules.spec.ts` books at 09:00, 10:00, 14:00 and 17:00 against this
+# Space, all of which this window and this grid offer.
 SPACE_A_SHAPE = {
     "version": 1,
     "operating_blocks": [
@@ -197,7 +196,7 @@ SPACE_A_SHAPE = {
             "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
             "start_time": "00:00",
             "end_time": "24:00",
-            "allowed_durations_mins": [30, 60, 90, 120, 150, 180, 210, 240],
+            "allowed_durations_mins": [SPACE_A_STEP_MINUTES * multiple for multiple in range(1, 9)],
         }
     ],
     "blackout_windows": [],
@@ -216,41 +215,60 @@ SPACE_B_DESCRIPTION = "Owned by the same owner as Space A; nobody else is in it.
 SPACE_B_TIMEZONE = "Australia/Sydney"
 # Ordinary hours for a tennis club — and, deliberately, the exact configuration
 # that made this Space unbookable before task 5.13: Sydney sits at UTC+10
-# (AEST) / UTC+11 (AEDT), both ahead of an opens_at this early, so resolving
-# "09:00-21:00 local" to UTC used to push opening back onto the *previous* UTC
-# calendar day while closing stayed on the same one — an inverted UTC pair
-# that `rules.canon.AvailabilityHoursRule` once had to read as a window
-# crossing a UTC calendar day rather than a broken config (`DEFERRED.md`
-# items 16 and 17). Task 5.1 found the bug by running this seed at 09:00-17:00
-# against the live API and moved it to 11:00-21:00 purely to work around it
-# (PR #53) — that traded away the one fixture that would catch a regression
-# here, so 5.13 moved it back. Task 7.10 removed the UTC resolution and the
-# inversion reasoning entirely — the rule now reads
-# ``opens_at_minutes``/``closes_at_minutes`` straight off the Space's own
-# local clock — but this Space's hours stay exactly as they were, since
-# they were never the part that was fragile.
-SPACE_B_OPENS_AT_MINUTES = 9 * 60
-SPACE_B_CLOSES_AT_MINUTES = 21 * 60
-SPACE_B_SESSION_MINUTES = 30
+# (AEST) / UTC+11 (AEDT), both ahead of an opening time this early, so
+# resolving "09:00-21:00 local" to UTC used to push opening back onto the
+# *previous* UTC calendar day while closing stayed on the same one — an
+# inverted UTC pair the retired `availability_hours` rule once had to read as
+# a window crossing a UTC calendar day rather than as a broken config
+# (`DEFERRED.md` items 16 and 17). Task 5.1 found the bug by running this seed
+# at 09:00-17:00 against the live API and moved it to 11:00-21:00 purely to
+# work around it (PR #53) — that traded away the one fixture that would catch
+# a regression here, so 5.13 moved it back. These hours are now the shape's,
+# not a rule's (task 10.5), and the shape holds local wall clock throughout
+# with the Space's own zone converting once per date at the gate — but they
+# stay exactly as they were, since they were never the part that was fragile.
+SPACE_B_OPENS_AT = "09:00"
+SPACE_B_CLOSES_AT = "21:00"
+SPACE_B_STEP_MINUTES = 30
 SPACE_B_MAX_DURATION_MINUTES = 90
 SPACE_B_MAX_BOOKINGS_PER_WEEK = 3
+# The daily maintenance break that makes this seed demonstrate a *blackout*,
+# not merely an operating window. It lands on Space B and never on Space A:
+# Space A is the Playwright target and every one of its specs assumes nothing
+# but a rule can refuse a booking (see `SPACE_A_SHAPE` above), whereas Space B
+# is the manual-QA Space no spec books against, so a hole in the middle of its
+# day costs nothing and is the one place the feature is visible by hand. The
+# `reason` is member-facing copy — the grid renders it over the greyed region
+# and `permits` names it in a denial — so it reads as something a member would
+# understand rather than as a field name.
+SPACE_B_BLACKOUT_START = "13:00"
+SPACE_B_BLACKOUT_END = "13:30"
+SPACE_B_BLACKOUT_REASON = "Court maintenance"
 # Mirrors Space A's own shape above, at Space B's own hours and step: open
-# `SPACE_B_OPENS_AT_MINUTES`-`SPACE_B_CLOSES_AT_MINUTES` daily, stepped by
-# `SPACE_B_SESSION_MINUTES`, offering every multiple of it up to 180 minutes
-# — past `SPACE_B_MAX_DURATION_MINUTES` (90) with the same margin Space A's
-# own shape keeps, so `max_duration` stays the rule that arbitrates a
-# too-long booking in manual QA rather than the shape.
+# `SPACE_B_OPENS_AT`-`SPACE_B_CLOSES_AT` daily, stepped by
+# `SPACE_B_STEP_MINUTES`, offering every multiple of it up to 180 minutes —
+# past `SPACE_B_MAX_DURATION_MINUTES` (90) with the same margin Space A's own
+# shape keeps, so `max_duration` stays the rule that arbitrates a too-long
+# booking in manual QA rather than the shape. The blackout is the deliberate
+# exception to that "the shape never answers" posture, and it is why this
+# document belongs to Space B.
 SPACE_B_SHAPE = {
     "version": 1,
     "operating_blocks": [
         {
             "days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"],
-            "start_time": "09:00",
-            "end_time": "21:00",
-            "allowed_durations_mins": [30, 60, 90, 120, 150, 180],
+            "start_time": SPACE_B_OPENS_AT,
+            "end_time": SPACE_B_CLOSES_AT,
+            "allowed_durations_mins": [SPACE_B_STEP_MINUTES * multiple for multiple in range(1, 7)],
         }
     ],
-    "blackout_windows": [],
+    "blackout_windows": [
+        {
+            "start_time": SPACE_B_BLACKOUT_START,
+            "end_time": SPACE_B_BLACKOUT_END,
+            "reason": SPACE_B_BLACKOUT_REASON,
+        }
+    ],
 }
 # Its first Resource is the one `create_space` auto-creates for every fresh
 # Space (`service.FIRST_RESOURCE_NAME`); a second, identical sibling is added
@@ -403,10 +421,12 @@ def _seed_future_bookings(session: Session, resource: Resource, member: User) ->
 
 def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> None:
     """Set this Space's one unscoped instance of ``rule_type`` to ``params``,
-    updating the row ``create_space`` seeded (``availability_hours`` and
-    ``session_length`` both start with one) or adding a new one.
+    updating an existing row or adding a new one.
 
-    Every Space this seed creates is freshly built, so "the" unscoped
+    ``create_space`` seeds no ``space_rules`` row at all (task 10.5), so in
+    practice every call here inserts; the update branch stays because this
+    helper is called more than once per Space and must be idempotent under a
+    re-run. Every Space this seed creates is freshly built, so "the" unscoped
     instance is unambiguous here in a way a real admin's edit — through the
     rules API, never through this helper — is not.
     """
@@ -421,20 +441,6 @@ def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> N
         session.add(SpaceRule(space_id=space.id, rule_type=rule_type, params=params))
     else:
         existing.params = params
-    session.commit()
-
-
-def _clear_rule(session: Session, space: Space, rule_type: str) -> None:
-    """Delete this Space's unscoped instance of ``rule_type``, if any —
-    "not enforced" is the absence of a row, never one with empty params.
-    """
-    session.execute(
-        delete(SpaceRule).where(
-            SpaceRule.space_id == space.id,
-            SpaceRule.rule_type == rule_type,
-            SpaceRule.applies_to.is_(None),
-        )
-    )
     session.commit()
 
 
@@ -488,17 +494,15 @@ def run(session: Session) -> None:
     # returns; the canon is configured as `space_rules` rows directly rather
     # than through the rules API, since this seed is not exercising that API,
     # it is planting fixture state for something else to exercise.
-    # `create_space` seeds a default `availability_hours` row; it is deleted
-    # here rather than kept, since Space A deliberately has **no** availability
-    # hours, so `03-sad-path.spec.ts` can assert a duration denial with
+    # `create_space` seeds no rule row and one live `DEFAULT_SHAPE` row; the
+    # shape is overwritten below with Space A's own deliberately permissive
+    # document, so `03-sad-path.spec.ts` can assert a duration denial with
     # nothing else able to refuse first.
     space_a = service.create_space(
         session, owner, name=SPACE_A_NAME, description=SPACE_A_DESCRIPTION
     )
     space_a.timezone = SPACE_A_TIMEZONE
     session.commit()
-    _clear_rule(session, space_a, "availability_hours")
-    _set_rule(session, space_a, "session_length", {"session_minutes": SPACE_A_SESSION_MINUTES})
     _set_rule(
         session,
         space_a,
@@ -538,16 +542,6 @@ def run(session: Session) -> None:
     )
     space_b.timezone = SPACE_B_TIMEZONE
     session.commit()
-    _set_rule(
-        session,
-        space_b,
-        "availability_hours",
-        {
-            "opens_at_minutes": SPACE_B_OPENS_AT_MINUTES,
-            "closes_at_minutes": SPACE_B_CLOSES_AT_MINUTES,
-        },
-    )
-    _set_rule(session, space_b, "session_length", {"session_minutes": SPACE_B_SESSION_MINUTES})
     _set_rule(
         session,
         space_b,

@@ -664,12 +664,8 @@ def test_a_window_that_is_not_utc_is_refused(rule_type, start, end):
     "rule_type", [MaxBookingsPerDayRule, MaxBookingsPerWeekRule, MaxBookingsPerMonthRule]
 )
 def test_an_inverted_or_empty_window_is_refused(rule_type):
-    """Unlike availability hours, an inverted window here means nothing and is a caller bug.
-
-    ``AvailabilityHoursRule`` reads an inverted pair as "this window crosses a UTC day" (task 5.13),
-    so it is worth saying explicitly that these two rules do not: a counting window is a pair of
-    absolute instants, not a recurring daily one, and there is no wrap for it to describe.
-    """
+    """An inverted window here means nothing and is a caller bug: a counting window is a pair of
+    absolute instants, not a recurring daily one, and there is no wrap for it to describe."""
     instant = datetime(2026, 7, 13, tzinfo=timezone.utc)
     with pytest.raises(ValueError):
         rule_type(1, window_start=instant, window_end=instant - timedelta(days=1))

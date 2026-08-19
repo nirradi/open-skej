@@ -54,43 +54,9 @@ from app.rules_stub import SpaceRuleConfig, SpaceRuleRow
 # Resource even though it could.
 FIRST_RESOURCE_NAME = "Main"
 
-# The default operating hours and session length a freshly created Space gets, so
-# it is immediately bookable rather than requiring an admin to visit the config
-# UI before anyone can book. Minutes from local midnight, matching
-# `availability_hours`'s stored shape (`rules/rules/registry.py`) — not a
-# `time`, since the rule this seeds for reads two plain integers off
-# `context.local` and nothing here converts them.
-_DEFAULT_OPENS_AT_MINUTES = 9 * 60
-_DEFAULT_CLOSES_AT_MINUTES = 17 * 60
-_DEFAULT_SESSION_MINUTES = 60
-
 
 class SpaceArchivedError(Exception):
     """A mutation was attempted on a Space that has been archived."""
-
-
-class InvalidOperatingHoursError(Exception):
-    """``opens_at_minutes`` / ``closes_at_minutes`` do not satisfy the range
-    ``AvailabilityHoursRule.__init__`` itself enforces: ``0 <= opens_at_minutes
-    < 1440`` and ``opens_at_minutes < closes_at_minutes <= opens_at_minutes +
-    1440``.
-
-    Rejected here, at the write boundary, for the same reason
-    ``session_length``'s own boundary check mirrors
-    ``SessionLengthRule.__init__`` right below it in
-    ``_validate_rule_params``: a row that fails this range would still be
-    accepted by the database (``params`` is a bag of JSON, not a checked
-    shape), only to fail when ``RuleType.build`` constructs the rule at
-    booking time — which the adapter turns into ``RULE_ERROR_MESSAGE``,
-    denying *every* booking against the Space rather than naming what an
-    admin typed wrong. A 422 here, at submission time, is what lets an admin
-    form attach the message to the right field instead.
-
-    Since task 7.10 there is no UTC pair to invert and nothing left to typo
-    into an inversion: ``closes_at_minutes > 1440`` states a window past
-    local midnight directly, so the only way to violate this range is to
-    submit a value genuinely outside a single 24-hour local window.
-    """
 
 
 class UnknownRuleTypeError(Exception):
@@ -113,9 +79,12 @@ class InvalidRuleParamsError(Exception):
     """A rule instance's ``params`` do not satisfy its type's own schema.
 
     Covers every shape failure ``_validate_rule_params`` checks: a missing
-    required parameter, an unknown key, a wrong-kind or out-of-bounds value,
-    and (for ``session_length`` alone) a ``session_minutes`` that does not
-    divide 1440. ``message`` is the ready-to-serve 422 detail, naming the
+    required parameter, an unknown key, and a wrong-kind or out-of-bounds
+    value. The check is entirely generic — there is no rule-type-specific
+    case left on this path, the two that were here having retired with
+    ``session_length`` and ``availability_hours`` (task 10.5,
+    ``.claude/rules/calendar-shape.md``). ``message`` is the
+    ready-to-serve 422 detail, naming the
     specific offending parameter — the router has no schema knowledge of its
     own to build one from, so this exception carries the finished sentence
     rather than structured fields the router would have to reassemble.
@@ -315,18 +284,14 @@ def create_space(
     produces an empty Space even though the schema could represent one. If any
     write fails, none of them survives.
 
-    The Space gets default operating hours and a default session length, as
-    ``space_rules`` rows rather than columns on ``Space`` itself (task 6.6),
-    so it is bookable immediately rather than requiring an admin visit to the
-    config UI first — the auto-created Resource itself carries none, since a
-    Resource is config-free by design and every court in a Space shares the
-    Space's one schedule. The four rule parameters are left unset, i.e. no
-    rows are created for them.
-
-    It also gets a live ``SpaceCalendarShape`` row holding ``DEFAULT_SHAPE`` (task 10.2,
-    ``.claude/rules/calendar-shape.md``) — a Space with no shape row must not be a reachable
-    state, so this write is in the same transaction as the rest rather than a follow-up a caller
-    could observe half-done.
+    It gets **no** ``space_rules`` row at all. "Not enforced" is the absence of a row for every
+    rule type, and a fresh venue has asked for no limit on anybody — what makes it bookable on
+    arrival is its live ``SpaceCalendarShape`` row holding ``DEFAULT_SHAPE`` (task 10.2,
+    ``.claude/rules/calendar-shape.md``), the structure a member books inside. A Space with no
+    shape row must not be a reachable state, so that write is in the same transaction as the rest
+    rather than a follow-up a caller could observe half-done. The auto-created Resource carries
+    neither, since a Resource is config-free by design and every court in a Space shares the
+    Space's one shape.
     """
     space = Space(name=name, description=description, created_by_user_id=creator.id)
     session.add(space)
@@ -334,23 +299,6 @@ def create_space(
 
     session.add(SpaceMembership(space_id=space.id, user_id=creator.id, role=MembershipRole.OWNER))
     session.add(Resource(space_id=space.id, name=FIRST_RESOURCE_NAME))
-    session.add(
-        SpaceRule(
-            space_id=space.id,
-            rule_type="availability_hours",
-            params={
-                "opens_at_minutes": _DEFAULT_OPENS_AT_MINUTES,
-                "closes_at_minutes": _DEFAULT_CLOSES_AT_MINUTES,
-            },
-        )
-    )
-    session.add(
-        SpaceRule(
-            space_id=space.id,
-            rule_type="session_length",
-            params={"session_minutes": _DEFAULT_SESSION_MINUTES},
-        )
-    )
     # A live default shape, in the same transaction as the rest of Space creation —
     # `.claude/rules/calendar-shape.md`: "A Space with no shape must not be a reachable state."
     # `DEFAULT_SHAPE` lives in `rules/shape/` rather than here so this literal and the migration's
@@ -435,28 +383,35 @@ def list_space_rules(session: Session, space: Space) -> Sequence[SpaceRule]:
     )
 
 
-def space_rule_config(session: Session, space: Space) -> SpaceRuleConfig:
+def space_rule_config(session: Session, space: Space, *, shape: Shape) -> SpaceRuleConfig:
     """Build this Space's rule configuration for the engine adapter.
 
     ``app.rules_stub`` stays ORM-free by its own module docstring, so this is
     the one place a ``Space`` row and its ``space_rules`` rows meet
-    ``SpaceRuleConfig`` — moved here (task 6.9) from a router-local helper of
-    the same shape in ``app.routers.resource_bookings``, so that module and
-    the new ``GET /spaces/{public_id}/schedule`` handler both build a
-    ``SpaceRuleConfig`` the same way, once. It could not live inside
-    ``app.rules_stub`` itself: that module is deliberately ORM-free (its own
-    docstring — "it receives ``SpaceRuleConfig`` ... it does not query for
-    either"), and this function's whole job is the query
-    (``list_space_rules``) that ``rules_stub`` refuses to own.
+    ``SpaceRuleConfig``. It could not live inside ``app.rules_stub`` itself:
+    that module is deliberately ORM-free (its own docstring — "it receives
+    ``SpaceRuleConfig`` ... it does not query for either"), and this
+    function's whole job is the query (``list_space_rules``) that
+    ``rules_stub`` refuses to own.
+
+    **``shape`` is passed in, not read here, and it is required.** The one
+    caller — ``create_resource_booking`` — already holds this Space's
+    validated live shape from the availability gate it ran one call earlier,
+    so re-reading it would be a second query and a second chance for the
+    gate and the engine to disagree about what this one booking is judged
+    against. It is required rather than defaulted for the reason
+    ``SpaceRuleConfig.shape``'s own docstring gives: an absent shape
+    resolves the run's gap tolerance to zero, which is the *permissive*
+    direction, and a default here would let a caller take it by omission.
 
     ``lookup=catalog.lookup`` is passed explicitly rather than left at
     ``SpaceRuleConfig``'s own ``REGISTRY.get`` default (task 7.6): this is
     the caller building a config for a real booking, so it should see every
-    generated type this process has hoisted, not only the eight hand-written
-    ones.
+    generated type this process has hoisted, not only the hand-written ones.
     """
     return SpaceRuleConfig(
         timezone=space.timezone,
+        shape=shape,
         rules=tuple(
             SpaceRuleRow(
                 id=row.id,
@@ -645,21 +600,20 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
     :class:`UnknownRuleTypeError`; everything else raises
     :class:`InvalidRuleParamsError` naming the specific parameter — an
     unknown key, a missing required one, or one present but the wrong kind
-    or below its declared ``minimum``. Two rule-type-specific checks follow
-    the per-parameter loop: ``session_length.session_minutes`` must divide
-    1440, mirroring ``SessionLengthRule.__init__``'s own booking-time check
-    (``rules/rules/registry.py``'s own docstring names this API boundary as
-    where that would eventually be enforced); and ``availability_hours``
-    rejects an ``opens_at_minutes``/``closes_at_minutes`` pair outside
-    ``AvailabilityHoursRule.__init__``'s own range, raising
-    :class:`InvalidOperatingHoursError` — the same check
-    ``identity-and-access.md`` documents for this API, reused rather than
-    duplicated into a second exception for the identical rule.
+    or below its declared ``minimum``.
+
+    **The validation is entirely generic; no rule-type-specific check
+    survives on this path.** The two that were here — ``session_length``'s
+    divides-1440 bound and ``availability_hours``'s opening-hours range —
+    retired with the types they mirrored, since the calendar shape says what
+    both said (task 10.5, ``.claude/rules/calendar-shape.md``). A type whose
+    own constructor bounds something beyond a declared ``minimum`` states
+    that in its parameter schema or not at all; a second per-type branch
+    here would be a second place to configure the same thing.
 
     Callers pass the **effective** params dict — the full set this row would
     be given, after any PATCH merge — never a partial submission, so
-    "missing required" and the two type-specific checks below always see a
-    complete picture.
+    "missing required" always sees a complete picture.
     """
     rule_type = catalog.lookup(rule_type_id)
     if rule_type is None:
@@ -696,29 +650,6 @@ def _validate_rule_params(rule_type_id: str, params: dict) -> None:
                 raise InvalidRuleParamsError(
                     f"Parameter {param.name!r} must be at least {param.minimum}"
                 )
-
-    if rule_type_id == "session_length":
-        session_minutes = params.get("session_minutes")
-        if isinstance(session_minutes, int) and session_minutes > 0 and 1440 % session_minutes != 0:
-            raise InvalidRuleParamsError(
-                "Parameter 'session_minutes' must divide 1440 (a whole number of sessions per"
-                f" day); got {session_minutes!r}"
-            )
-
-    if rule_type_id == "availability_hours":
-        # Mirrors `AvailabilityHoursRule.__init__` (`rules/rules/canon.py`)
-        # exactly, the same way the `session_length` block above mirrors
-        # `SessionLengthRule.__init__`. `opens_at_minutes >= 0` is already
-        # guaranteed by that parameter's own declared `minimum=0` in the loop
-        # above, so only the upper bound and the pairwise relationship need
-        # checking here.
-        opens_at_minutes = params.get("opens_at_minutes")
-        closes_at_minutes = params.get("closes_at_minutes")
-        if isinstance(opens_at_minutes, int) and isinstance(closes_at_minutes, int):
-            if not (opens_at_minutes < 1440):
-                raise InvalidOperatingHoursError(opens_at_minutes, closes_at_minutes)
-            if not (opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440):
-                raise InvalidOperatingHoursError(opens_at_minutes, closes_at_minutes)
 
 
 def get_space_rule(session: Session, space: Space, rule_id: int) -> SpaceRule:
@@ -773,16 +704,16 @@ def update_space_rule(
 ) -> SpaceRule:
     """Apply a partial update to one rule instance. Omitted fields are left alone.
 
-    ``params``, when present, wholesale-replaces what is stored — except for
-    ``availability_hours``, where a submission naming only one of
-    ``opens_at_minutes``/``closes_at_minutes`` is first merged over the row's
-    own currently stored pair before validation, so the check is made on the
-    *effective* pair the update leaves behind. Every other type gets
-    no such merge: its schema requires whatever it requires of the
-    submitted dict alone, which is what "wholesale replacement" means for
-    it. The merge is what lets ``_validate_rule_params``'s range check see a
-    real pair instead of failing "missing required" on a bound the caller
-    never meant to touch.
+    ``params``, when present, is merged over the row's own currently stored
+    params rather than replacing them, and it is the **effective** dict that
+    is validated and stored. That is what ``PATCH`` means: a submission
+    naming one parameter of a two-parameter type must not be refused
+    "missing required" for the one the caller never meant to touch, nor
+    silently drop it. The merge is deliberately type-agnostic — every
+    rule-type-specific branch left this path with ``availability_hours`` and
+    ``session_length`` (task 10.5) — and it matters for exactly the types
+    nobody hand-wrote: every registered type today declares at most one
+    parameter, while a generated type may declare several.
     """
     _require_active(space)
     rule = get_space_rule(session, space, rule_id)
@@ -792,11 +723,8 @@ def update_space_rule(
     if "params" in fields:
         new_params = payload.params
         assert new_params is not None  # SpaceRuleUpdate rejects an explicit null.
-        if rule.rule_type == "availability_hours":
-            effective_params = dict(rule.params)
-            effective_params.update(new_params)
-        else:
-            effective_params = dict(new_params)
+        effective_params = dict(rule.params)
+        effective_params.update(new_params)
         _validate_rule_params(rule.rule_type, effective_params)
         rule.params = effective_params
 

@@ -11,8 +11,8 @@
  * Fetches `GET /spaces/{public_id}/calendar` (task 10.3) for the visible week
  * and hands `CalendarGrid` the resulting `WeekProjection` — the shape's own
  * projection, never a re-derivation of what a date offers
- * (`.claude/rules/calendar-shape.md`). `GET .../schedule` is not called here
- * any more.
+ * (`.claude/rules/calendar-shape.md`). It is the only endpoint this page
+ * draws the grid from; there is no second schedule endpoint beside it.
  *
  * Reached only through `ResourceCalendarRoute` below, which is what `App.tsx`
  * mounts: this component itself does no auth gating and assumes a member is

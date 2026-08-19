@@ -69,7 +69,7 @@ def iso(value: datetime) -> str:
 
 
 # A shape permissive enough that the pre-existing rule-engine tests below (max_duration,
-# session_length, overlap) are refused only by the *rule* each is named for, never by the
+# overlap) are refused only by the *rule* each is named for, never by the
 # availability gate (task 10.3) that now runs ahead of it. ``DEFAULT_SHAPE``'s own [60]-only grid
 # would otherwise refuse several of their 30- and 120-minute bookings before the rule under test
 # ever ran, which is exactly the ordering bug this gate must not introduce into an unrelated suite.
@@ -172,11 +172,11 @@ def member(session: Session) -> User:
 def _set_rule(session: Session, space: Space, rule_type: str, params: dict) -> None:
     """Set this Space's one unscoped instance of ``rule_type`` to ``params``.
 
-    ``create_space`` seeds an ``availability_hours`` and a ``session_length``
-    row, so a test tightening either has to edit the row it finds rather than
-    add a second instance: two instances of a type both run and AND to the
-    stricter, and the seeded 60-minute grid would go on refusing a booking
-    aligned only to a 30-minute one.
+    ``create_space`` seeds no ``space_rules`` row at all now (task 10.5), so
+    this ordinarily inserts. It still edits in place when it finds a row rather
+    than adding a second instance: two instances of a type both run and AND to
+    the stricter, so a test tightening a bound it had already set would
+    otherwise be judged against the looser of the two.
     """
     existing = next(
         (
@@ -328,13 +328,11 @@ def test_rule_denial_returns_422_and_persists_nothing(
 def test_overlapping_booking_returns_409(
     api: Api, owner: User, space: Space, resource: Resource
 ) -> None:
-    """A partial overlap, both ends on ``space``'s (default 60-minute) grid.
+    """A partial overlap, both ends on ``space``'s own shape grid.
 
-    The second attempt used to start at a half-hour offset — off-grid now that
-    ``session_minutes`` is enforced (task 6.5) — which would trip the new
-    ``SessionLengthRule`` before the overlap constraint ever ran. 10:00-12:00
-    partially overlaps the first booking's 10:00-11:00 just as well and stays
-    on the grid.
+    A start at a half-hour offset would be off ``_PERMISSIVE_SHAPE``'s 30-minute-stepped grid and
+    refused by the availability gate (task 10.3) before the overlap constraint ever ran. 10:00-12:00
+    partially overlaps the first booking's 10:00-11:00 just as well and stays on the grid.
     """
     first = api.as_user(owner).post(
         _url(space, resource), json={"start_at": iso(at(10)), "end_at": iso(at(11))}
@@ -349,55 +347,13 @@ def test_overlapping_booking_returns_409(
     assert response.json()["error"] == "overlap"
 
 
-# --- Session length (task 6.5) --------------------------------------------------
-
-
-def test_off_grid_booking_is_refused_by_session_length(
-    api: Api,
-    driver: PostgresBookingDriver,
-    session: Session,
-    owner: User,
-    space: Space,
-    resource: Resource,
-) -> None:
-    """This exact request succeeds today; the point of task 6.5 is that it no longer does.
-
-    ``session_minutes`` used to decline to *offer* an off-grid slot in the calendar UI while the
-    API accepted anything — the split ``rule-engine.md`` warns is only safe as long as the grid is
-    advisory and something else is the real boundary. Nothing enforced it server-side until now.
-    """
-    _set_rule(session, space, "session_length", {"session_minutes": 30})
-
-    response = api.as_user(owner).post(
-        _url(space, resource), json={"start_at": iso(at(10, 7)), "end_at": iso(at(10, 22))}
-    )
-
-    assert response.status_code == 422
-    assert response.json()["error"] == "rule_denied"
-
-    bookings = driver.list_bookings(
-        start=DAY - timedelta(days=1),
-        end=DAY + timedelta(days=1),
-        resource_id=resource.id,
-        include_cancelled=True,
-    )
-    assert bookings == []
-
-
-def test_an_on_grid_booking_is_unaffected_by_session_length(
-    api: Api, session: Session, owner: User, space: Space, resource: Resource
-) -> None:
-    """The new rule only refuses what is actually off-grid."""
-    _set_rule(session, space, "session_length", {"session_minutes": 30})
-
-    response = api.as_user(owner).post(
-        _url(space, resource), json={"start_at": iso(at(10, 30)), "end_at": iso(at(11))}
-    )
-
-    assert response.status_code == 201, response.text
-
-
 # --- The availability shape gate (task 10.3). -----------------------------------
+#
+# `session_length` — the rule type that used to enforce grid alignment server-side — retired
+# alongside `availability_hours` (`.claude/rules/calendar-shape.md`, "Two rule types this document
+# replaced"): the calendar shape now says what both said, checked structurally before this canon
+# ever runs. `test_a_start_off_the_blocks_grid_is_refused` and
+# `test_a_duration_the_block_does_not_offer_is_refused` below are that coverage's direct successor.
 #
 # ``space``'s own fixture already proves the ordinary case — every test above that reaches 201
 # passed the (permissive) shape gate and then the rule engine. These tests exercise the gate's
@@ -659,9 +615,9 @@ def test_a_sydney_space_resolves_the_shape_against_its_own_local_date(
         },
     )
 
-    # 09:00 local is inside the seeded 09:00-17:00 `availability_hours` row too (this fresh Space
-    # keeps `create_space`'s own seeded rules), so a pass here is the shape and the engine
-    # agreeing, not one of them happening not to run.
+    # A fresh Space's canon holds nothing but `NotInThePastRule` (`create_space` seeds no rule
+    # rows), so a pass here is the shape offering the slot and the engine having nothing left to
+    # refuse it for — not one of the two happening not to run.
     local_start = datetime(local_date.year, local_date.month, local_date.day, 9, 0, tzinfo=sydney)
     local_end = local_start + timedelta(hours=1)
     # Sanity: the instant this books falls on the *previous* UTC date, so a gate that resolved the

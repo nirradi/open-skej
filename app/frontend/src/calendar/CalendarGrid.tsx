@@ -55,9 +55,8 @@
  * attempt to render the wrap: an operating or blackout interval whose
  * `end_minutes` exceeds 1440 is clipped at the day boundary, and an
  * `offered_starts` entry at or past 1440 is simply not drawn.
- * `ops/done/stream-7/passed-midnight.md` and `resolve_day_schedule`'s own
- * (now-retired) docstring record the identical limit for the pre-shape
- * calendar, and `ops/plans/stream-10/OVERVIEW.md`'s "out of scope,
+ * `ops/done/stream-7/passed-midnight.md` records the identical limit for the
+ * pre-shape calendar, and `ops/plans/stream-10/OVERVIEW.md`'s "out of scope,
  * deliberately" carries it forward — the shape can *represent* a wrapping
  * window; this grid is not asked to draw one.
  *

@@ -26,17 +26,11 @@ Translations that happen here and nowhere else:
   distinct timezone translation, per rule type, resolved fresh for every
   booking's own date rather than once at write time (``CLAUDE.md``,
   "Conversion happens at the boundary, per date, never once at write time"):
-  a ``session_length`` row's ``anchor_minutes`` resolves to that date's own
-  resolved ``availability_hours`` opening minute, falling back to local
-  midnight (0) when no such row governs the date — see ``resolve_day_schedule``,
-  which resolves this once and is reused rather than resolved a second way;
-  and the day/week/month counting rules'
+  the day/week/month counting rules'
   ``[window_start, window_end)`` resolve from the local day/week/month via
   ``_local_day_bounds`` / ``_local_week_bounds`` / ``_local_month_bounds``, the
   identical local day also serving ``max_duration_per_day`` (task 8.7). See
-  ``_resolve_for_row``. ``availability_hours`` needs none of this any more —
-  its params are already minutes from local midnight, read straight off
-  ``context.local`` by the rule itself.
+  ``_resolve_for_row``.
 * **The local frame.** ``_build_local_frame`` answers every local question a
   rule could ask — the venue's day, week and month as UTC instants, the local
   weekday, and minutes from local midnight — and hands them over as
@@ -50,9 +44,10 @@ Translations that happen here and nowhere else:
   not: not "when is this", but "how much of this user's own history does this
   booking belong to". It resolves the contiguous, cross-Resource span of
   bookings ``request`` sits in — transitively, and closing a gap up to that
-  date's own resolved session length — and hands it over as ``Context.run``.
-  A rule that wants to judge the whole run rather than the one request reads
-  it there; every rule that does not is unaffected by its existence.
+  date's own smallest offered booking length — and hands it over as
+  ``Context.run``. A rule that wants to judge the whole run rather than the
+  one request reads it there; every rule that does not is unaffected by its
+  existence.
 * **The counting rules' tolerance.** ``_resolve_for_row`` (task 8.6, extended by task 8.7) resolves
   the identical gap tolerance ``_resolve_run`` uses, for the three counting types — day, week,
   month — and hands it to ``MaxBookingsPerDayRule`` / ``MaxBookingsPerWeekRule`` /
@@ -68,7 +63,8 @@ Translations that happen here and nowhere else:
   this stream runs are deliberately not used: a total is the same number however the day's
   bookings are grouped, except where a user holds two Resources at overlapping times, where a
   run's span is shorter than the two bookings added together and the total would silently
-  under-count.
+  under-count. Both this tolerance and ``_resolve_run``'s own are now sourced from the Space's own
+  calendar shape rather than a ``session_length`` row — see ``_gap_tolerance``.
 * **The allow-path message.** ``RuleResult(passed=True)`` carries no copy by
   design, but the API shows friendly text on success. ``ALLOWED_MESSAGE`` is
   supplied here.
@@ -100,7 +96,6 @@ from rules import (
     DEFAULT_CANON,
     REGISTRY,
     RULE_ERROR_MESSAGE,
-    AvailabilityHoursRule,
     BaseRule,
     BookingHorizonRule,
     CalendarContext,
@@ -118,6 +113,7 @@ from rules import (
 from rules import BookingRecord as EngineBookingRecord
 from rules import BookingRequest as EngineBookingRequest
 from rules import Context as EngineContext
+from shape import DEFAULT_SHAPE, Shape, project_day, validate_shape
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +134,15 @@ _DEFAULT_RESOURCE_ID = "default-resource"
 #: happened to pick — and it is now read for real, by ``MaxBookingsPerWeekRule``,
 #: whenever a Space's canon includes a ``max_bookings_per_week`` row.
 WEEK_STARTS_ON = Weekday.MONDAY
+
+#: ``shape.DEFAULT_SHAPE`` is the untrusted-JSON document a fresh Space's live row actually holds
+#: (``rules/shape/types.py``); this is that same document, validated once at import time into the
+#: ``Shape`` dataclass ``SpaceRuleConfig.shape`` and ``_gap_tolerance`` need. Validating once here
+#: rather than on every ``SpaceRuleConfig`` built with no explicit ``shape`` is safe specifically
+#: because this is a hardcoded module constant, never untrusted input — every real caller building a
+#: config for an actual booking passes the Space's own live shape, re-validated on every read by
+#: ``app.identity.service.live_shape`` (``.claude/rules/calendar-shape.md``).
+_DEFAULT_SHAPE: Shape = validate_shape(DEFAULT_SHAPE)
 
 
 def _canon_rule(rule_type: type):
@@ -160,8 +165,6 @@ def _canon_rule(rule_type: type):
 #: that booking's own Space's ``space_rules`` rows by ``_build_canon``, not
 #: from these.
 MAX_BOOKING_DURATION: timedelta = _canon_rule(MaxDurationRule).max_duration
-AVAILABILITY_OPEN_MINUTES: int = _canon_rule(AvailabilityHoursRule).opens_at_minutes
-AVAILABILITY_CLOSE_MINUTES: int = _canon_rule(AvailabilityHoursRule).closes_at_minutes
 BOOKING_HORIZON_DAYS: int = _canon_rule(BookingHorizonRule).days
 
 
@@ -252,18 +255,32 @@ class SpaceRuleConfig:
     knows generated types) is nothing but ORM (module docstring). Defaulted
     to ``REGISTRY.get`` so every existing caller that builds a
     ``SpaceRuleConfig`` by hand — every test in this suite among them — keeps
-    seeing only the nine hand-written types unless it opts in; the one
+    seeing only the eight hand-written types unless it opts in; the one
     caller that wants generated types too (``app.identity.service.space_rule_config``)
     passes ``app.rule_catalog.catalog.lookup`` explicitly. ``compare=False``
     and ``repr=False`` keep a bound method off this frozen dataclass's
     equality and repr, where it would otherwise make two configs built with
     the same rows compare unequal merely because they closed over different
     ``RuleCatalog`` instances.
+
+    ``shape`` is this Space's own calendar shape (``rules/shape/``,
+    ``.claude/rules/calendar-shape.md``), read only by ``_gap_tolerance``
+    below — nothing else in this module consults it. It defaults to
+    ``DEFAULT_SHAPE`` rather than ``None`` or an absent field: every Space
+    always holds a live shape row (``create_space`` writes one, task 10.2),
+    and ``DEFAULT_SHAPE`` is the document a fresh Space actually starts
+    with, so a config built by hand — every test in this suite among them —
+    behaves like a real default Space rather than like one with no shape at
+    all. A ``None``/absent default would resolve ``_gap_tolerance`` to zero
+    everywhere, which is the *permissive* direction — it would silently stop
+    the run sweep merging across any non-abutting gap — and exactly the
+    silent loosening this field exists to prevent.
     """
 
     timezone: str
     rules: tuple[SpaceRuleRow, ...] = field(default_factory=tuple)
     lookup: RuleTypeLookup = field(default=REGISTRY.get, compare=False, repr=False)
+    shape: Shape = _DEFAULT_SHAPE
 
     @property
     def reads_history(self) -> bool:
@@ -489,11 +506,11 @@ def row_applies(applies_to: dict | None, on_date: date) -> bool:
     an adapter-level concern applied uniformly before the registry ever
     builds anything — a rule type declares no day/date handling of its own.
 
-    Exported (task 6.9, no leading underscore) so ``resolve_day_schedule``
-    can filter ``space_rules`` rows by the identical rule this module's own
-    booking-evaluation path uses — a second implementation of "does this row
-    apply to this date" could silently disagree with this one, which is
-    exactly the bug class this codebase's docs keep warning about.
+    Exported (task 6.9, no leading underscore) — nothing outside this module
+    currently calls it, but the export stays: a second implementation of
+    "does this row apply to this date" written by a future caller could
+    silently disagree with this one, which is exactly the bug class this
+    codebase's docs keep warning about.
     """
     if applies_to is None:
         return True
@@ -523,32 +540,20 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
     what the pre-6.6 ``_build_canon`` did inline for the equivalent column.
 
     Takes the whole ``config`` rather than just its ``timezone`` since task 8.6: the three counting
-    rows (day, week, month) also need a gap ``tolerance``, and resolving one needs
-    ``resolve_day_schedule(config, on_date)`` — the same resolution ``evaluate``'s own
-    ``_resolve_run`` call already reads a session length from, for the identical reason
+    rows (day, week, month) also need a gap ``tolerance``, resolved by ``_gap_tolerance`` from the
+    Space's own calendar shape (task 10.5, ``.claude/rules/calendar-shape.md``) — the same
+    resolution ``evaluate``'s own ``_resolve_run`` call uses, for the identical reason
     (``rules.frequency``'s module docstring). ``max_duration_per_day`` (task 8.7) needs only the
     window and no tolerance at all — it sums raw history entries rather than merging them into
-    runs, so ``resolve_day_schedule`` is not consulted for it. A ``session_length`` row's own
-    ``anchor_minutes`` is resolved the identical way — reusing ``resolve_day_schedule`` rather than
-    a second implementation of "what opening minute governs this date" (``CLAUDE.md``, "the engine
-    stays the sole validator").
+    runs, so ``_gap_tolerance`` is not consulted for it.
 
     Raises ``KeyError``/``TypeError``/``ValueError`` for a row whose
-    ``params`` do not have what this resolution needs (a missing
-    ``session_minutes``, a value of the wrong type) — ``_build_canon`` treats
-    that identically to a failure inside ``RuleType.build`` itself, since both
-    are "this row's stored params no longer satisfy its type's schema".
+    ``params`` do not have what this resolution needs (a missing parameter,
+    a value of the wrong type) — ``_build_canon`` treats that identically to
+    a failure inside ``RuleType.build`` itself, since both are "this row's
+    stored params no longer satisfy its type's schema".
     """
     tz_name = config.timezone
-
-    if row.rule_type == "session_length":
-        # This row itself already matched `on_date` — `_build_canon` filters on `enabled` and
-        # `row_applies` before ever calling this function — so `resolve_day_schedule`'s identical
-        # filtering always finds at least one matching `session_length` row here too, and its own
-        # `anchor_minutes` is never `None`.
-        anchor_minutes = resolve_day_schedule(config, on_date).anchor_minutes
-        assert anchor_minutes is not None
-        return {"anchor_minutes": anchor_minutes}
 
     if row.rule_type in ("max_bookings_per_day", "max_bookings_per_week", "max_bookings_per_month"):
         if row.rule_type == "max_bookings_per_day":
@@ -557,11 +562,10 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
             window_start, window_end = _local_week_bounds(on_date, tz_name)
         else:
             window_start, window_end = _local_month_bounds(on_date, tz_name)
-        tolerance_minutes = resolve_day_schedule(config, on_date).session_minutes or 0
         return {
             "window_start": window_start,
             "window_end": window_end,
-            "tolerance": timedelta(minutes=tolerance_minutes),
+            "tolerance": _gap_tolerance(config, on_date),
         }
 
     if row.rule_type == "max_duration_per_day":
@@ -573,7 +577,7 @@ def _resolve_for_row(row: SpaceRuleRow, on_date: date, config: SpaceRuleConfig) 
         return {"window_start": window_start, "window_end": window_end}
 
     # `REGISTRY[row.rule_type].needs_local_resolution` is true for exactly
-    # these five types today (`rules/rules/registry.py`); a sixth arriving
+    # these four types today (`rules/rules/registry.py`); a fifth arriving
     # without this adapter being taught how to resolve it is a genuine
     # adapter bug, not a bad configuration row, so it is left to raise loudly
     # rather than being folded into `_UnbuildableRuleRowError`.
@@ -602,9 +606,7 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
        ``app.rule_catalog.catalog`` has hoisted (see ``SpaceRuleConfig``'s
        own docstring). An id that resolves to nothing raises
        ``_UnbuildableRuleRowError``, caught by ``evaluate`` and turned into a
-       denial — never a skip (see that exception's docstring). (``row_applies``
-       above, not this step, is what ``resolve_day_schedule`` reuses; it needs
-       no rule-type lookup at all — see that function.)
+       denial — never a skip (see that exception's docstring).
     4. **Resolved, if its type needs it** (``_resolve_for_row``), **and
        built** via ``RuleType.build``. A ``KeyError``/``TypeError``/
        ``ValueError`` from either step — a required param missing, a stored
@@ -655,180 +657,35 @@ def _build_canon(config: SpaceRuleConfig, on_date: date) -> tuple[BaseRule, ...]
     return tuple(canon)
 
 
-@dataclass(frozen=True)
-class DaySchedule:
-    """What a booking on one date would actually be judged against, resolved
-    entirely in the Space's own local wall clock — never converted to UTC,
-    unlike every other resolution this module performs.
+def _gap_tolerance(config: SpaceRuleConfig, on_date: date) -> timedelta:
+    """The run-merge gap tolerance for ``on_date``, sourced from this Space's own calendar shape.
 
-    Built by ``resolve_day_schedule`` for ``GET /spaces/{public_id}/schedule``
-    (task 6.9), the endpoint the calendar UI reads instead of re-deriving
-    rule semantics itself: the engine stays the sole validator, so a second
-    implementation of "what hours/session length govern this date" in
-    TypeScript is exactly the duplication ``DEFERRED.md`` item 13 warns
-    against.
+    The value is the **smallest** ``allowed_durations_mins`` across every operating interval
+    ``project_day(config.shape, on_date)`` resolves for the date, and ``timedelta(0)`` when the
+    date has no operating interval at all.
 
-    ``session_minutes`` / ``opens_at`` / ``closes_at`` are ``None`` when no enabled,
-    date-matching row of that type governs this date at all — the same "not
-    enforced" convention ``SpaceRuleConfig`` and the frontend's
-    ``CalendarConfig`` already use. ``anchor_minutes`` is ``None`` under the
-    identical condition as ``session_minutes`` — there is no grid to anchor
-    when no ``session_length`` row governs the date at all — and otherwise
-    the date's own resolved opening minute (``opens_at_minutes``), falling
-    back to local midnight (``0``) when no ``availability_hours`` row governs
-    the date either
-    (``ops/pending/bugs/grid-from-hours-and-min-duration.md``, decision 2).
-    It is resolved here rather than beside the two other readers that need
-    it — ``app.rules_stub._resolve_for_row``'s own ``session_length`` branch,
-    and ``_resolve_run``'s gap tolerance below, which reads ``session_minutes``
-    from this same resolution — because a second implementation of "what
-    opening minute anchors this date's grid" would be exactly the drift this
-    codebase's docs keep warning about.
+    This is a re-sourcing of an argument this codebase already made once, not a new one: any gap a
+    legal booking could actually occupy is at least one bookable length long, so a gap shorter than
+    that is dead space nobody could ever construct a booking to fill, and merging across it is what
+    stops such a gap fracturing every run-based rule for free
+    (``.claude/rules/calendar-shape.md``, "The run's gap tolerance is re-sourced from the
+    projection"). The tolerance used to be the date's own resolved ``session_length``; the shape's
+    own allowed durations are now the complete statement of what a legal booking's length may be, so
+    they are exactly the right source in its place.
+
+    ``merge_adjoining_spans`` joins on ``gap < tolerance`` **strictly**, so where one uniform grid
+    governs a date the tolerance changes nothing — every gap there is a whole multiple of the step —
+    and it earns its place on a shape offering several durations, or one whose operating blocks keep
+    separate anchors. A date with no operating interval yields zero: exact abutment, the honest
+    answer for a date the venue offers nothing on.
     """
-
-    session_minutes: int | None
-    anchor_minutes: int | None
-    opens_at: time | None
-    closes_at: time | None
-    coherence_issue: str | None
-
-
-def _minutes_to_wire_time(minutes: int | None) -> time | None:
-    """Render a minutes-from-local-midnight integer as the wire's ``time`` shape.
-
-    ``None`` stays ``None`` — "not configured", not midnight. Otherwise ``minutes % 1440`` folds a
-    value at or past 24 hours back onto an ordinary wall clock: the *only* place in this function
-    that reduces a minute count to a bare ``time``, and deliberately the very last step (see
-    ``resolve_day_schedule``'s docstring for why every computation above this stays in minutes).
-    """
-    if minutes is None:
-        return None
-    minutes = minutes % 1440
-    return time(minutes // 60, minutes % 60)
-
-
-def resolve_day_schedule(config: SpaceRuleConfig, on_date: date) -> DaySchedule:
-    """What a booking on ``on_date`` would actually be judged against, in the
-    Space's own local wall clock.
-
-    Mirrors ``_build_canon``'s own filtering (``row.enabled`` and
-    ``row_applies``) but stays local rather than resolving to UTC — this
-    endpoint's whole point is to report the Space's own wall-clock hours and
-    session length, which is what the calendar grid draws itself from —
-    there is no instant to judge here, only a calendar date to describe.
-    Unlike ``_build_canon`` this never touches ``REGISTRY`` or
-    ``RuleType.build``: an ``availability_hours`` row's
-    ``opens_at_minutes``/``closes_at_minutes`` and a ``session_length`` row's
-    local ``session_minutes`` are read directly off ``params``.
-
-    **Every matching row of a type must hold simultaneously** — "the engine
-    stays a flat AND of deny predicates" (``ops/plans/stream-6-plan.md``,
-    Decisions) — so two or more matching rows of one type are *combined*,
-    never picked from:
-
-    * ``availability_hours`` — the **intersection** of every matching row's
-      own window: ``effective_open = max(opens_at_minutes)``,
-      ``effective_close = min(closes_at_minutes)``, computed **entirely in
-      integer minutes** and converted to the wire's ``time`` shape only in
-      the final step (``_minutes_to_wire_time``). A single row can never
-      itself be inverted (``AvailabilityHoursRule.__init__`` enforces
-      ``opens_at_minutes < closes_at_minutes``), but the intersection of two
-      or more legitimately can be — "9-12" and "14-18" together permit
-      nothing. That is a real flat-AND outcome ("closed all day on this
-      date"), not a coherence error, so it is normalised to a **zero-width**
-      window (``effective_close = effective_open``) rather than reported as
-      broken. Doing this comparison in minutes rather than converting each
-      row to a bare ``time`` first is load-bearing, not a style choice: a
-      row's own window may now legitimately cross local midnight
-      (``closes_at_minutes > 1440``), and reducing such a row to a ``time``
-      before comparing would make it look "inverted" on its own — the exact
-      state this zero-width normalisation exists to flag for a *genuine*
-      empty intersection — and wrongly report a real 18:00–02:00 window as
-      closed all day even with only one matching row.
-    * ``session_length`` — the **LCM** of every matching row's own
-      ``session_minutes``: a date must land on a multiple of *every* matching
-      row's own grid simultaneously, and being divisible by the LCM is
-      exactly that (not the minimum, which does not make every row's grid a
-      subset of it). Every individually stored ``session_minutes`` already
-      divides 1440 (``SessionLengthRule.__init__``), so the LCM of any two
-      such divisors also divides 1440 — this can never itself produce an
-      incoherent day length.
-
-    No matching row of a type at all resolves to ``None`` for it, matching
-    ``SpaceRuleConfig``'s and the frontend's ``CalendarConfig``'s "not
-    configured" shape. ``anchor_minutes`` follows ``session_minutes``: it is
-    ``None`` under the identical condition, and otherwise the resolved
-    ``opens_at_minutes`` above (before it is normalised to a zero-width
-    window's own value or converted to the wire's ``time`` shape) — or ``0``
-    when no ``availability_hours`` row governs the date either
-    (``ops/pending/bugs/grid-from-hours-and-min-duration.md``, decision 2).
-    An admin's own opening time is what anchors the session grid, not local
-    midnight, which is the entire reason this type replaces the old
-    always-midnight ``slot_alignment``.
-
-    ``coherence_issue`` fires in one case only: a **real** (non-zero-width) resolved window paired
-    with a resolved session length longer than the window itself — nothing on that date could ever
-    clear a single session, so the window is bookable in name only. The two slot-boundary cases
-    this endpoint used to check (an opening or closing time missing the grid) no longer apply: the
-    grid is now anchored on the opening time itself, so an opening time can never miss a grid built
-    on it, and a closing time leaving a short unusable tail at the end of the day is normal here,
-    not an error (``ops/pending/bugs/grid-from-hours-and-min-duration.md``, decision 4).
-
-    **The wire shape is unchanged and a same-day window renders exactly as before** —
-    ``DaySchedule.opens_at``/``closes_at`` are still ``time | None``, and the only kind of window
-    this product has ever configured (``closes_at_minutes <= 1440``) reduces through
-    ``_minutes_to_wire_time`` to the identical wall-clock pair the old ``time``-based
-    implementation produced. A window that crosses local midnight — newly representable in the
-    engine by this task, not by this endpoint — is the one honest limitation left: it reduces to a
-    ``closes_at`` that reads *earlier* than ``opens_at`` as a bare wall-clock value, which the
-    calendar grid does not yet render as a wrapping window
-    (``ops/done/stream-7/passed-midnight.md``'s own "Correction" section). This endpoint still must
-    not crash or misreport coherence for such a Space, and it does not; teaching the grid to draw a
-    wrapping day is separate, larger UI work this task is not asked to do.
-    """
-    matching = [row for row in config.rules if row.enabled and row_applies(row.applies_to, on_date)]
-
-    hours_rows = [row for row in matching if row.rule_type == "availability_hours"]
-    if hours_rows:
-        opens_at_minutes = max(int(row.params["opens_at_minutes"]) for row in hours_rows)
-        closes_at_minutes = min(int(row.params["closes_at_minutes"]) for row in hours_rows)
-        if closes_at_minutes <= opens_at_minutes:
-            # The intersection of two or more matching windows can
-            # legitimately come out empty (see docstring above) — normalise
-            # to a zero-width window rather than report it broken.
-            closes_at_minutes = opens_at_minutes
-    else:
-        opens_at_minutes = None
-        closes_at_minutes = None
-
-    session_rows = [row for row in matching if row.rule_type == "session_length"]
-    session_minutes = (
-        math.lcm(*(int(row.params["session_minutes"]) for row in session_rows))
-        if session_rows
-        else None
-    )
-    anchor_minutes = (
-        (opens_at_minutes if opens_at_minutes is not None else 0)
-        if session_minutes is not None
-        else None
-    )
-
-    coherence_issue: str | None = None
-    if (
-        opens_at_minutes is not None
-        and closes_at_minutes is not None
-        and closes_at_minutes != opens_at_minutes
-        and session_minutes is not None
-        and session_minutes > closes_at_minutes - opens_at_minutes
-    ):
-        coherence_issue = "Session length must not exceed the length of the operating window."
-
-    return DaySchedule(
-        session_minutes=session_minutes,
-        anchor_minutes=anchor_minutes,
-        opens_at=_minutes_to_wire_time(opens_at_minutes),
-        closes_at=_minutes_to_wire_time(closes_at_minutes),
-        coherence_issue=coherence_issue,
+    intervals = project_day(config.shape, on_date).operating_intervals
+    if not intervals:
+        return timedelta(0)
+    return timedelta(
+        minutes=min(
+            duration for interval in intervals for duration in interval.allowed_durations_mins
+        )
     )
 
 
@@ -897,9 +754,9 @@ def evaluate(
     racing the wall clock.
 
     ``context.run`` is resolved from ``history`` and ``booking`` together by
-    ``_resolve_run``, with a gap tolerance equal to this date's own resolved
-    session length (``resolve_day_schedule``, zero when no ``session_length``
-    row governs the date) — see that function's docstring for why a
+    ``_resolve_run``, with a gap tolerance equal to this date's own smallest
+    shape-offered duration (``_gap_tolerance``, zero on a date with no
+    operating interval at all) — see that function's docstring for why a
     tolerance is needed at all. This runs whether or not the canon reads
     history: an empty ``history`` still resolves a run, the request alone.
 
@@ -944,8 +801,7 @@ def evaluate(
         return RuleResult(allowed=False, message=RULE_ERROR_MESSAGE)
 
     history_records = tuple(_engine_record(entry) for entry in history)
-    tolerance_minutes = resolve_day_schedule(config, on_date).session_minutes or 0
-    run = _resolve_run(engine_request, history_records, timedelta(minutes=tolerance_minutes))
+    run = _resolve_run(engine_request, history_records, _gap_tolerance(config, on_date))
 
     engine_context = EngineContext(
         user=UserContext(user_id=booking.user_id),

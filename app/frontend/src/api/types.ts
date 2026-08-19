@@ -331,8 +331,9 @@ export type PreviewStatus = 'none' | 'pending' | 'denied' | 'member'
  * enforces is a set of rule instances of arbitrary number, each possibly
  * scoped to particular weekdays or dates, so there is no single value a field
  * here could carry. Read them through `listSpaceRules` (and `listRuleTypes`
- * for what each type's parameters mean), or — for what a given *date* resolves
- * to, which is what the calendar draws — `getSpaceSchedule`. The timezone is
+ * for what each type's parameters mean), or — for what a given *date* offers,
+ * which is what the calendar draws — `getSpaceCalendar`, the Space's own shape
+ * projected per date (`.claude/rules/calendar-shape.md`). The timezone is
  * the one property of a Space that is genuinely a scalar rather than a rule.
  */
 export interface Space {
@@ -450,55 +451,11 @@ export interface SpaceRuleCreateInput {
   enabled?: boolean
 }
 
-/**
- * Mirrors `DayScheduleRead` — one date's resolved schedule, as
- * `GET /spaces/{public_id}/schedule` serves it (task 6.9).
- *
- * **Nothing renders this any more.** The calendar grid draws a Space's own
- * shape projection instead (`DayProjectionRead` below,
- * `GET /spaces/{public_id}/calendar` — `.claude/rules/calendar-shape.md`).
- * This endpoint and its type stay in the client only because task 10.5, not
- * this one, retires them from the backend.
- *
- * `opens_at` / `closes_at` are the Space's own **local** wall-clock times
- * (`HH:MM:SS`, Python's `time` serialised by FastAPI) — this endpoint never
- * converts to UTC, since it has no instant to judge, only a calendar date to
- * describe. `null` for `session_minutes` /
- * `opens_at` / `closes_at` means the corresponding rule type is not enforced
- * on this date at all — the frontend must render that as "not configured",
- * never invent a fallback window the server did not report.
- *
- * `coherence_issue` is resolved server-side and never recomputed by the
- * client. Only one case remains: the resolved session length exceeds the
- * resolved operating window, so nothing on that date could ever be booked.
- * The two slot-boundary cases this field used to carry are gone with
- * `slot_alignment` — the grid is anchored on the opening time itself now, so
- * an opening time cannot miss it, and a closing time that leaves a short
- * unusable tail is ordinary rather than a conflict. `null` unless the one
- * remaining case is true; a "closed all day" zero-width window is never a
- * conflict, since nothing is bookable in it to begin with.
- *
- * `session_minutes` and `anchor_minutes` are plain minute counts, not
- * wall-clock strings like `opens_at` / `closes_at`. `anchor_minutes` is
- * minutes from local midnight to the date's own resolved opening time — what
- * the session grid is anchored on — and is `null` under the identical
- * condition as `session_minutes`, since a grid that is not enforced has
- * nothing to anchor.
- */
-export interface DayScheduleRead {
-  date: string
-  session_minutes: number | null
-  opens_at: string | null
-  closes_at: string | null
-  coherence_issue: string | null
-  anchor_minutes: number | null
-}
-
 // --- The shape projection (task 10.3), as the calendar grid reads it (task 10.4). --------------
 //
 // Mirrors `app/backend/app/identity/schemas.py`'s `OfferedStartRead` / `OperatingIntervalRead` /
 // `BlackoutIntervalRead` / `DayProjectionRead` field for field, in the package's own vocabulary —
-// minutes from local midnight throughout, never `DayScheduleRead`'s `HH:MM:SS` wall-clock strings.
+// minutes from local midnight throughout, never a `HH:MM:SS` wall-clock string.
 // The grid needs minutes to lay out starts, and converting from minutes to a wall clock and back
 // is two chances to disagree with the availability gate that enforces the identical table
 // (`.claude/rules/calendar-shape.md`).

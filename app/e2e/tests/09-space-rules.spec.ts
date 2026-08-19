@@ -291,9 +291,8 @@ test.describe('the weekly cap counts sessions, not rows', () => {
         court1,
       )
       // Session two: a real gap, so nothing merges it with the pair above.
-      // Space A seeds no `availability_hours` row (`sandbox_seed.py` deletes
-      // the one `create_space` starts with), so an afternoon hour is as
-      // bookable as a morning one.
+      // Space A's calendar shape is open every day, all day (`sandbox_seed.py`),
+      // so an afternoon hour is as bookable as a morning one.
       await createBookingViaApi(
         api,
         localInstantDaysFromNow(DAYS_AHEAD, 14, 0),

@@ -33,6 +33,12 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 IDENTITY_TABLES = {"users", "spaces"}
 BOOKING_TABLE = "bookings"
 
+# The revision immediately before `e2c9a4f10b73`, which retires
+# `availability_hours` and `session_length`. Named rather than reached by
+# alembic's relative syntax so the fixture below plants its rows at a revision
+# a reader can look up.
+RETIREMENT_PARENT_REVISION = "c07aeccce98c"
+
 
 @pytest.fixture
 def alembic_config():
@@ -121,5 +127,75 @@ def test_autogenerate_after_head_wants_no_table_changes(alembic_config, engine):
 
         changed = _table_change_ops(migrations.upgrade_ops)
         assert not changed, f"autogenerate wants table changes at head: {changed}"
+    finally:
+        command.downgrade(alembic_config, "base")
+
+
+def test_retiring_the_two_shape_replaced_types_deletes_their_rows(alembic_config, engine):
+    """The data half of task 10.5, exercised against the real chain.
+
+    A `space_rules` row naming a `rule_type` the catalog cannot resolve denies **every** booking
+    at that Space with `RULE_ERROR_MESSAGE` — the fail-closed path an unregistered type has always
+    taken (`.claude/rules/rule-engine.md`). So a row of either retired type surviving the upgrade
+    does not leave stale data around, it takes that Space offline, which is why this migration's
+    effect is asserted rather than assumed from the chain applying cleanly.
+
+    The rows are planted at the revision *before* the retirement and the upgrade is then finished,
+    so this drives the migration the way a real deployment would rather than inserting into a
+    schema that is already past it.
+    """
+    from alembic import command
+    from sqlalchemy import text
+
+    command.upgrade(alembic_config, RETIREMENT_PARENT_REVISION)
+    try:
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO users (auth0_sub, email, created_at)"
+                    " VALUES ('auth0|mig-test', 'mig-test@example.com', now())"
+                    " RETURNING id"
+                )
+            ).scalar_one()
+            space_id = connection.execute(
+                text(
+                    "INSERT INTO spaces"
+                    " (public_id, name, timezone, created_by_user_id, created_at)"
+                    # 22 characters, matching `ck_spaces_public_id_length`.
+                    " VALUES ('migration-fixture-0001', 'Migration fixture', 'UTC', :user_id,"
+                    " now())"
+                    " RETURNING id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one()
+            for rule_type, params in (
+                ("availability_hours", '{"opens_at_minutes": 540, "closes_at_minutes": 1020}'),
+                ("session_length", '{"session_minutes": 30}'),
+                ("max_duration", '{"max_duration_minutes": 120}'),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO space_rules"
+                        " (space_id, rule_type, params, enabled, created_at, updated_at)"
+                        " VALUES (:space_id, :rule_type, CAST(:params AS jsonb), true,"
+                        " now(), now())"
+                    ),
+                    {"space_id": space_id, "rule_type": rule_type, "params": params},
+                )
+
+        command.upgrade(alembic_config, "head")
+
+        with engine.connect() as connection:
+            surviving = set(
+                connection.execute(
+                    text("SELECT rule_type FROM space_rules WHERE space_id = :space_id"),
+                    {"space_id": space_id},
+                ).scalars()
+            )
+
+        # `max_duration` deliberately stays: a shape says which durations are *offered*, a policy
+        # cap says how long this member may book (OVERVIEW decision 2). A migration that swept it
+        # away with the other two would be over-broad, so it is planted here as the control.
+        assert surviving == {"max_duration"}
     finally:
         command.downgrade(alembic_config, "base")

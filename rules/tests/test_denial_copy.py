@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from rules.canon import DEFAULT_CANON, AvailabilityHoursRule
+from rules.canon import DEFAULT_CANON
 from rules.interfaces import (
     BookingRecord,
     BookingRequest,
@@ -121,16 +121,6 @@ _DEFAULT_CANON_SCENARIOS = {
         request(NOW, NOW + timedelta(hours=3)),
         context(),
     ),
-    "AvailabilityHoursRule": lambda: (
-        request(
-            datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc),
-            datetime(2026, 7, 20, 3, 30, tzinfo=timezone.utc),
-        ),
-        context(
-            frame_for=datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc),
-            frame_end=datetime(2026, 7, 20, 3, 30, tzinfo=timezone.utc),
-        ),
-    ),
 }
 
 
@@ -185,31 +175,6 @@ _REGISTRY_SCENARIOS: dict[str, dict] = {
                     end_at=NOW + timedelta(minutes=30),
                     booking_count=2,
                 )
-            ),
-        ),
-    },
-    "session_length": {
-        "params": {"session_minutes": 30},
-        "resolved": {"anchor_minutes": 0},
-        "case": lambda: (
-            request(
-                datetime(2026, 7, 20, 10, 7, tzinfo=timezone.utc),
-                datetime(2026, 7, 20, 10, 37, tzinfo=timezone.utc),
-            ),
-            context(frame_for=datetime(2026, 7, 20, 10, 7, tzinfo=timezone.utc)),
-        ),
-    },
-    "availability_hours": {
-        "params": {"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60},
-        "resolved": None,
-        "case": lambda: (
-            request(
-                datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc),
-                datetime(2026, 7, 20, 5, 30, tzinfo=timezone.utc),
-            ),
-            context(
-                frame_for=datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc),
-                frame_end=datetime(2026, 7, 20, 5, 30, tzinfo=timezone.utc),
             ),
         ),
     },
@@ -311,32 +276,6 @@ def test_every_registered_type_denies_without_naming_an_absolute_time():
         rule = rule_type.build(scenario["params"], scenario["resolved"])
         req, ctx = scenario["case"]()
         _assert_denies_with_no_absolute_time(rule, req, ctx)
-
-
-# --- Both of the availability rule's branches -----------------------------------------------------
-#
-# The two sweeps above drive one denial per rule, which for `AvailabilityHoursRule` is the
-# "before we open" branch. It has a second one, and each branch carries its own copy — so each is
-# its own chance to reintroduce a bound as a clock time. This is where the times actually were.
-
-
-def test_the_availability_rule_names_no_time_on_either_side_of_its_window():
-    rule = AvailabilityHoursRule(opens_at_minutes=9 * 60, closes_at_minutes=17 * 60)
-    day = datetime(2026, 7, 20, tzinfo=timezone.utc)
-
-    before_open = request(day.replace(hour=5), day.replace(hour=5, minute=30))
-    after_close = request(day.replace(hour=16, minute=30), day.replace(hour=18))
-
-    _assert_denies_with_no_absolute_time(
-        rule,
-        before_open,
-        context(frame_for=before_open.start_at, frame_end=before_open.end_at),
-    )
-    _assert_denies_with_no_absolute_time(
-        rule,
-        after_close,
-        context(frame_for=after_close.start_at, frame_end=after_close.end_at),
-    )
 
 
 # --- A duration is not an absolute time ---------------------------------------------------------

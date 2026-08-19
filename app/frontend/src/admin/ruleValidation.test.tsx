@@ -98,13 +98,19 @@ describe('ruleBrokenReason', () => {
     // `local_time` is stored as minutes from local midnight, exactly like `integer` —
     // `kind` only ever picks the eventual widget (`rules/rules/registry.py`'s
     // `ParamKind` docstring), so a non-numeric value is broken the same way.
+    //
+    // No *hand-written* rule type declares `local_time` any more — the venue's
+    // opening window is the calendar shape's business now, not a rule's
+    // (`.claude/rules/calendar-shape.md`). A generated type still can, which is
+    // why this validation stays and why the worked example here is a plausible
+    // generated id rather than a registered one.
     const types = [
       makeRuleType({
-        rule_type: 'availability_hours',
+        rule_type: 'quiet_hours',
         params: [makeRuleParam({ name: 'opens_at_minutes', kind: 'local_time', label: 'Opens' })],
       }),
     ]
-    const row = { rule_type: 'availability_hours', params: { opens_at_minutes: '7am' } }
+    const row = { rule_type: 'quiet_hours', params: { opens_at_minutes: '7am' } }
 
     expect(ruleBrokenReason(types, row)).toBe('"Opens" must be a number.')
   })
@@ -112,13 +118,13 @@ describe('ruleBrokenReason', () => {
   it('flags a local_time value below its declared minimum', () => {
     const types = [
       makeRuleType({
-        rule_type: 'availability_hours',
+        rule_type: 'quiet_hours',
         params: [
           makeRuleParam({ name: 'opens_at_minutes', kind: 'local_time', label: 'Opens', minimum: 0 }),
         ],
       }),
     ]
-    const row = { rule_type: 'availability_hours', params: { opens_at_minutes: -5 } }
+    const row = { rule_type: 'quiet_hours', params: { opens_at_minutes: -5 } }
 
     // `makeRuleParam`'s default `unit` is `'minutes'`, and the message names it —
     // identical to the `integer` case above.

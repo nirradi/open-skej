@@ -23,7 +23,7 @@ is never reachable without first being a member of its Space and its sequential
 id discloses nothing to anyone who is not already there.
 """
 
-from datetime import date, datetime, time
+from datetime import date, datetime
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -45,7 +45,6 @@ from app.identity.models import (
     SpaceRule,
     User,
 )
-from app.rules_stub import DaySchedule
 
 # The four states a link-holder can be in with respect to a Space, as reported by
 # ``GET /spaces/{public_id}/preview``.
@@ -582,60 +581,13 @@ class SpaceRuleUpdate(BaseModel):
         return self
 
 
-# --- The resolved schedule (task 6.9). ---------------------------------------
-#
-# `GET /spaces/{public_id}/schedule` is the server-resolves-the-frontend-
-# renders endpoint: for each date in the requested range it reports the slot
-# size and operating window a booking on that date would actually be judged
-# against, so the calendar never has to re-derive rule semantics itself (see
-# `app.rules_stub.resolve_day_schedule`, which does all the actual work —
-# this model only shapes its output for the wire).
-
-
-class DayScheduleRead(BaseModel):
-    """One date's resolved schedule, as ``GET /spaces/{public_id}/schedule`` serves it.
-
-    ``opens_at`` / ``closes_at`` stay the Space's own **local** wall-clock
-    times — this endpoint, unlike ``app.rules_stub``'s booking-evaluation
-    path, never converts to UTC (see that function's docstring). ``None``
-    means the corresponding rule type is not enforced on this date at all;
-    ``coherence_issue`` is ``None`` unless the resolved session length exceeds the resolved
-    window itself (a zero-width "closed all day" window is not a conflict — see
-    ``resolve_day_schedule``).
-
-    ``anchor_minutes`` is a plain minute count too, and never converted to a wire ``time`` — it is
-    where the session grid starts counting from (that date's own resolved opening minute, or local
-    midnight when no ``availability_hours`` row governs the date), not a bookable clock time in its
-    own right, so ``_minutes_to_wire_time`` (which folds a minutes-past-midnight value onto a wall
-    clock, for a field that *is* a clock time) has no business touching either of them.
-    """
-
-    date: date
-    session_minutes: Optional[int]
-    anchor_minutes: Optional[int]
-    opens_at: Optional[time]
-    closes_at: Optional[time]
-    coherence_issue: Optional[str]
-
-    @classmethod
-    def build(cls, on_date: date, schedule: DaySchedule) -> "DayScheduleRead":
-        return cls(
-            date=on_date,
-            session_minutes=schedule.session_minutes,
-            anchor_minutes=schedule.anchor_minutes,
-            opens_at=schedule.opens_at,
-            closes_at=schedule.closes_at,
-            coherence_issue=schedule.coherence_issue,
-        )
-
-
 # --- The shape projection (task 10.3). ---------------------------------------------------------
 #
 # `GET /spaces/{public_id}/calendar` serves `shape.projection.project_day`'s own output, field for
-# field, in the package's own vocabulary — minutes from local midnight throughout, never
-# `DayScheduleRead`'s `HH:MM:SS` wall-clock strings (`.claude/rules/calendar-shape.md`, "the wire
-# says the same"). The grid needs minutes to lay out slots, and converting from minutes to a wall
-# clock and back is two chances to disagree with the gate that enforces the identical table.
+# field, in the package's own vocabulary — minutes from local midnight throughout, never an
+# `HH:MM:SS` wall-clock string (`.claude/rules/calendar-shape.md`, "the wire says the same"). The
+# grid needs minutes to lay out slots, and converting from minutes to a wall clock and back is two
+# chances to disagree with the gate that enforces the identical table.
 
 
 class OfferedStartRead(BaseModel):

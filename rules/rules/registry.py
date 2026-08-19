@@ -14,7 +14,7 @@ hand-coding a third of it.
   by must not silently orphan every row that named it.
 * a **label** and a **description** — the description is prose for an admin choosing a rule, "what
   it refuses", written for someone who will never read the Python. Hand-written for each of the
-  ten types below; for a generated type it is authored by the model in a manifest call made after
+  eight types below; for a generated type it is authored by the model in a manifest call made after
   the generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
   prompt.
 * an **ordered parameter schema** (``RuleParam``) — rich enough to render a form field and to
@@ -49,14 +49,10 @@ hand-coding a third of it.
   represent — the engine's flat AND makes two instances of the same type coherent (they AND to
   the stricter), which is coherent for ``max_bookings_per_week`` but rarely what anyone meant. False
   says the opposite: multiple instances scoped to different days or dates via ``applies_to`` are the
-  intended pattern, not a mistake — ``availability_hours`` and ``max_duration`` are both meant to
-  vary by day (e.g. "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as two separate ``availability_hours``
-  rows), so a second instance of either warrants no warning at all. ``session_length`` is the same
-  shape — a club running a finer grid on weekday evenings than on a lazy Sunday morning is scoping
-  session length by day exactly the way it already scopes hours — so it is ``is_single=False`` too.
-  ``max_consecutive_duration`` is ``is_single=False`` for the identical reason ``max_duration``
-  already is: a Space is free to cap consecutive play tighter on a busy evening than on a quiet
-  Sunday morning via two day-scoped rows, and that is the intended pattern for it too.
+  intended pattern, not a mistake — ``max_duration`` is meant to vary by day (e.g. a tighter cap on
+  a busy evening than on a quiet Sunday morning via two day-scoped rows), so a second instance of it
+  warrants no warning at all. ``max_consecutive_duration`` is ``is_single=False`` for the identical
+  reason.
 * a **build function** from validated params (and, for a type with ``needs_local_resolution``, a
   second mapping of resolved values) to a constructed instance of the rule it names.
 
@@ -76,12 +72,10 @@ from enum import Enum
 from typing import Any
 
 from .canon import (
-    AvailabilityHoursRule,
     BookingHorizonRule,
     MaxConsecutiveDurationRule,
     MaxDurationRule,
     NotInThePastRule,
-    SessionLengthRule,
 )
 from .frequency import (
     MaxBookingsPerDayRule,
@@ -103,14 +97,17 @@ __all__ = [
 class ParamKind(str, Enum):
     """The shape of one declared parameter.
 
-    Only two values, because only two are needed by the ten types registered below: a plain
-    positive integer (a day count, a minute count, a booking count) and a local time of day
-    presented as a clock but **stored as an integer** — minutes from local midnight (an opening or
-    closing hour). ``LOCAL_TIME`` describes *presentation*, not storage: the value underneath it is
-    exactly as much an ``int`` as ``INTEGER``'s is, which is what lets a form render a time-of-day
-    widget (09:00) while the wire and the database hold the plain minute count (540) the rule
-    actually reads off ``context.local``. A ``str`` subclass so a future API boundary serialises
-    this as the plain string a form or a JSON body already expects, without a translation table.
+    Two values: a plain positive integer (a day count, a minute count, a booking count) and a local
+    time of day presented as a clock but **stored as an integer** — minutes from local midnight.
+    ``LOCAL_TIME`` describes *presentation*, not storage: the value underneath it is exactly as much
+    an ``int`` as ``INTEGER``'s is, which is what would let a form render a time-of-day widget
+    (09:00) while the wire and the database hold the plain minute count (540). No type currently
+    registered below declares a ``LOCAL_TIME`` parameter — ``availability_hours``, the last one
+    that did, is retired, its opening-hours question now answered by the calendar shape
+    (``rules/shape/``, ``.claude/rules/calendar-shape.md``) instead of a rule. The kind stays
+    registered because a future generated type's manifest may still declare one. A ``str`` subclass
+    so a future API boundary serialises this as the plain string a form or a JSON body already
+    expects, without a translation table.
     """
 
     INTEGER = "integer"
@@ -127,19 +124,10 @@ class RuleParam:
     those exists. One schema serves both, because two independently written ones would drift, and
     the drift would show up as a form whose own submission gets refused.
 
-    ``minimum`` is the only bound these ten types need: every integer parameter registered below
-    must be positive (a zero-day horizon, a zero-minute duration or a zero-minute session means
-    nothing), and a ``LOCAL_TIME`` parameter's own ``minimum`` bounds only the single value it names
-    in isolation (``opens_at_minutes >= 0``, ``closes_at_minutes >= 1``) — the pairwise relationship
-    between the two (``opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440``) has no
-    single-field ``minimum`` to express it and is enforced where ``AvailabilityHoursRule``'s own
-    constructor and the write-boundary validation both already enforce it
-    (``.claude/rules/identity-and-access.md``). Nothing here declares a maximum or a step, because
-    nothing registered needs one *as a single-field bound* — add one against the type that actually
-    requires it. ``session_minutes`` additionally must *divide* 1440, which this schema has no
-    field to express either; that enforcement stays inside ``SessionLengthRule``'s own constructor,
-    mirrored at the API boundary the identical way ``AvailabilityHoursRule``'s own range is
-    (``.claude/rules/identity-and-access.md``).
+    ``minimum`` is the only bound these eight types need: every integer parameter registered below
+    must be positive (a zero-day horizon or a zero-minute duration means nothing). Nothing here
+    declares a maximum or a step, because nothing registered needs one *as a single-field bound* —
+    add one against the type that actually requires it.
     """
 
     name: str
@@ -170,7 +158,7 @@ class RuleType:
     """Everything a registered rule type declares about itself. See the module docstring.
 
     ``description`` is prose for an admin choosing a rule, never for a developer reading the
-    source — "what it refuses", in a sentence or two. Hand-written for each of the ten types
+    source — "what it refuses", in a sentence or two. Hand-written for each of the eight types
     below; for a generated type it is authored by the model in a manifest call made after the
     generation loop verifies the rule (``rules/generation/manifest.py``), never the admin's own
     prompt, and validated non-empty the same way ``label`` and ``rule_type`` already are: a picker
@@ -241,32 +229,6 @@ def _build_max_consecutive_duration(
     )
 
 
-def _build_session_length(
-    params: Mapping[str, Any], resolved: Mapping[str, Any] | None
-) -> BaseRule:
-    # `SessionLengthRule` needs its `anchor_minutes` resolved, never a stored param: `params` holds
-    # only `session_minutes`, and `resolved` carries the date's own resolved opening minutes (or 0
-    # when no `availability_hours` row governs the date) — resolving that per date, in the Space's
-    # own zone, is the adapter's job, the same split `_build_max_bookings_per_week` and its siblings
-    # draw between raw params and adapter-resolved values.
-    assert resolved is not None
-    return SessionLengthRule(
-        session_minutes=params["session_minutes"], anchor_minutes=resolved["anchor_minutes"]
-    )
-
-
-def _build_availability_hours(
-    params: Mapping[str, Any], resolved: Mapping[str, Any] | None = None
-) -> BaseRule:
-    # Unlike every other type with `needs_local_resolution`, this one needs no per-booking
-    # resolution at all any more: `params` already holds the two minutes-from-local-midnight
-    # integers the rule reads directly, with nothing left for an adapter to convert.
-    return AvailabilityHoursRule(
-        opens_at_minutes=params["opens_at_minutes"],
-        closes_at_minutes=params["closes_at_minutes"],
-    )
-
-
 def _build_max_bookings_per_week(
     params: Mapping[str, Any], resolved: Mapping[str, Any] | None
 ) -> BaseRule:
@@ -326,28 +288,25 @@ def _build_max_duration_per_day(
 
 # --- the starter registry --------------------------------------------------------------------
 #
-# The ten predicates in force today (`rule-engine.md`, "The canon" and "`frequency.py`"). Priority
+# The eight predicates in force today (`rule-engine.md`, "The canon" and "`frequency.py`"). Priority
 # reproduces that section's documented assembled order exactly, spaced in multiples of 10 (plus
-# deliberate multiple-of-5 insertions) rather than consecutive integers: `session_length` sits at
-# 35 — `slot_alignment`'s own priority, the type it replaces
-# (`ops/pending/bugs/grid-from-hours-and-min-duration.md`) — strictly between `max_duration` (30)
-# and `availability_hours` (40) — beside `max_duration` rather than with the date rules or the
-# counting rules, because it is a remedy the user can apply within an otherwise-bookable date and
-# time, the same class of denial as duration and hours. `min_duration` is gone along with
-# `slot_alignment`: a booking whose start and end both land on `session_length`'s grid is already
-# at least one session long, so the floor it used to enforce falls out for free.
-# `max_consecutive_duration` sits at 32, strictly between `max_duration` (30) and `session_length`
-# (35): a booking that breaks both duration rules at once is more usefully told to shorten itself
+# deliberate multiple-of-5 insertions) rather than consecutive integers, so a later type can still
+# be inserted between two existing ones without renumbering the rest.
+#
+# `session_length` and `availability_hours` are retired (task 10.5) — the calendar shape now says
+# what they said — but their priorities (35 and 40) are deliberately not reassigned to anything
+# else: the gaps they leave are exactly what let them have landed there in the first place, and
+# reusing a freed number would only reintroduce the renumbering risk this spacing exists to avoid.
+# `max_consecutive_duration` sits at 32, strictly between `max_duration` (30) and the 35 gap:
+# a booking that breaks both duration rules at once is more usefully told to shorten itself
 # (fixable by editing only this request) than to stop abutting a neighbour (fixable only by
 # touching a booking that already exists), so `max_duration` keeps first refusal.
-# `max_duration_per_day` (42) and `max_bookings_per_day` (45) sit strictly between
-# `availability_hours` (40) and `max_bookings_per_week` (50) — task 8.7's own reasoning: of the
-# three windows a user could break a cap in at once (day/week/month), the narrowest is the most
-# useful thing to be told, so the day-scoped pair comes before the week and month rules; between
-# the two, the duration total precedes the booking count for the same reason `max_duration`
-# precedes `max_consecutive_duration` above — a total is judged before a count when both could
-# fire on the same day. The gaps either side of every insertion are what let it land without
-# renumbering anything else.
+# `max_duration_per_day` (42) and `max_bookings_per_day` (45) sit strictly between the 40 gap
+# and `max_bookings_per_week` (50) — task 8.7's own reasoning: of the three windows a user could
+# break a cap in at once (day/week/month), the narrowest is the most useful thing to be told, so
+# the day-scoped pair comes before the week and month rules; between the two, the duration total
+# precedes the booking count for the same reason `max_duration` precedes `max_consecutive_duration`
+# above — a total is judged before a count when both could fire on the same day.
 
 _RULE_TYPES: tuple[RuleType, ...] = (
     RuleType(
@@ -428,57 +387,6 @@ _RULE_TYPES: tuple[RuleType, ...] = (
         needs_local_resolution=False,
         is_single=False,
         build=_build_max_consecutive_duration,
-    ),
-    RuleType(
-        rule_type="session_length",
-        label="Session length",
-        description="Bookings are made in whole sessions. The first session of the day starts "
-        "when the venue opens, and every booking must start and end on a session boundary — so a "
-        "30-minute session length allows bookings of 30, 60 or 90 minutes, starting on the half "
-        "hour from opening.",
-        priority=35,
-        params=(
-            RuleParam(
-                name="session_minutes",
-                kind=ParamKind.INTEGER,
-                label="Session length",
-                unit="minutes",
-                required=True,
-                minimum=1,
-            ),
-        ),
-        reads_history=False,
-        needs_local_resolution=True,
-        is_single=False,
-        build=_build_session_length,
-    ),
-    RuleType(
-        rule_type="availability_hours",
-        label="Availability hours",
-        description="Refuses a booking outside the Space's own opening hours, in its local time.",
-        priority=40,
-        params=(
-            RuleParam(
-                name="opens_at_minutes",
-                kind=ParamKind.LOCAL_TIME,
-                label="Opens at",
-                unit=None,
-                required=True,
-                minimum=0,
-            ),
-            RuleParam(
-                name="closes_at_minutes",
-                kind=ParamKind.LOCAL_TIME,
-                label="Closes at",
-                unit=None,
-                required=True,
-                minimum=1,
-            ),
-        ),
-        reads_history=False,
-        needs_local_resolution=False,
-        is_single=False,
-        build=_build_availability_hours,
     ),
     RuleType(
         rule_type="max_duration_per_day",

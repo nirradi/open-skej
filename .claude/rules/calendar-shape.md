@@ -72,13 +72,15 @@ Five decisions in that schema, each settled once here rather than re-litigated b
    thing that makes a schema change in a later stream something other than a guess about which rows
    are which.
 2. **`end_time` may exceed `24:00`** — `"26:00"` is 02:00 the next local day, representing a venue
-   open past midnight. This is the identical choice `AvailabilityHoursRule` made moving onto
-   `closes_at_minutes` above 1440 (`.claude/rules/rule-engine.md`), for the identical reason: an
-   inversion (`end_time` earlier than `start_time`) is a value a typo can produce and a meaning
-   nobody can read, whereas `26:00` says exactly one thing. It is capped at `start_time + 24h`. A
-   window crossing local midnight is *represented* by this schema but the grid (task 10.4) does not
-   *draw* one — `ops/done/stream-7/passed-midnight.md` and `resolve_day_schedule`'s own docstring
-   record the same limit for the pre-shape calendar, and this stream does not lift it.
+   open past midnight. An inversion (`end_time` earlier than `start_time`) is a value a typo can
+   produce and a meaning nobody can read, whereas `26:00` says exactly one thing; a window is
+   therefore capped at `start_time + 24h` and always starts on the day it is configured for, so what
+   a bare pair of clock times could only express as an ambiguous inversion is a value nothing can
+   typo into existing at all. This is the identical choice the retired `availability_hours` rule
+   type made when it moved onto minutes ("Two rule types this document replaced", below), carried
+   across rather than re-argued. A window crossing local midnight is *represented* by this schema
+   but the grid (task 10.4) does not *draw* one — `ops/done/stream-7/passed-midnight.md` records the
+   same limit for the pre-shape calendar, and this stream does not lift it.
 3. **A blackout may carry `days` or `date`, never both**, and neither means every day. `date` is the
    one-off ("closed this Friday"); `days` is the recurring break ("closed Mondays"). A blackout
    naming neither applies every day within its own `effective_from`/`effective_to` range — exactly
@@ -133,10 +135,14 @@ offer at that start, then a start that does not land on any covering block's own
 
 **The grid is chunked forward from each operating block's own `start_time`, never from local
 midnight**, and the step is that block's own smallest declared duration,
-`min(allowed_durations_mins)`. This reproduces the anchoring decision `SessionLengthRule` already
-made ("the anchor is the date's own resolved opening time") — per block here rather than per Space,
-since a shape's blocks can each open at a different time of day — and is why retiring that rule type
-in task 10.5 loses no behaviour. Each block's grid is entirely independent: two overlapping blocks
+`min(allowed_durations_mins)`. **Anchoring on the opening time rather than on midnight is a
+decision, not an implementation detail**, and it is the one the retired `session_length` rule type
+established ("Two rule types this document replaced", below): a venue's sessions begin when the
+venue opens, so a grid anchored anywhere else describes a schedule nobody asked for — a block
+opening at 09:15 against a midnight-anchored hourly grid has no start at 09:15 at all. It is
+resolved per **block** here rather than per Space, which is strictly better than what it replaces:
+two blocks opening at different times of day each get their own correct anchor with no scoping
+mechanism to reconcile. Each block's grid is entirely independent: two overlapping blocks
 each keep their own anchor and step, and a start reachable from *either* grid is offered — decision
 5's union expressed at the level of an actual candidate start, not only as a description of the
 merged structural interval. Every declared duration is checked independently for fit at each such
@@ -257,20 +263,20 @@ engine's half-open one — this is a calendar range a human typed, not an instan
 `shape.project_day` directly rather than leaving the client to derive it — the same rule
 `identity-and-access.md` already states for `anchor_minutes` ("the client never derives it, because
 which rows govern a date is the server's question"), carried into the shape. The range is bounded
-by the same `MAX_SCHEDULE_DAYS` constant `GET /spaces/{public_id}/schedule` already uses, rather
-than a second number.
+by `MAX_SCHEDULE_DAYS` — two calendar months, comfortably more than the single week the grid ever
+asks for in one request, while still bounding the work one request can cause.
 
 **Two roles sit on this one route.** Member+ reads the live shape; `draft=true` requires admin+,
 checked inline against the caller's resolved role rather than inferred from the query string — a
 draft is an admin's half-finished thought and must not be visible to members. The wire shape mirrors
-`rules.shape.projection.DayProjection` field for field, in the package's own vocabulary — minutes
-from local midnight throughout, never `DayScheduleRead`'s `HH:MM:SS` wall-clock strings, because
-converting from minutes to a wall clock and back is two chances to disagree with the gate that
-enforces the identical table.
+`rules.shape.projection.DayProjection` field for field, in the package's own vocabulary — **minutes
+from local midnight throughout, never a `HH:MM:SS` wall-clock string**, because converting from
+minutes to a wall clock and back is two chances to disagree with the gate that enforces the
+identical table.
 
-This endpoint is what the calendar grid reads, and the only thing it reads. `GET
-/spaces/{public_id}/schedule` still exists and nothing renders it any more; it is retired along
-with the two rule types it resolves (10.5, below).
+This endpoint is what the calendar grid reads, and the only thing it reads. There is no second
+schedule endpoint beside it: `GET /spaces/{public_id}/schedule` was retired with the two rule types
+it resolved (below).
 
 ## What the grid draws, and what it deliberately does not know
 
@@ -321,10 +327,60 @@ records the identical limit for the pre-shape calendar, and this stream does not
 issues no booking request and draws no booking layer, so the component a member books on is the one
 a draft is previewed with — one grid, not a second implementation that could disagree with it.
 
+## Two rule types this document replaced
+
+**`availability_hours` and `session_length` were retired on 2026-08-18**, along with `GET
+/spaces/{public_id}/schedule` and the `resolve_day_schedule` that served it. They were the two canon
+rule types (`.claude/rules/rule-engine.md`) that expressed a venue's opening window and the grid its
+bookings sat on, and the shape expresses both — as one document a calendar can be **drawn** from
+rather than two predicates that can only answer yes or no about a booking already proposed. Leaving
+them registered would have left an admin two places to configure hours that can disagree, which is
+the state this stream exists to end (OVERVIEW decision 2). This section exists so that a plan file
+or a comment from Stream 6 or 8 naming either type is one hop from finding out where it went.
+
+Retirement here means **gone**, not deprecated: both types left `rules.REGISTRY`, both classes left
+`rules.canon`, `AvailabilityHoursRule` left `DEFAULT_CANON` (which is now three rules), the two
+write-boundary validators left `app.identity.service`, and a migration deleted every `space_rules`
+row of either type. Nothing was derived from those rows on the way out — there is no production data
+to derive a shape from (OVERVIEW decision 3), so a derivation would have been written for zero rows
+and tested against fixtures invented to exercise it. `create_space` seeds no rule row at all now; a
+fresh venue is bookable because of its live `DEFAULT_SHAPE` row.
+
+`max_duration` deliberately **stayed** a rule. A shape's `allowed_durations_mins` says which lengths
+are *offered*; `max_duration` says how long *this member* may book, which a later stream will want
+to vary by who is asking. Two different statements, and only one of them is drawable.
+
+Two arguments those types established are load-bearing and live on here rather than being lost with
+them: the grid is anchored on the opening time rather than on local midnight ("The projection",
+above), and the run's gap tolerance is one bookable length rather than exact abutment (below).
+
+### The run's gap tolerance is re-sourced from the projection
+
+`rules_stub._resolve_run` merges a user's adjoining bookings into one run, and it closes a gap
+smaller than a **tolerance** rather than requiring exact abutment. That tolerance used to be the
+date's own resolved `session_length`. It is now the smallest duration this shape offers on that
+date — `app.rules_stub._gap_tolerance`, the minimum `allowed_durations_mins` across
+`project_day(shape, on_date)`'s operating intervals, and zero on a date with no operating block.
+
+The original argument survives the move intact, which is why the move is a re-sourcing rather than a
+rewrite: **any gap a legal booking could actually occupy is at least one bookable length long**, so
+a gap shorter than that is dead space nobody could ever construct a booking to fill, and merging
+across it is what stops such a gap fracturing every run-based rule for free. The shape's allowed
+durations are now the complete statement of what a legal booking's length may be, so they are
+exactly the right source. `merge_adjoining_spans` joins on `gap < tolerance` **strictly**, so where
+one uniform grid governs a date the tolerance changes nothing — every gap there is a whole multiple
+of the step — and it earns its place on a shape offering several durations, or one whose blocks keep
+separate anchors.
+
+**This is the one consequence of retirement that is invisible from the code being deleted.** Left
+un-re-sourced, the tolerance becomes zero everywhere, the sweep stops merging across any
+non-abutting gap, and `max_consecutive_duration` and all three counting rules quietly loosen —
+nothing raises and no test that existed at the time fails. `SpaceRuleConfig.shape` therefore
+defaults to `DEFAULT_SHAPE`, the document a fresh Space actually holds, never to `None`: an absent
+shape resolves to a tolerance of zero, and zero is the permissive direction.
+
 ## What later tasks in this stream add here
 
-* **10.5** — the retirement of `availability_hours` and `session_length`, and where the run's gap
-  tolerance is re-sourced from once `resolve_day_schedule` is gone.
 * **10.6** — the shape agent: one prompt, one validated document, one retry against
   `InvalidShapeError`'s own message.
 * **10.7** — the shape benchmark, asserted on the projection rather than the JSON.

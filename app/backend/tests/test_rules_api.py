@@ -20,14 +20,14 @@ from typing import Any, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.db.models import Base
 from app.db.session import get_session
 from app.identity import service
-from app.identity.models import MembershipRole, Space, SpaceMembership, SpaceRule, User
+from app.identity.models import MembershipRole, Space, SpaceMembership, User
 from app.main import app
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -114,19 +114,6 @@ def _add_member(session: Session, space: Space, user: User, role: MembershipRole
     session.commit()
 
 
-def _clear_rules(session: Session, space: Space) -> None:
-    """Delete every ``space_rules`` row for ``space``, bypassing the API.
-
-    Used only by the "empty Space" test: ``service.create_space`` always
-    seeds ``availability_hours`` and ``session_length`` rows so a fresh
-    Space is immediately bookable, so a genuinely empty list needs those
-    cleared first.
-    """
-    for rule in session.execute(select(SpaceRule).where(SpaceRule.space_id == space.id)).scalars():
-        session.delete(rule)
-    session.commit()
-
-
 # --- GET /rule-types ----------------------------------------------------------
 
 
@@ -137,13 +124,16 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
     body = response.json()
 
     rule_type_ids = [entry["rule_type"] for entry in body]
+    # `session_length` (35) and `availability_hours` (40) used to sit between
+    # `max_consecutive_duration` and `max_duration_per_day`. Both were retired
+    # with the calendar shape (task 10.5) and their priorities are deliberately
+    # left unused rather than closed up — renumbering would silently change
+    # which denial a member reads (`.claude/rules/rule-engine.md`).
     assert rule_type_ids == [
         "not_in_the_past",
         "booking_horizon",
         "max_duration",
         "max_consecutive_duration",
-        "session_length",
-        "availability_hours",
         "max_duration_per_day",
         "max_bookings_per_day",
         "max_bookings_per_week",
@@ -185,32 +175,18 @@ def test_rule_types_lists_every_registered_type_in_priority_order(api: Api, alic
     # the run it reads is resolved from history, so the router must still be told to load it.
     assert max_consecutive_duration_entry["reads_history"] is True
 
-    session_length_entry = next(entry for entry in body if entry["rule_type"] == "session_length")
-    assert session_length_entry["params"] == [
-        {
-            "name": "session_minutes",
-            "kind": "integer",
-            "label": "Session length",
-            "unit": "minutes",
-            "required": True,
-            "minimum": 1,
-        }
-    ]
-    assert session_length_entry["is_single"] is False
-    assert session_length_entry["reads_history"] is False
-
     not_in_the_past_entry = next(entry for entry in body if entry["rule_type"] == "not_in_the_past")
     assert not_in_the_past_entry["params"] == []
 
 
-def test_rule_types_serve_a_description_for_all_ten_hand_written_types(
+def test_rule_types_serve_a_description_for_all_eight_hand_written_types(
     api: Api, alice: User
 ) -> None:
     """A picker where some entries explain themselves and others do not is worse than one where
     none do — every hand-written type carries a non-empty description over the wire."""
     body = api.as_user(alice).get("/rule-types").json()
 
-    assert len(body) == 10
+    assert len(body) == 8
     for entry in body:
         assert isinstance(entry["description"], str)
         assert entry["description"].strip()
@@ -226,35 +202,24 @@ def test_rule_types_is_reachable_by_any_authenticated_caller_with_no_space_at_al
     response = api.as_user(alice).get("/rule-types")
 
     assert response.status_code == 200
-    assert len(response.json()) == 10
+    assert len(response.json()) == 8
 
 
 # --- GET /spaces/{public_id}/rules --------------------------------------------
 
 
-def test_list_space_rules_returns_the_seeded_default_rows(
+def test_a_fresh_space_is_seeded_with_no_rule_rows_at_all(
     api: Api, alice: User, space_a: Space
 ) -> None:
-    """A fresh Space is seeded with ``availability_hours`` and
-    ``session_length`` rows (``service.create_space``) so it is immediately
-    bookable.
+    """``create_space`` seeds no ``space_rules`` row of any type (task 10.5).
+
+    It used to seed ``availability_hours`` and ``session_length`` so a fresh
+    Space was immediately bookable; what makes one bookable now is the live
+    ``DEFAULT_SHAPE`` calendar-shape row written in the same transaction
+    (``.claude/rules/identity-and-access.md``). So "not enforced" is the
+    absence of a row here for *every* rule type, with no exception a new
+    venue starts life carrying.
     """
-    response = api.as_user(alice).get(f"/spaces/{space_a.public_id}/rules")
-
-    assert response.status_code == 200
-    body = response.json()
-    rule_types = {row["rule_type"] for row in body}
-    assert rule_types == {"availability_hours", "session_length"}
-    for row in body:
-        assert row["enabled"] is True
-        assert row["applies_to"] is None
-
-
-def test_list_space_rules_is_empty_for_a_space_with_none_configured(
-    api: Api, session: Session, alice: User, space_a: Space
-) -> None:
-    _clear_rules(session, space_a)
-
     response = api.as_user(alice).get(f"/spaces/{space_a.public_id}/rules")
 
     assert response.status_code == 200
@@ -324,31 +289,30 @@ def test_post_unknown_param_is_422_naming_it(api: Api, alice: User, space_a: Spa
     assert "bogus" in response.json()["detail"]
 
 
-def test_post_availability_hours_inverted_is_422(api: Api, alice: User, space_a: Space) -> None:
-    payload = {
-        "rule_type": "availability_hours",
-        "params": {"opens_at_minutes": 17 * 60, "closes_at_minutes": 9 * 60},
-    }
+@pytest.mark.parametrize(
+    "rule_type, params",
+    [
+        ("availability_hours", {"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60}),
+        ("session_length", {"session_minutes": 30}),
+    ],
+)
+def test_post_a_retired_rule_type_is_422(
+    api: Api, alice: User, space_a: Space, rule_type: str, params: dict
+) -> None:
+    """``availability_hours`` and ``session_length`` were retired with the calendar shape.
 
-    response = api.as_user(alice).post(f"/spaces/{space_a.public_id}/rules", json=payload)
-
-    assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "Opening time must be within a single day, and earlier than closing time by at most 24"
-        " hours."
+    Retirement means **gone**, not deprecated (``.claude/rules/calendar-shape.md``): both left
+    ``rules.REGISTRY``, so a payload naming either is refused by the same unknown-type path any
+    invented id takes, with no lingering acceptance for the two ids an admin's stale bookmark or
+    an old client might still send. This is the guard that would catch either one being quietly
+    re-registered — leaving an admin two places to configure hours that can disagree, which is
+    the state this stream exists to end.
+    """
+    response = api.as_user(alice).post(
+        f"/spaces/{space_a.public_id}/rules", json={"rule_type": rule_type, "params": params}
     )
 
-
-def test_post_session_length_not_dividing_1440_is_422(
-    api: Api, alice: User, space_a: Space
-) -> None:
-    payload = {"rule_type": "session_length", "params": {"session_minutes": 7}}
-
-    response = api.as_user(alice).post(f"/spaces/{space_a.public_id}/rules", json=payload)
-
     assert response.status_code == 422
-    assert "session_minutes" in response.json()["detail"]
-    assert "1440" in response.json()["detail"]
 
 
 def test_post_on_an_archived_space_is_409(
@@ -423,29 +387,26 @@ def test_patch_replaces_params_and_revalidates(api: Api, alice: User, space_a: S
     assert row["params"] == {"max_duration_minutes": 30}
 
 
-def test_patch_availability_hours_with_only_one_bound_merges_with_the_stored_pair(
+def test_patch_omitting_params_entirely_keeps_the_stored_ones(
     api: Api, alice: User, space_a: Space
 ) -> None:
-    """A submission naming only one of ``opens_at_minutes``/``closes_at_minutes``
-    merges with what is already stored rather than failing "missing required" —
-    the same effective-pair resolution ``update_space`` performs for its own PATCH.
+    """A PATCH is validated against the row's **effective** params, not the payload alone.
+
+    A submission that names no ``params`` at all — toggling ``enabled``, narrowing
+    ``applies_to`` — must not be refused as "missing required parameter" for a value the caller
+    never meant to touch, and must leave that value exactly as stored. Every registered type
+    happens to carry a single parameter today, so this is the whole surface the merge still has;
+    the two multi-parameter types it also covered were retired with the calendar shape (task
+    10.5), and the resolution itself is unchanged.
     """
-    rule = _create_rule(
-        api,
-        alice,
-        space_a,
-        rule_type="availability_hours",
-        params={"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60},
-    )
+    rule = _create_rule(api, alice, space_a, rule_type="booking_horizon", params={"days": 30})
     url = f"/spaces/{space_a.public_id}/rules/{rule['id']}"
 
-    response = api.as_user(alice).patch(url, json={"params": {"opens_at_minutes": 10 * 60}})
+    response = api.as_user(alice).patch(url, json={"enabled": False})
 
     assert response.status_code == 200
-    assert response.json()["params"] == {
-        "opens_at_minutes": 10 * 60,
-        "closes_at_minutes": 17 * 60,
-    }
+    assert response.json()["params"] == {"days": 30}
+    assert response.json()["enabled"] is False
 
 
 def test_patch_null_params_is_422(api: Api, alice: User, space_a: Space) -> None:

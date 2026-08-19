@@ -249,12 +249,9 @@ def test_every_bound_rejects_a_non_zero_offset(field_name: str) -> None:
 
 @pytest.mark.parametrize("label", ["day", "week", "month"])
 def test_an_inverted_pair_is_rejected(label: str) -> None:
-    """Two absolute instants describe no recurring window, so there is no wrap to represent.
-
-    ``AvailabilityHoursRule``'s bounds invert legitimately — they are clock times and inversion
-    means "this window crosses a UTC day". These are not clock times, so an inversion here is
-    exactly what it looks like: a caller that resolved the pair the wrong way round.
-    """
+    """Two absolute instants describe no recurring window, so there is no wrap to represent — an
+    inversion here is exactly what it looks like: a caller that resolved the pair the wrong way
+    round."""
     expected = rf"LocalFrame\.{label}_start must be strictly before LocalFrame\.{label}_end"
     with pytest.raises(ValueError, match=expected):
         frame(**{f"{label}_start": utc(2026, 8, 1), f"{label}_end": utc(2026, 7, 1)})

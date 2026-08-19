@@ -183,9 +183,9 @@ class LocalFrame:
 
     Every bound is resolved from **local midnight** and nothing else, so a day, a week and a month
     all begin when the *venue's* day begins rather than at UTC midnight. Each is a half-open
-    ``[start, end)`` pair of two absolute instants: unlike ``AvailabilityHoursRule``'s deliberately
-    invertible clock times, these describe no recurring window and have no wrap to represent, so an
-    inverted pair is a caller bug and is rejected here.
+    ``[start, end)`` pair of two absolute instants describing one specific occurrence, not a
+    recurring window, so it has no wrap to represent: an inverted pair is a caller bug and is
+    rejected here.
 
     ``start_minutes`` and ``end_minutes`` are minutes from local midnight, derived from the instants
     rather than from any wall clock — which is what keeps them right on the two days a year a local
