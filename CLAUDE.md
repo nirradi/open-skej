@@ -75,7 +75,8 @@ rules/rules/
                    stores, its parameter schema, its priority, and the function that builds it
 rules/shape/     The calendar shape document, its validator, and the projection that turns a
                    shape plus a local date into the intervals a booking may occupy — structure a
-                   Space offers, drawn by the calendar and checked before the rule engine runs
+                   Space offers, drawn by the calendar and checked before the rule engine runs;
+                   `agent.py` authors a complete validated shape through the generation LLM seam
                    (`.claude/rules/calendar-shape.md`)
 ```
 

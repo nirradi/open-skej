@@ -23,12 +23,12 @@ dependencies = []
 # hoisted rule makes thereafter. `generation` carries no dependencies of its own, so this does
 # not move the backend's dependency set.
 #
-# `shape` is a third, independent package (Stream 10): the calendar shape document, its validator,
-# and the projection that turns a shape plus a local date into the intervals a booking may occupy.
-# It lives here rather than in the backend because the shape benchmark (10.7) has to import the
-# projection to assert on it, and the benchmark lives in `rules/` and cannot import the backend
-# (`.claude/rules/calendar-shape.md`). It carries no dependency on `rules` or `generation` either —
-# standard library only, exactly as they are.
+# `shape` is a third package (Stream 10): its document, validator, and projection turn a shape plus
+# a local date into the intervals a booking may occupy. The pure core lives here rather than in the
+# backend because the shape benchmark imports the projection and cannot import the backend
+# (`.claude/rules/calendar-shape.md`). `shape.agent` deliberately imports the internal
+# `generation.llm` LLMClient seam; this is an intra-distribution dependency, not a third-party
+# runtime dependency, so `[project].dependencies = []` remains accurate.
 packages = ["rules", "generation", "shape"]
 
 [tool.black]

@@ -9,16 +9,17 @@ and consecutive-play limits stay *rules*, evaluated by `.claude/rules/rule-engin
 something could be answered either way, it belongs on the side that can be **drawn**.
 
 **Lives in:** `rules/shape/`, a third package distributed alongside `rules` and `generation`
-(`rules/pyproject.toml`'s `packages` list). It declares no runtime dependency — standard library
-only, `dataclasses` and `datetime` — for the identical reason the other two packages don't: the
-backend installs this distribution editable, so anything added here is a cost the booking API pays
-forever. It holds no ORM, no HTTP, and calls no model; every later task in this stream (the table,
-the gate, the calendar, the agent, the benchmark) is a *consumer* of what this package computes, not
-a place that recomputes it.
+(`rules/pyproject.toml`'s `packages` list). The distribution declares no **third-party** runtime
+dependency — its `dependencies = []` remains accurate — because the backend installs it editable and
+every added package is a cost the booking API pays forever. The document, validator, and projection
+core is standard-library-only (`dataclasses` and `datetime`) and holds no ORM, HTTP, or model call.
+The shape agent is the one deliberate authoring boundary in this package: it imports the internal
+`generation.llm` `LLMClient` seam (and its `LLMCallError`) to call a model, then returns to the same
+validator. Every consumer uses the one projection rather than recomputing it.
 
-This document owns the schema, the projection's contract, the anchoring and truncation rules, and
-the fail-closed statement. Later tasks in Stream 10 add the storage, the gate's position relative to
-the engine, the authoring agent and the benchmark — each updates this file as it lands.
+This document owns the schema, the projection's contract, the anchoring and truncation rules, the
+agent's response contract, and the fail-closed statement. Later tasks in Stream 10 add the storage,
+the gate's position relative to the engine, and the benchmark — each updates this file as it lands.
 
 ## Why not inside `rules/rules/` or the backend
 
@@ -221,6 +222,42 @@ out the write side; every one refuses on an archived Space through the existing
 `SpaceArchivedError` path, and none of them re-checks the caller's role — authorization is the
 router's job, matching how every other write in this module already splits the two.
 
+## The shape agent
+
+`shape.agent.generate_shape(conversation, client, model)` turns a conversation into a
+`ShapeAgentResult(document, summary, question)`. It owns neither storage nor HTTP. `document` is
+always a complete, typed `Shape`, obtained only by running the JSON response's `document` field
+through `validate_shape`; a valid empty shape remains a document rather than being represented as
+`None`. The strict envelope also carries a non-empty one- or two-sentence, member-neutral `summary`
+and a nullable `question`. The summary makes a committed reading visible in words as well as in the
+preview — “open at 4” means 04:00 unless a later turn corrects it.
+
+**A turn returns a whole document, never a patch.** The document is small, while a patch protocol
+would need merge and deletion semantics before a preview could be a function of its last turn. A
+complete response makes the preview exactly that function and leaves the next caller no partial
+state to reconstruct.
+
+**Exactly one candidate correction is allowed.** JSON parsing, envelope validation, and
+`InvalidShapeError` are candidate failures: the agent sends one retry containing both the exact
+validator/error message and the original completion verbatim. A second candidate failure raises.
+`LLMCallError` propagates immediately, since another prompt cannot repair an unreachable model, bad
+credential, or timeout. This reuses `generation.llm.LLMClient`, `LLMCallError`, and
+`RecordingClient`'s exchange seam, not the generation loop or its AST validation, sandbox,
+adversarial tests, bytecode hoist, manifest, or parameter contract; those exist because generated
+rules are executable Python, and a shape is data.
+
+**Routine ambiguity commits; an unbookable shape asks.** The agent validates candidate bookability
+through the same projection the grid and gate use. When no date has an offered start — including an
+empty/all-closed document, a block too short for its smallest duration, or a blackout that closes
+the only viable date — `question` is required and the future caller treats it as do-not-publish.
+For a bookable document `question` is null. The document remains non-optional in both cases so the
+admin can see and refine the exact reading rather than starting another conversation from nothing.
+
+`shape.stub.StubShapeLLMClient` is CI's model client. It sits at the same `LLMClient` seam, is
+deterministic, and makes no network or subprocess call. It recognises only `open at <time>` and
+`from <time> to <time>` in the prompt so typing a recognisable time moves the returned operating
+block and exercises the chat-to-preview wiring; it is a test double, not a natural-language parser.
+
 ## The availability gate, and the endpoint the calendar reads
 
 The shape is enforced in `create_resource_booking`
@@ -381,7 +418,5 @@ shape resolves to a tolerance of zero, and zero is the permissive direction.
 
 ## What later tasks in this stream add here
 
-* **10.6** — the shape agent: one prompt, one validated document, one retry against
-  `InvalidShapeError`'s own message.
 * **10.7** — the shape benchmark, asserted on the projection rather than the JSON.
 * **10.8–10.10** — the conversation API, the shape studio, and the E2E guard.
