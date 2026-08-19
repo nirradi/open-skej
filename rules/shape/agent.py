@@ -116,7 +116,9 @@ take a break for 10 min at 1930."
 {
   "version": 1,
   "operating_blocks": [
-    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "start_time": "18:00", "end_time": "20:00", "allowed_durations_mins": [20]}
+    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], \
+"start_time": "18:00", "end_time": "20:00", \
+"allowed_durations_mins": [20]}
   ],
   "blackout_windows": [
     {"start_time": "19:30", "end_time": "19:40", "reason": "Break"}
@@ -129,7 +131,9 @@ can take 30 min slots."
 {
   "version": 1,
   "operating_blocks": [
-    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "start_time": "08:00", "end_time": "17:00", "allowed_durations_mins": [30]}
+    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], \
+"start_time": "08:00", "end_time": "17:00", \
+"allowed_durations_mins": [30]}
   ],
   "blackout_windows": [
     {"start_time": "10:00", "end_time": "10:20", "reason": "Cooldown"},
@@ -144,8 +148,12 @@ hour sessions in the evening until 2200."
 {
   "version": 1,
   "operating_blocks": [
-    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "start_time": "08:00", "end_time": "14:00", "allowed_durations_mins": [60]},
-    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], "start_time": "14:00", "end_time": "22:00", "allowed_durations_mins": [60, 120]}
+    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], \
+"start_time": "08:00", "end_time": "14:00", \
+"allowed_durations_mins": [60]},
+    {"days": ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], \
+"start_time": "14:00", "end_time": "22:00", \
+"allowed_durations_mins": [60, 120]}
   ],
   "blackout_windows": []
 }
@@ -165,7 +173,7 @@ class ShapeAgentResponseError(ValueError):
 
 @dataclass(frozen=True)
 class ShapeAgentResult:
-    """One validated complete shape, its visible summary, and an optional do-not-publish question."""
+    """One validated shape, its visible summary, and an optional do-not-publish question."""
 
     document: Shape
     summary: str
@@ -254,8 +262,8 @@ def build_prompt(
     ]
     if previous_completion is not None:
         parts.append(
-            "Your previous completion failed validation. Return a complete corrected JSON envelope, "
-            "not a patch or a diff. The failing completion was:\n\n"
+            "Your previous completion failed validation. Return a complete corrected JSON "
+            "envelope, not a patch or a diff. The failing completion was:\n\n"
             f"<previous-completion>\n{previous_completion}\n</previous-completion>"
         )
     if failure is not None:
