@@ -3,17 +3,16 @@
 > A shape says what the venue offers. A rule says who may take it, and how much of it.
 > (``ops/plans/stream-10/OVERVIEW.md``)
 
-This package holds the shape document's types, its validator, and the projection that turns a shape
-plus a local date into the intervals a booking may occupy -- see ``.claude/rules/calendar-shape.md``
-for the full domain document, including the schema's five settled decisions and the fail-closed
-contract.
+This package holds the shape document's types, its validator, the projection that turns a shape plus
+a local date into the intervals a booking may occupy, and the chat agent that authors a complete
+validated document -- see ``.claude/rules/calendar-shape.md`` for the full domain document.
 
-**Pure by construction.** Standard library only -- ``dataclasses``, ``datetime``, no third-party
-dependency and no runtime dependency declared in ``rules/pyproject.toml``. No ORM, no HTTP, no model
-call: this package answers exactly one question, "given this shape and this date, what may a booking
-occupy", and answers it identically for every caller. That is what lets the booking gate, the
-calendar grid, the shape chat's own preview, and the benchmark (10.7) import this one implementation
-rather than each re-deriving the answer and risking three different ideas of what a shape means.
+**Pure at its projection boundary.** Standard library only -- ``dataclasses``, ``datetime``, no
+third-party dependency and no runtime dependency declared in ``rules/pyproject.toml``. The document,
+validator, and projection have no ORM, HTTP, or model dependency; ``agent`` is the narrow authoring
+boundary that calls a model through ``generation.llm.LLMClient`` and never changes how a shape is
+projected. That is what lets the booking gate, calendar grid, chat preview, and benchmark import one
+projection rather than each re-deriving the answer and risking different shape semantics.
 """
 
 from .projection import (
@@ -26,6 +25,16 @@ from .projection import (
     permits,
     project_day,
 )
+from .agent import (
+    SYSTEM_PROMPT,
+    ShapeAgentResponseError,
+    ShapeAgentResult,
+    build_prompt,
+    generate_shape,
+    parse_shape_response,
+    strip_json_fence,
+)
+from .stub import StubShapeLLMClient
 from .types import DAY_CODES, DAY_NAMES, DEFAULT_SHAPE, BlackoutWindow, OperatingBlock, Shape
 from .validate import InvalidShapeError, validate_shape
 
@@ -46,4 +55,12 @@ __all__ = [
     "InvalidBookingRequestError",
     "project_day",
     "permits",
+    "SYSTEM_PROMPT",
+    "ShapeAgentResult",
+    "ShapeAgentResponseError",
+    "build_prompt",
+    "generate_shape",
+    "parse_shape_response",
+    "strip_json_fence",
+    "StubShapeLLMClient",
 ]
