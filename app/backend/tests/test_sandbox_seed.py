@@ -20,8 +20,10 @@ from app.identity.models import (
     InvitationStatus,
     MembershipRole,
     Resource,
+    ShapeStatus,
     Space,
     SpaceAccessRequest,
+    SpaceCalendarShape,
     SpaceInvitation,
     SpaceMembership,
     User,
@@ -38,14 +40,14 @@ from app.sandbox_seed import (
     SPACE_A_MAX_CONSECUTIVE_MINUTES,
     SPACE_A_MAX_DURATION_MINUTES,
     SPACE_A_NAME,
-    SPACE_A_SESSION_MINUTES,
+    SPACE_A_SHAPE,
     SPACE_A_TIMEZONE,
-    SPACE_B_CLOSES_AT_MINUTES,
+    SPACE_B_BLACKOUT_REASON,
     SPACE_B_MAX_BOOKINGS_PER_WEEK,
     SPACE_B_MAX_DURATION_MINUTES,
     SPACE_B_NAME,
-    SPACE_B_OPENS_AT_MINUTES,
-    SPACE_B_SESSION_MINUTES,
+    SPACE_B_SHAPE,
+    SPACE_B_STEP_MINUTES,
     SPACE_B_TIMEZONE,
     STRANGER_AUTH0_SUB,
     STRANGER_EMAIL,
@@ -94,6 +96,24 @@ def _rules(session, space) -> dict[str, dict]:
     }
 
 
+def _live_shape_document(session, space) -> dict:
+    """This Space's one live calendar-shape document, as stored.
+
+    Read as the raw document rather than through ``service.live_shape``'s
+    validated ``Shape``: what this module asserts is that the seed planted the
+    document it declares, and comparing dataclasses would only prove the two
+    validate to the same thing, which is a weaker claim than the seed's own
+    constants being what landed.
+    """
+    row = session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one()
+    return row.document
+
+
 def test_seed_produces_every_interesting_state(session):
     run(session)
 
@@ -109,32 +129,41 @@ def test_seed_produces_every_interesting_state(session):
     assert member.email == MEMBER_EMAIL
     assert stranger.email == STRANGER_EMAIL
 
-    # Space A: non-UTC, and carries all three roles. No availability window
-    # and no frequency cap — its canon is kept to exactly what the E2E suite
-    # exercises (see the module docstring).
+    # Space A: non-UTC, and carries all three roles. No frequency cap — its
+    # canon is kept to exactly what the E2E suite exercises (see the module
+    # docstring), and its opening hours are its shape rather than a rule at
+    # all (task 10.5).
     space_a = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
     assert space_a.timezone == SPACE_A_TIMEZONE
-    # Exactly four rules, and the set is asserted rather than each member:
-    # `availability_hours` being absent is the fixture property `03-sad-path.
-    # spec.ts` depends on, and `create_space` seeds one by default, so a seed
-    # that forgot to delete it must fail here. `max_consecutive_duration` is
-    # task 8.9's own addition — the cross-Resource guard needs it configured,
-    # and it is deliberately not a frequency cap in the sense the comment
-    # above means (see `sandbox_seed.py`'s own comment on the constant).
+    # Exactly three rules, and the set is asserted rather than each member: a
+    # fourth type appearing here is a rule the E2E suite never configured and
+    # could be denied by for a reason it does not assert on.
+    # `max_consecutive_duration` is task 8.9's own addition — the
+    # cross-Resource guard needs it configured, and it is deliberately not a
+    # frequency cap in the sense the comment above means (see
+    # `sandbox_seed.py`'s own comment on the constant).
     rules_a = _rules(session, space_a)
     assert set(rules_a) == {
-        "session_length",
         "max_duration",
         "max_consecutive_duration",
         "booking_horizon",
     }
-    assert rules_a["session_length"] == {"session_minutes": SPACE_A_SESSION_MINUTES}
     assert rules_a["max_duration"] == {"max_duration_minutes": SPACE_A_MAX_DURATION_MINUTES}
     assert rules_a["max_consecutive_duration"] == {
         "max_consecutive_minutes": SPACE_A_MAX_CONSECUTIVE_MINUTES
     }
     assert rules_a["booking_horizon"] == {"days": SPACE_A_BOOKING_HORIZON_DAYS}
     assert space_a.archived_at is None
+
+    # Its live shape is the seed's own document, not the `DEFAULT_SHAPE`
+    # `create_space` writes — the property `03-sad-path.spec.ts` depends on.
+    # That spec drags past two hours specifically to be refused by
+    # `max_duration` with that rule's own copy, which only happens if the
+    # shape offers a booking that long: `DEFAULT_SHAPE` offers 60 minutes and
+    # the availability gate, running ahead of the engine, would refuse first
+    # with the wrong message entirely.
+    assert _live_shape_document(session, space_a) == SPACE_A_SHAPE
+    assert 150 in SPACE_A_SHAPE["operating_blocks"][0]["allowed_durations_mins"]
 
     roles_in_a = dict(
         session.execute(
@@ -168,23 +197,30 @@ def test_seed_produces_every_interesting_state(session):
     rules_b = _rules(session, space_b)
     # Configured differently from Space A — the two Spaces, not their
     # Resources, are what differ now that configuration lives on the Space.
-    # Space B is where the per-Space rule capabilities Space A deliberately
-    # skips are observable: real availability hours to resolve per date, and a
-    # weekly cap counted across both its Resources.
+    # Space B is where the capabilities Space A deliberately skips are
+    # observable: a weekly cap counted across both its Resources, and — in its
+    # shape rather than its rules — real operating hours to resolve per date
+    # in a zone that is not Space A's, plus the seed's one blackout.
     assert set(rules_b) == {
-        "availability_hours",
-        "session_length",
         "max_duration",
         "max_bookings_per_week",
     }
-    assert rules_b["availability_hours"] == {
-        "opens_at_minutes": SPACE_B_OPENS_AT_MINUTES,
-        "closes_at_minutes": SPACE_B_CLOSES_AT_MINUTES,
-    }
-    assert rules_b["session_length"] == {"session_minutes": SPACE_B_SESSION_MINUTES}
     assert rules_b["max_duration"] == {"max_duration_minutes": SPACE_B_MAX_DURATION_MINUTES}
     assert rules_b["max_bookings_per_week"] == {"max_bookings": SPACE_B_MAX_BOOKINGS_PER_WEEK}
     assert rules_b != rules_a
+
+    # Space B's shape is the interesting one: a real operating window rather
+    # than the 24-hour default, and a blackout with member-facing copy, so the
+    # seeded product demonstrates the feature it now has (task 10.5). Space A
+    # and Space B differ in shape as well as in rules, which is what makes the
+    # two Spaces genuinely distinct fixtures.
+    shape_b = _live_shape_document(session, space_b)
+    assert shape_b == SPACE_B_SHAPE
+    assert shape_b != _live_shape_document(session, space_a)
+    block_b = shape_b["operating_blocks"][0]
+    assert block_b["start_time"] != "00:00" or block_b["end_time"] != "24:00"
+    assert min(block_b["allowed_durations_mins"]) == SPACE_B_STEP_MINUTES
+    assert [window["reason"] for window in shape_b["blackout_windows"]] == [SPACE_B_BLACKOUT_REASON]
 
     # Two Resources, like Space A — the weekly cap is Space-wide, so
     # demonstrating it needs a booking to land on a different Resource than

@@ -1,8 +1,11 @@
 """Tests for ``GET /spaces/{public_id}/calendar`` (task 10.3).
 
-Postgres-only, following ``test_space_schedule_api.py`` -- the direct analog for the shape this
-endpoint reads instead of ``resolve_day_schedule``. Fixtures are not shared across test modules in
-this suite, so this file reproduces the same small set rather than importing it.
+Postgres-only. This is the one endpoint the calendar grid reads its layout from -- the retired
+``GET /spaces/{public_id}/schedule`` and its ``resolve_day_schedule`` resolution
+(``.claude/rules/calendar-shape.md``, "Two rule types this document replaced") answered the
+identical question over rule rows; this route answers it from the Space's own calendar shape
+instead. Fixtures are not shared across test modules in this suite, so this file builds its own
+small set rather than importing one.
 
 ``rules/shape/projection.py``'s own resolution logic -- the grid, the blackout truncation, the
 union of overlapping blocks -- is ``rules/tests``'s job (task 10.1). This module covers the route's

@@ -20,12 +20,10 @@ import pytest
 
 from rules.canon import (
     DEFAULT_CANON,
-    AvailabilityHoursRule,
     BookingHorizonRule,
     MaxConsecutiveDurationRule,
     MaxDurationRule,
     NotInThePastRule,
-    SessionLengthRule,
     default_canon,
 )
 from rules.controller import evaluate_request
@@ -33,7 +31,6 @@ from rules.interfaces import (
     BookingRequest,
     CalendarContext,
     Context,
-    LocalFrame,
     RuleResult,
     RunContext,
     UserContext,
@@ -44,8 +41,8 @@ from tests.frames import solo_run, utc_frame
 USER = "u1"
 RESOURCE = "court-1"
 
-#: Mid-morning, so a request built from it is comfortably inside default availability hours and a
-#: denial can only have come from the rule under test.
+#: Mid-morning, comfortably clear of midnight in either direction, so a denial can only have come
+#: from the rule under test.
 NOW = datetime(2026, 7, 20, 10, 0, tzinfo=timezone.utc)
 
 
@@ -68,10 +65,7 @@ def context(
 
     Most rules here read only the request and its own parameters, so the frame is inert for them
     — but ``evaluate_request`` cross-checks it against the request's start, so a test running the
-    whole canon against a booking on another day says which day that is. ``AvailabilityHoursRule``
-    reads the frame directly, so its tests must pass ``frame_end`` too: ``utc_frame`` otherwise
-    defaults the frame's end to exactly one hour past ``frame_for``, which silently disagrees with
-    a request built with a different duration.
+    whole canon against a booking on another day says which day that is.
 
     No rule in this module reads ``context.run``, so ``run`` defaults to a span matching the same
     default width the frame gets — inert, like the frame is for these rules — and a caller running
@@ -90,7 +84,7 @@ def context(
 
 
 def at(hour: int, minute: int = 0, day: int = 20) -> datetime:
-    """A UTC instant on the reference day. Availability hours are UTC hours."""
+    """A UTC instant on the reference day."""
     return datetime(2026, 7, day, hour, minute, tzinfo=timezone.utc)
 
 
@@ -289,312 +283,14 @@ def test_a_non_positive_max_consecutive_duration_is_rejected_at_construction():
         MaxConsecutiveDurationRule(max_duration=timedelta(0))
 
 
-# --- SessionLengthRule ------------------------------------------------------------------
-#
-# Replaces both `MinDurationRule` and `SlotAlignmentRule`
-# (`ops/pending/bugs/grid-from-hours-and-min-duration.md`): a booking whose start and end both land
-# on the grid is already at least one session long, so the floor those two rules used to enforce
-# together falls out for free.
-
-
-def session_rule(session_minutes: int = 30, anchor_minutes: int = 0) -> SessionLengthRule:
-    return SessionLengthRule(session_minutes=session_minutes, anchor_minutes=anchor_minutes)
-
-
-def test_a_start_and_end_both_on_the_grid_is_allowed():
-    assert (
-        session_rule()
-        .evaluate(
-            request(at(10, 0), at(10, 30)), context(frame_for=at(10, 0), frame_end=at(10, 30))
-        )
-        .passed
-    )
-
-
-def test_an_off_grid_start_is_denied():
-    result = session_rule().evaluate(
-        request(at(10, 7), at(10, 30)), context(frame_for=at(10, 7), frame_end=at(10, 30))
-    )
-    assert not result.passed
-    assert "30-minute sessions" in (result.fail_reason or "")
-    assert "does not start on a session boundary" in (result.fail_reason or "")
-
-
-def test_an_off_grid_end_with_an_otherwise_aligned_start_is_denied():
-    """Both bounds are checked independently: an aligned start does not excuse an off-grid end."""
-    result = session_rule().evaluate(
-        request(at(10, 0), at(10, 22)), context(frame_for=at(10, 0), frame_end=at(10, 22))
-    )
-    assert not result.passed
-    assert "does not end on a session boundary" in (result.fail_reason or "")
-
-
-def test_a_booking_starting_and_ending_several_sessions_later_is_allowed():
-    """The exact boundary case: both bounds fall on session lines several sessions apart, not just
-    one."""
-    assert (
-        session_rule()
-        .evaluate(
-            request(at(10, 0), at(11, 30)), context(frame_for=at(10, 0), frame_end=at(11, 30))
-        )
-        .passed
-    )
-
-
-def test_the_denial_copy_names_the_session_length():
-    result = session_rule(session_minutes=45).evaluate(
-        request(at(10, 0), at(10, 20)), context(frame_for=at(10, 0), frame_end=at(10, 20))
-    )
-    assert not result.passed
-    assert "45-minute sessions" in (result.fail_reason or "")
-
-
-def test_a_session_minutes_that_does_not_divide_a_day_is_rejected_at_construction():
-    """1440 must be a whole number of sessions; 7 does not divide it."""
-    with pytest.raises(ValueError):
-        SessionLengthRule(session_minutes=7, anchor_minutes=0)
-
-
-def test_a_non_positive_session_minutes_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        SessionLengthRule(session_minutes=0, anchor_minutes=0)
-
-
-def test_an_anchor_minutes_outside_a_single_local_day_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        SessionLengthRule(session_minutes=30, anchor_minutes=1440)
-    with pytest.raises(ValueError):
-        SessionLengthRule(session_minutes=30, anchor_minutes=-1)
-
-
-def test_the_grid_is_anchored_on_opening_time_not_on_local_midnight():
-    """A non-midnight anchor still defines a valid grid — the rule never assumes its anchor is
-    minute 0, which is the whole point of replacing `SlotAlignmentRule` (always anchored on local
-    midnight) with a rule anchored on the venue's own opening time."""
-    rule = session_rule(session_minutes=30, anchor_minutes=15)
-
-    assert rule.evaluate(
-        request(at(10, 15), at(10, 45)), context(frame_for=at(10, 15), frame_end=at(10, 45))
-    ).passed
-    assert not rule.evaluate(
-        request(at(10, 0), at(10, 30)), context(frame_for=at(10, 0), frame_end=at(10, 30))
-    ).passed
-
-
-def test_a_start_before_the_anchor_still_lands_on_the_extended_grid():
-    """Python's `%` is non-negative for a negative left operand, so a booking that starts before
-    the venue's own opening time still lines up with the grid if it is congruent to the anchor
-    modulo the session length — the rule never treats "before the anchor" as a special case."""
-    rule = session_rule(session_minutes=60, anchor_minutes=9 * 60)  # opens at 09:00
-
-    on_grid = request(at(8, 0), at(9, 0))
-    assert rule.evaluate(on_grid, context(frame_for=at(8, 0), frame_end=at(9, 0))).passed
-
-    off_grid = request(at(8, 15), at(9, 0))
-    assert not rule.evaluate(off_grid, context(frame_for=at(8, 15), frame_end=at(9, 0))).passed
-
-
-def test_the_rule_reads_only_the_local_frame_never_the_requests_own_utc_clock():
-    """A venue off UTC resolves a local frame that can disagree with the request's raw UTC clock —
-    the whole reason this rule, like `AvailabilityHoursRule`, reads `context.local` and never
-    touches `request.start_at` / `request.end_at` directly. The request below has a UTC start
-    (13:07) that is off a 30-minute grid; a rule reading it directly would deny. The local frame
-    handed alongside it — as an adapter for a venue comfortably off UTC might resolve it — reports
-    local midnight instead, which is on the grid, and that is what the rule allows against."""
-    rule = session_rule(session_minutes=30, anchor_minutes=0)
-
-    off_grid_utc_request = request(
-        datetime(2026, 7, 20, 13, 7, tzinfo=timezone.utc),
-        datetime(2026, 7, 20, 13, 37, tzinfo=timezone.utc),
-    )
-    local_frame = LocalFrame(
-        day_start=datetime(2026, 7, 21, tzinfo=timezone.utc),
-        day_end=datetime(2026, 7, 22, tzinfo=timezone.utc),
-        week_start=datetime(2026, 7, 20, tzinfo=timezone.utc),
-        week_end=datetime(2026, 7, 27, tzinfo=timezone.utc),
-        month_start=datetime(2026, 7, 1, tzinfo=timezone.utc),
-        month_end=datetime(2026, 8, 1, tzinfo=timezone.utc),
-        weekday=1,
-        start_minutes=0,
-        end_minutes=30,
-    )
-    ctx = Context(
-        user=UserContext(user_id=USER),
-        calendar=CalendarContext(week_starts_on=Weekday.MONDAY, now=NOW),
-        local=local_frame,
-        run=RunContext(
-            start_at=off_grid_utc_request.start_at,
-            end_at=off_grid_utc_request.end_at,
-            booking_count=1,
-        ),
-    )
-    assert rule.evaluate(off_grid_utc_request, ctx).passed
-
-
-# --- AvailabilityHoursRule ----------------------------------------------------------
-#
-# `opens_at_minutes` / `closes_at_minutes` are minutes from the venue's own **local** midnight
-# (`rules/rules/registry.py`, `.claude/rules/rule-engine.md`) — there is no UTC clock time and no
-# timezone anywhere in this rule any more. Every test below builds its frame from the request's own
-# start and end (`hours_context`) rather than relying on the module's default `NOW`-anchored
-# `context()`: this rule reads `context.local.start_minutes` / `end_minutes` exclusively, so a
-# frame resolved for the wrong day or the wrong duration would silently test the wrong scenario.
-
-
-def hours_rule() -> AvailabilityHoursRule:
-    return AvailabilityHoursRule(opens_at_minutes=6 * 60, closes_at_minutes=23 * 60)
-
-
-def hours_context(start_at: datetime, end_at: datetime) -> Context:
-    return context(
-        frame_for=start_at,
-        frame_end=end_at,
-        run=RunContext(start_at=start_at, end_at=end_at, booking_count=1),
-    )
-
-
-def test_a_booking_starting_exactly_at_opening_is_allowed():
-    start, end = at(6, 0), at(7, 0)
-    assert hours_rule().evaluate(request(start, end), hours_context(start, end)).passed
-
-
-def test_a_booking_starting_a_minute_before_opening_is_denied():
-    start, end = at(5, 59), at(6, 59)
-    result = hours_rule().evaluate(request(start, end), hours_context(start, end))
-    assert not result.passed
-    assert result.fail_reason == (
-        "That's before we open, so this booking starts too early."
-        " Please check this Space's opening hours on the calendar and pick a later time."
-    )
-
-
-def test_a_booking_ending_exactly_at_closing_is_allowed():
-    """The closing bound is inclusive."""
-    start, end = at(22, 0), at(23, 0)
-    assert hours_rule().evaluate(request(start, end), hours_context(start, end)).passed
-
-
-def test_a_booking_ending_a_minute_after_closing_is_denied():
-    start, end = at(22, 0), at(23, 1)
-    result = hours_rule().evaluate(request(start, end), hours_context(start, end))
-    assert not result.passed
-    assert result.fail_reason == (
-        "That's after we close, so this booking runs too late."
-        " Please check this Space's opening hours on the calendar and pick an earlier time."
-    )
-
-
-def test_a_booking_running_past_local_midnight_is_denied_not_wrapped():
-    """The frame is resolved for the request's own **start** date, so a booking ending after local
-    midnight reports `end_minutes > 1440` rather than wrapping back into an early-morning reading.
-    """
-    start, end = at(23, 0, day=20), at(0, 30, day=21)
-    result = hours_rule().evaluate(request(start, end), hours_context(start, end))
-    assert not result.passed
-    assert "runs too late" in (result.fail_reason or "")
-
-
-def test_equal_opening_and_closing_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        AvailabilityHoursRule(opens_at_minutes=6 * 60, closes_at_minutes=6 * 60)
-
-
-def test_opens_at_minutes_out_of_a_single_day_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        AvailabilityHoursRule(opens_at_minutes=1440, closes_at_minutes=1500)
-    with pytest.raises(ValueError):
-        AvailabilityHoursRule(opens_at_minutes=-1, closes_at_minutes=60)
-
-
-def test_a_window_longer_than_24_hours_is_rejected_at_construction():
-    with pytest.raises(ValueError):
-        AvailabilityHoursRule(opens_at_minutes=6 * 60, closes_at_minutes=6 * 60 + 1441)
-
-
-def test_a_window_open_the_full_24_hours_has_no_gap():
-    """``closes_at_minutes == opens_at_minutes + 1440`` is the legal upper bound: always open."""
-    rule = AvailabilityHoursRule(opens_at_minutes=0, closes_at_minutes=1440)
-    start, end = at(3, 0), at(3, 30)
-    assert rule.evaluate(request(start, end), hours_context(start, end)).passed
-
-
-# --- AvailabilityHoursRule, crossing local midnight ----------------------------------
-#
-# `closes_at_minutes > 1440` is not a construction error: it is how a venue open past its own
-# local midnight (`ops/done/stream-7/passed-midnight.md`) is represented — 18:00 to 02:00 is
-# `opens_at_minutes=1080, closes_at_minutes=1560`, plainly. There is no UTC calendar day to cross
-# any more; this is the venue's own local calendar day, full stop.
-
-
-def wrapping_hours_rule() -> AvailabilityHoursRule:
-    """Opens at 23:00 local, closes at 11:00 local the following day — a crossing window."""
-    return AvailabilityHoursRule(opens_at_minutes=23 * 60, closes_at_minutes=11 * 60 + 1440)
-
-
-def test_a_crossing_window_constructs_without_error():
-    rule = wrapping_hours_rule()
-    assert rule.opens_at_minutes == 23 * 60
-    assert rule.closes_at_minutes == 11 * 60 + 1440
-
-
-def test_a_crossing_window_allows_a_booking_shortly_after_opening():
-    """23:30 on day 20 is the "opens today, closes tomorrow" half of one occurrence."""
-    start, end = at(23, 30, day=20), at(0, 30, day=21)
-    assert wrapping_hours_rule().evaluate(request(start, end), hours_context(start, end)).passed
-
-
-def test_a_crossing_window_allows_a_booking_shortly_before_closing():
-    """10:00-11:00 on day 21 is the "opened yesterday, closes today" half of the same occurrence."""
-    start, end = at(10, 0, day=21), at(11, 0, day=21)
-    assert wrapping_hours_rule().evaluate(request(start, end), hours_context(start, end)).passed
-
-
-def test_a_crossing_window_denies_a_booking_in_the_daily_gap():
-    """15:00 sits strictly between closing (11:00) and the next opening (23:00) — never in hours.
-
-    This is the case that used to raise `MidnightWrapError` and deny every booking on the Space with
-    the engine's generic copy, regardless of when it actually fell (`ops/done/stream-7/
-    passed-midnight.md`). Denied here for the specific, actionable reason.
-    """
-    start, end = at(15, 0, day=20), at(16, 0, day=20)
-    result = wrapping_hours_rule().evaluate(request(start, end), hours_context(start, end))
-    assert not result.passed
-    assert "starts too early" in (result.fail_reason or "")
-
-
-def test_a_crossing_window_denies_a_booking_that_runs_past_the_wrapped_close():
-    start, end = at(10, 30, day=21), at(11, 30, day=21)
-    result = wrapping_hours_rule().evaluate(request(start, end), hours_context(start, end))
-    assert not result.passed
-    assert "runs too late" in (result.fail_reason or "")
-
-
-def test_a_crossing_window_closing_bound_is_inclusive():
-    """Ending exactly at the wrapped closing instant is fine, one minute later is not."""
-    start = at(10, 30, day=21)
-    on_close, off_close = at(11, 0, day=21), at(11, 1, day=21)
-
-    assert (
-        wrapping_hours_rule()
-        .evaluate(request(start, on_close), hours_context(start, on_close))
-        .passed
-    )
-    assert not (
-        wrapping_hours_rule()
-        .evaluate(request(start, off_close), hours_context(start, off_close))
-        .passed
-    )
-
-
 # --- The canon, in order ------------------------------------------------------------
 
 
-def test_the_default_canon_is_the_four_rules_in_the_documented_order():
+def test_the_default_canon_is_the_three_rules_in_the_documented_order():
     assert [type(rule).__name__ for rule in DEFAULT_CANON] == [
         "NotInThePastRule",
         "BookingHorizonRule",
         "MaxDurationRule",
-        "AvailabilityHoursRule",
     ]
 
 
@@ -623,8 +319,11 @@ def test_a_past_denial_beats_a_duration_denial():
     assert "already passed" in (result.fail_reason or "")
 
 
-def test_duration_is_reported_before_availability_hours():
-    """An over-long booking that also runs past closing reports its length first."""
+def test_an_over_long_booking_denies_with_duration_copy_through_the_full_canon():
+    """A booking too long for `MaxDurationRule` still denies with duration copy once opening hours
+    are the calendar shape's own gate rather than a canon rule this booking could also break — the
+    `AvailabilityHoursRule` ordering this test used to pin retired with that type
+    (`.claude/rules/calendar-shape.md`, "Two rule types this document replaced")."""
     req = request(at(21, 30), at(23, 45))
     result = evaluate_request(req, context(frame_for=at(21, 30), run=solo_run(req)), DEFAULT_CANON)
     assert "at most 2 hours" in (result.fail_reason or "")

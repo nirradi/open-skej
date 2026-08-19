@@ -11,29 +11,31 @@ assembly from a `SpaceRuleConfig`'s rows, history forwarding, and (since
 task 6.6) the fail-closed path a row that cannot be built takes.
 """
 
-import re
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
 from rules import RULE_ERROR_MESSAGE
 from rules import BookingRecord as EngineBookingRecord
 from rules import BookingRequest as EngineBookingRequest
+from shape import validate_shape
 
 from app.rules_stub import (
     ALLOWED_MESSAGE,
-    AVAILABILITY_CLOSE_MINUTES,
-    AVAILABILITY_OPEN_MINUTES,
     BOOKING_HORIZON_DAYS,
     MAX_BOOKING_DURATION,
     BookingRequest,
-    DaySchedule,
     RuleResult,
     SpaceRuleConfig,
     SpaceRuleRow,
-    resolve_day_schedule,
 )
-from app.rules_stub import _build_local_frame, _engine_request, _local_date, _resolve_run
+from app.rules_stub import (
+    _build_local_frame,
+    _engine_request,
+    _gap_tolerance,
+    _local_date,
+    _resolve_run,
+)
 from app.rules_stub import evaluate as _evaluate
 
 DAY = datetime(2026, 7, 20, tzinfo=timezone.utc)
@@ -52,11 +54,13 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
     nothing the API itself has: each non-None kwarg becomes one unscoped,
     enabled `SpaceRuleRow`, with the row's registered param names supplied
     here so a case reads as the configuration it is testing rather than as a
-    row literal. `opens_at_minutes`/`closes_at_minutes` are combined into
-    one `availability_hours` row and, matching `_build_canon`'s own gating,
-    only when *both* are given — passing just one is exactly how
-    `test_availability_needs_both_bounds_set` proves that half a
-    configuration enforces nothing.
+    row literal.
+
+    A venue's operating hours and the lengths it offers are no longer rules at
+    all — they are its calendar shape (`.claude/rules/calendar-shape.md`),
+    enforced by the availability gate one layer above this adapter — so there
+    is no kwarg here for either, and the config's own `shape` stays the
+    `DEFAULT_SHAPE` every Space starts with unless a case passes its own.
     """
     rows: list[SpaceRuleRow] = []
     next_id = 1
@@ -65,17 +69,6 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
         nonlocal next_id
         rows.append(SpaceRuleRow(id=next_id, rule_type=rule_type, params=params))
         next_id += 1
-
-    opens_at_minutes = rule_kwargs.get("opens_at_minutes")
-    closes_at_minutes = rule_kwargs.get("closes_at_minutes")
-    if opens_at_minutes is not None and closes_at_minutes is not None:
-        add(
-            "availability_hours",
-            {"opens_at_minutes": opens_at_minutes, "closes_at_minutes": closes_at_minutes},
-        )
-
-    if rule_kwargs.get("session_minutes") is not None:
-        add("session_length", {"session_minutes": rule_kwargs["session_minutes"]})
 
     if rule_kwargs.get("max_duration_minutes") is not None:
         add("max_duration", {"max_duration_minutes": rule_kwargs["max_duration_minutes"]})
@@ -109,11 +102,9 @@ def _config(timezone_name: str = "UTC", **rule_kwargs) -> SpaceRuleConfig:
 
 #: A Space configured with every rule parameter set, mirroring the values the
 #: old module-level ``DEFAULT_CANON`` used to enforce unconditionally — so the
-#: cases below that only care about duration/hours/horizon read the same way
+#: cases below that only care about duration or horizon read the same way
 #: they did before the canon became per-Space.
 FULL_CONFIG = _config(
-    opens_at_minutes=AVAILABILITY_OPEN_MINUTES,
-    closes_at_minutes=AVAILABILITY_CLOSE_MINUTES,
     max_duration_minutes=int(MAX_BOOKING_DURATION.total_seconds() // 60),
     booking_horizon_days=BOOKING_HORIZON_DAYS,
 )
@@ -190,137 +181,11 @@ def test_max_duration_unset_allows_a_booking_the_default_would_deny():
     assert result.allowed
 
 
-def test_booking_off_the_session_grid_is_denied():
-    """``session_length`` has no reference constant in ``rules_stub`` — unlike ``max_duration`` it
-    is never part of ``DEFAULT_CANON`` (``rules/rules/canon.py``), so there is nothing for a
-    module-level constant here to mirror. The literal below is this test's own configuration, not a
-    reference default."""
-    grid = _config(session_minutes=30)
-
-    result = evaluate(request(at(10, 7), at(10, 37)), grid)
-
-    assert not result.allowed
-    assert "30-minute sessions" in result.message
-
-
-def test_a_booking_on_the_session_grid_is_allowed():
-    grid = _config(session_minutes=30)
-    start = at(10)
-
-    assert evaluate(request(start, start + timedelta(minutes=30)), grid).allowed
-
-
-def test_session_length_unset_allows_a_booking_a_configured_grid_would_deny():
-    """A Space with no ``session_length`` row enforces no grid at all — mirroring
-    ``test_max_duration_unset_allows_a_booking_the_default_would_deny`` for a different bound."""
-    result = evaluate(request(at(10), at(10, 7)), NULL_CONFIG)
-
-    assert result.allowed
-
-
-def test_session_length_with_no_hours_anchors_on_local_midnight():
-    """Decision 2 (``ops/pending/bugs/grid-from-hours-and-min-duration.md``): a session grid with
-    no ``availability_hours`` row to anchor on falls back to local midnight — today's
-    ``slot_alignment`` behaviour, observable end to end through ``evaluate`` and not just at
-    ``resolve_day_schedule``'s own resolution."""
-    grid_only = _config(session_minutes=30)
-
-    assert evaluate(request(at(10), at(10, 30)), grid_only).allowed
-    assert not evaluate(request(at(10, 7), at(10, 37)), grid_only).allowed
-
-
-def test_session_length_anchors_on_the_configured_opening_time_not_midnight():
-    """The grid moves with the venue's own opening time rather than always sitting on local
-    midnight — the entire point of ``session_length`` replacing ``slot_alignment``."""
-    anchored = _config(opens_at_minutes=9 * 60 + 15, closes_at_minutes=17 * 60, session_minutes=60)
-
-    assert evaluate(request(at(9, 15), at(10, 15)), anchored).allowed
-    assert not evaluate(request(at(10), at(11)), anchored).allowed
-
-
-def test_booking_starting_before_opening_is_denied():
-    result = evaluate(request(at(5), at(6, 30)))
-
-    assert not result.allowed
-    assert "starts too early" in result.message
-
-
-def test_booking_starting_exactly_at_opening_is_allowed():
-    """The opening bound is inclusive: 06:00 is open, 05:59 is not."""
-    start = datetime.combine(DAY.date(), time(0, 0), timezone.utc) + timedelta(
-        minutes=AVAILABILITY_OPEN_MINUTES
-    )
-
-    assert evaluate(request(start, start + timedelta(hours=1))).allowed
-    assert not evaluate(
-        request(start - timedelta(minutes=1), start + timedelta(minutes=30))
-    ).allowed
-
-
-def test_booking_ending_after_closing_is_denied():
-    result = evaluate(request(at(22), at(23, 30)))
-
-    assert not result.allowed
-    assert "runs too late" in result.message
-
-
-def test_booking_ending_exactly_at_closing_is_allowed():
-    """The closing bound is inclusive: ending at 23:00 is fine, 23:01 is not."""
-    closing = datetime.combine(DAY.date(), time(0, 0), timezone.utc) + timedelta(
-        minutes=AVAILABILITY_CLOSE_MINUTES
-    )
-
-    assert evaluate(request(closing - timedelta(hours=1), closing)).allowed
-    assert not evaluate(
-        request(closing - timedelta(hours=1), closing + timedelta(minutes=1))
-    ).allowed
-
-
-def test_availability_needs_both_bounds_set():
-    """Only one of ``opens_at_minutes``/``closes_at_minutes`` set produces no
-    ``availability_hours`` row at all."""
-    half_configured = _config(opens_at_minutes=9 * 60)
-    assert half_configured.rules == ()
-
-    # 03:00 would be refused under FULL_CONFIG's 06:00 opening; here it passes
-    # because the rule is never built without both bounds.
-    result = evaluate(request(at(3), at(3, 30)), half_configured)
-
-    assert result.allowed
-
-
-def test_booking_running_past_midnight_is_denied():
-    """A wrap-around must not look like an early-morning booking inside hours."""
-    result = evaluate(request(at(22, 30), at(24, 30)))
-
-    assert not result.allowed
-    assert "runs too late" in result.message
-
-
-def test_out_of_hours_denial_names_no_clock_time():
-    """The boundary a member actually meets: through the real adapter, not the bare engine rule.
-
-    `rules/tests/test_denial_copy.py` pins this over the canon itself; this repeats it here
-    because the adapter is what a caller in this repo actually hits, and the resolved local
-    hours it feeds `AvailabilityHoursRule` are exactly the values that used to leak through as a
-    UTC clock time with no zone label attached.
-    """
-    result = evaluate(request(at(5), at(6, 30)))
-
-    assert not result.allowed
-    assert not re.search(r"\d{1,2}:\d{2}", result.message)
-
-
-def test_duration_is_checked_before_availability_hours():
-    """An over-long booking that is also out of hours reports the length first."""
-    result = evaluate(request(at(22), at(25)))
-
-    assert not result.allowed
-    assert "2 hours" in result.message
-
-
 def test_denial_messages_are_human_readable():
-    for booking in (request(at(10), at(13)), request(at(5), at(5, 30))):
+    over_long = request(at(10), at(13))
+    in_the_past = request(NOW - timedelta(hours=2), NOW - timedelta(hours=1))
+
+    for booking in (over_long, in_the_past):
         message = evaluate(booking).message
 
         assert message.endswith(".")
@@ -330,19 +195,21 @@ def test_denial_messages_are_human_readable():
 
 
 def test_non_utc_offsets_are_converted_to_utc_before_evaluation():
-    """A booking is judged on its UTC wall clock, not the client's local one.
+    """A booking is judged on the instant it names, not on the client's local spelling.
 
-    Availability hours are UTC clock times (`.claude/rules/rule-engine.md`), so
-    09:00+07:00 — 02:00 UTC — is before opening and refused, even though the
-    client's own clock reads well inside the window.
+    The engine rejects a non-zero offset outright, so the adapter converts at
+    the boundary. 09:00+07:00 is 02:00Z, an hour *behind* the clock below — so
+    the booking is in the past and refused, even though the client's own wall
+    clock reads several hours ahead of it.
     """
     local = timezone(timedelta(hours=7))
     start = datetime(2026, 7, 20, 9, 0, tzinfo=local)
+    clock = datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc)
 
-    result = evaluate(request(start, start + timedelta(hours=1)))
+    result = evaluate(request(start, start + timedelta(hours=1)), now=clock)
 
     assert not result.allowed
-    assert "starts too early" in result.message
+    assert "already passed" in result.message
 
 
 def test_offset_and_utc_spellings_of_one_instant_agree():
@@ -373,104 +240,6 @@ def test_non_positive_interval_is_rejected():
         BookingRequest(start_at=at(11), end_at=at(11))
 
 
-# --- Per-Space timezone resolution of availability hours (task 4.13b) ------
-
-
-def test_availability_hours_resolve_against_the_spaces_own_timezone():
-    """A Space's ``opens_at_minutes``/``closes_at_minutes`` are local, not UTC.
-
-    07:00 Europe/Berlin is 05:00Z in July (CEST, UTC+2). A booking at 05:00Z
-    sits exactly at that resolved opening; one a minute earlier does not.
-    """
-    berlin_summer = _config("Europe/Berlin", opens_at_minutes=7 * 60, closes_at_minutes=22 * 60)
-    opening_instant = datetime(2026, 7, 20, 5, 0, tzinfo=timezone.utc)
-
-    assert evaluate(
-        request(opening_instant, opening_instant + timedelta(hours=1)), berlin_summer
-    ).allowed
-    denied = evaluate(
-        request(
-            opening_instant - timedelta(minutes=1),
-            opening_instant + timedelta(minutes=30),
-        ),
-        berlin_summer,
-    )
-    assert not denied.allowed
-
-
-def test_availability_hours_open_at_local_9am_on_both_sides_of_a_dst_transition():
-    """A 09:00-17:00 window means local 09:00 whether or not the venue is in DST that day.
-
-    ``AvailabilityHoursRule`` no longer does any date math at all — it compares
-    ``context.local.start_minutes``/``end_minutes`` against two plain integers — so its DST
-    correctness is entirely inherited from ``_build_local_frame``'s own (already covered by
-    ``test_a_local_day_across_a_dst_transition_is_not_24_hours``). This test is the one that ties
-    the two together: a booking starting at local 09:00 is accepted on both sides of Berlin's 2026
-    spring-forward (29 March), and one starting a minute earlier is denied on both sides too, even
-    though the UTC offset — and so the UTC instant "09:00 local" resolves to — differs by an hour.
-    """
-    berlin = _config("Europe/Berlin", opens_at_minutes=9 * 60, closes_at_minutes=17 * 60)
-
-    before_transition = _tz_instant("Europe/Berlin", 2026, 3, 15, 9, 0)  # CET, UTC+1
-    after_transition = _tz_instant("Europe/Berlin", 2026, 4, 5, 9, 0)  # CEST, UTC+2
-
-    for opening_instant in (before_transition, after_transition):
-        earlier = opening_instant - timedelta(days=1)
-        assert evaluate(
-            request(opening_instant, opening_instant + timedelta(hours=1)), berlin, now=earlier
-        ).allowed
-        denied = evaluate(
-            request(opening_instant - timedelta(minutes=1), opening_instant + timedelta(hours=1)),
-            berlin,
-            now=earlier,
-        )
-        assert not denied.allowed
-
-
-def test_a_utc_day_crossing_space_accepts_a_booking_in_its_own_local_hours():
-    """A Space whose local hours cross a UTC calendar day is bookable, not dead.
-
-    Pacific/Auckland is UTC+13 in the New Zealand summer (January) — an ordinary 06:00-23:00 local
-    window is nowhere near midnight on the venue's own clock, and the adapter's local frame
-    (`_build_local_frame`) reads it in exactly those local minutes, with no UTC pair to invert or
-    cross a calendar day in at all (the mechanism this test predates: `.claude/rules/rule-engine.md`
-    on why an inverted UTC pair used to matter, and no longer does). A booking sitting in the local
-    morning — 2026-01-21 07:00 Auckland local, which is 2026-01-20T18:00Z — is accepted.
-    """
-    crosses = _config("Pacific/Auckland", opens_at_minutes=6 * 60, closes_at_minutes=23 * 60)
-    local_morning = datetime(2026, 1, 20, 18, 0, tzinfo=timezone.utc)
-
-    result = evaluate(
-        request(local_morning, local_morning + timedelta(hours=1)),
-        crosses,
-        now=local_morning - timedelta(hours=1),
-    )
-
-    assert result.allowed
-
-
-def test_a_utc_day_crossing_space_still_denies_an_out_of_hours_booking():
-    """The fix is not "widen the window until everything passes" — out-of-hours still denies.
-
-    The denial copy names neither the engine's own UTC clock (17:00) nor the Space's local 06:00 —
-    the engine has no timezone to convert from, so it cannot claim any clock time is the one the
-    viewer would recognise, and it names none at all. Rendering the venue's hours in the venue's
-    own zone stays the UI's job (`.claude/rules/rule-engine.md`).
-    """
-    crosses = _config("Pacific/Auckland", opens_at_minutes=6 * 60, closes_at_minutes=23 * 60)
-    # 2026-01-21 02:00 Auckland local (before the 06:00 local opening) is 2026-01-20T13:00Z.
-    before_opening = datetime(2026, 1, 20, 13, 0, tzinfo=timezone.utc)
-
-    result = evaluate(
-        request(before_opening, before_opening + timedelta(hours=1)),
-        crosses,
-        now=before_opening - timedelta(hours=1),
-    )
-
-    assert not result.allowed
-    assert "starts too early" in result.message
-
-
 def test_naive_now_is_rejected():
     with pytest.raises(ValueError):
         evaluate(request(at(10), at(11)), now=datetime(2026, 7, 19, 10, 0))
@@ -478,8 +247,8 @@ def test_naive_now_is_rejected():
 
 def test_clock_defaults_to_the_current_time_when_omitted():
     """The default must be live, or production would judge against a frozen clock."""
-    # Pinned to 10:00 so the availability-hours rule can't decide the outcome
-    # when the suite happens to run late at night.
+    # Pinned to 10:00 so the outcome does not turn on what time of day the
+    # suite happens to run.
     midmorning = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
     too_far_in_the_past = request(
         midmorning - timedelta(days=2), midmorning - timedelta(days=2) + timedelta(hours=1)
@@ -647,7 +416,7 @@ def test_a_weekly_run_starting_before_the_window_does_not_count_even_when_the_re
     merely extends into this one, is still last week's session — it adds nothing to this week's
     count. Mildly surprising, and stated as intentional in `.claude/rules/rule-engine.md`."""
     weekly_cap = _config(max_bookings_per_week=1)
-    week_start = DAY  # 2026-07-20 is a Monday (see MONDAY below)
+    week_start = DAY  # 2026-07-20 is a Monday
     history = (request(week_start - timedelta(hours=1), week_start, resource_id="court-1"),)
 
     result = evaluate(
@@ -729,10 +498,10 @@ CLOCK = datetime(2026, 7, 19, 10, 0, tzinfo=timezone.utc)
 
 
 def hours_from(moment: datetime, hours: int = 1) -> BookingRequest:
-    """A one-hour booking starting at ``moment``, inside availability hours.
+    """A one-hour booking starting at ``moment``.
 
-    Anchoring on 10:00 keeps every horizon case clear of the duration and
-    opening-hours rules, so a denial here can only have come from a date rule.
+    Anchoring on 10:00 keeps every horizon case clear of the duration rule, so
+    a denial here can only have come from a date rule.
     """
     return request(moment, moment + timedelta(hours=hours))
 
@@ -1197,260 +966,6 @@ def test_reads_history_is_true_only_when_an_enabled_row_reads_it():
     assert not FULL_CONFIG.reads_history
 
 
-# --- resolve_day_schedule (task 6.9) -----------------------------------------
-#
-# `GET /spaces/{public_id}/schedule` reads this function's return value
-# straight onto the wire, in the Space's own local wall clock, never UTC — so
-# these cases build a `SpaceRuleConfig` and read the `DaySchedule` back
-# directly, with no `evaluate`/`request()` involved at all.
-
-MONDAY = date(2026, 7, 20)  # Matches DAY above: a Monday.
-TUESDAY = date(2026, 7, 21)
-
-
-def _hours_row(
-    row_id: int, opens: time, closes: time, applies_to: dict | None = None
-) -> SpaceRuleRow:
-    return SpaceRuleRow(
-        id=row_id,
-        rule_type="availability_hours",
-        params={
-            "opens_at_minutes": opens.hour * 60 + opens.minute,
-            "closes_at_minutes": closes.hour * 60 + closes.minute,
-        },
-        applies_to=applies_to,
-    )
-
-
-def _session_row(row_id: int, minutes: int, applies_to: dict | None = None) -> SpaceRuleRow:
-    return SpaceRuleRow(
-        id=row_id,
-        rule_type="session_length",
-        params={"session_minutes": minutes},
-        applies_to=applies_to,
-    )
-
-
-def test_resolve_day_schedule_with_no_rows_is_fully_unconfigured():
-    config = SpaceRuleConfig(timezone="UTC", rules=())
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule == DaySchedule(
-        session_minutes=None,
-        anchor_minutes=None,
-        opens_at=None,
-        closes_at=None,
-        coherence_issue=None,
-    )
-
-
-def test_resolve_day_schedule_with_one_matching_row_of_each_type():
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0)), _session_row(2, 30)),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.opens_at == time(9, 0)
-    assert schedule.closes_at == time(17, 0)
-    assert schedule.session_minutes == 30
-    assert schedule.anchor_minutes == 9 * 60
-    assert schedule.coherence_issue is None
-
-
-def test_two_overlapping_availability_rows_intersect_to_a_real_window():
-    """9-17 and 12-20 together permit only the overlap, 12-17 — the flat AND."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0)), _hours_row(2, time(12, 0), time(20, 0))),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.opens_at == time(12, 0)
-    assert schedule.closes_at == time(17, 0)
-    assert schedule.coherence_issue is None
-
-
-def test_two_disjoint_availability_rows_intersect_to_nothing():
-    """9-12 and 14-18 permit no overlap at all: closed all day, not a coherence error."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(12, 0)), _hours_row(2, time(14, 0), time(18, 0))),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    # Normalised to a zero-width window, not reported as inverted or broken.
-    assert schedule.opens_at == schedule.closes_at == time(14, 0)
-    assert schedule.coherence_issue is None
-
-
-def test_two_session_length_rows_resolve_to_their_lcm_not_their_minimum():
-    """A 20-minute row and a 30-minute row together require a 60-minute grid.
-
-    The minimum (20) would let a booking land on :20 or :40, which the
-    30-minute row would still refuse — only multiples of lcm(20, 30) = 60
-    satisfy both simultaneously.
-    """
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_session_row(1, 20), _session_row(2, 30)),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.session_minutes == 60
-
-
-def test_no_session_length_row_resolves_session_minutes_and_anchor_to_none():
-    """The "not configured" convention every other field on `DaySchedule` uses — and, since task
-    8.4, the tolerance `app.rules_stub._resolve_run` reads for its gap tolerance: `None` here
-    becomes `0` there. An `availability_hours` row alone resolves no anchor either: there is no
-    grid to anchor when nothing configures one."""
-    config = SpaceRuleConfig(timezone="UTC", rules=(_hours_row(1, time(9, 0), time(17, 0)),))
-
-    schedule = resolve_day_schedule(config, MONDAY)
-    assert schedule.session_minutes is None
-    assert schedule.anchor_minutes is None
-
-
-def test_anchor_minutes_follows_the_resolved_opening_minute():
-    """The whole point of `session_length` replacing `slot_alignment`
-    (`ops/pending/bugs/grid-from-hours-and-min-duration.md`): the grid is anchored on the venue's
-    own opening time, not always local midnight."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 30), time(17, 0)), _session_row(2, 60)),
-    )
-
-    assert resolve_day_schedule(config, MONDAY).anchor_minutes == 9 * 60 + 30
-
-
-def test_anchor_minutes_falls_back_to_local_midnight_with_no_availability_hours_row():
-    """Decision 2: a session grid with no opening hours to anchor on falls back to local midnight
-    (`anchor_minutes = 0`) — today's `slot_alignment` behaviour, stated explicitly rather than
-    inherited."""
-    config = SpaceRuleConfig(timezone="UTC", rules=(_session_row(1, 30),))
-
-    schedule = resolve_day_schedule(config, MONDAY)
-    assert schedule.session_minutes == 30
-    assert schedule.anchor_minutes == 0
-
-
-def test_a_session_length_row_scoped_away_does_not_apply():
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_session_row(1, 60, applies_to={"weekdays": [1, 3]}),),  # Tue/Thu, not Monday
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-    assert schedule.session_minutes is None
-    assert schedule.anchor_minutes is None
-
-
-def test_a_row_scoped_to_a_non_matching_weekday_is_excluded():
-    """MONDAY is weekday 0; a row scoped to Tuesday/Thursday (1, 3) must not apply."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0), applies_to={"weekdays": [1, 3]}),),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.opens_at is None
-    assert schedule.closes_at is None
-
-
-def test_a_row_scoped_to_a_matching_weekday_does_apply():
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0), applies_to={"weekdays": [1]}),),
-    )
-
-    schedule = resolve_day_schedule(config, TUESDAY)
-
-    assert schedule.opens_at == time(9, 0)
-    assert schedule.closes_at == time(17, 0)
-
-
-def test_a_disabled_row_is_never_resolved():
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(
-            SpaceRuleRow(
-                id=1,
-                rule_type="availability_hours",
-                params={"opens_at_minutes": 9 * 60, "closes_at_minutes": 17 * 60},
-                enabled=False,
-            ),
-        ),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.opens_at is None
-    assert schedule.closes_at is None
-
-
-def test_a_zero_width_window_is_never_a_coherence_issue_even_with_a_session_row():
-    """ "Closed all day" plus a session-length row must not report incoherence — there is no real
-    window for the session length to exceed, and an opening time can never miss a grid built on
-    itself (decision 4: both slot-boundary coherence cases `slot_alignment` needed are gone along
-    with it)."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(
-            _hours_row(1, time(9, 0), time(12, 0)),
-            _hours_row(2, time(14, 0), time(18, 0)),
-            _session_row(3, 45),
-        ),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.opens_at == schedule.closes_at
-    assert schedule.coherence_issue is None
-
-
-def test_coherence_issue_when_session_length_exceeds_the_operating_window():
-    """A 90-minute session against a one-hour window means nothing on the date is bookable."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(10, 0)), _session_row(2, 90)),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.coherence_issue is not None
-    assert "Session length" in schedule.coherence_issue
-
-
-def test_session_length_equal_to_the_window_is_not_a_coherence_issue():
-    """The bound is inclusive, the same convention every duration rule in the canon shares."""
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(10, 0)), _session_row(2, 60)),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.coherence_issue is None
-
-
-def test_session_length_shorter_than_the_window_sets_no_issue():
-    config = SpaceRuleConfig(
-        timezone="UTC",
-        rules=(_hours_row(1, time(9, 0), time(17, 0)), _session_row(2, 30)),
-    )
-
-    schedule = resolve_day_schedule(config, MONDAY)
-
-    assert schedule.coherence_issue is None
-
-
 # --- _resolve_run (task 8.4) -----------------------------------------------------------
 #
 # The real risk in this task, per `ops/plans/stream-8/8.4-context-run.md`: this is where the
@@ -1508,9 +1023,9 @@ def test_a_booking_neither_abutting_nor_within_tolerance_is_excluded():
 
 
 def test_a_five_minute_gap_joins_when_the_tolerance_covers_it():
-    """The clause `max-duration-cannon.md`'s decision 3 attaches: a gap shorter than a Space's own
-    configured session length is dead space nobody could ever book, so it must not fracture the
-    run and hand every run-based rule a free escape hatch."""
+    """The clause `max-duration-cannon.md`'s decision 3 attaches: a gap shorter than the shortest
+    length this Space's shape offers is dead space nobody could ever book, so it must not fracture
+    the run and hand every run-based rule a free escape hatch."""
     req = _erequest(at(10), at(11))
     adjoining = _erecord(at(11, 5), at(12, 5))
 
@@ -1522,9 +1037,9 @@ def test_a_five_minute_gap_joins_when_the_tolerance_covers_it():
 
 
 def test_the_same_five_minute_gap_does_not_join_with_no_tolerance():
-    """A Space configuring no `session_length` gets `tolerance == timedelta(0)` — exact abutment,
-    `max-duration-cannon.md`'s original decision 3, unchanged for a Space that never opted into a
-    session grid at all."""
+    """A date this Space's shape offers nothing on gets `tolerance == timedelta(0)` — exact
+    abutment, `max-duration-cannon.md`'s original decision 3, unchanged for a date the venue is
+    not open on at all."""
     req = _erequest(at(10), at(11))
     adjoining = _erecord(at(11, 5), at(12, 5))
 
@@ -1632,3 +1147,124 @@ def test_a_space_holding_only_max_consecutive_duration_still_reads_history():
         ),
     )
     assert consecutive_only.reads_history
+
+
+# --- task 10.5: the gap tolerance, re-sourced from the calendar shape ---------------------------
+#
+# THE HAZARD, and the whole reason these cases are written by hand.
+#
+# Retiring `session_length` cut the source `_resolve_run`'s merge tolerance used to come from
+# (`resolve_day_schedule(config, on_date).session_minutes`). Left un-re-sourced, the tolerance
+# becomes `timedelta(0)` everywhere, `merge_adjoining_spans` stops merging across any non-abutting
+# gap, and every run-based rule — `max_consecutive_duration` and all three counting rules —
+# quietly loosens. **Nothing raises, and no test that existed before this section fails**, which
+# is exactly why the coverage has to be added deliberately rather than assumed: a cap simply stops
+# catching what it caught. `.claude/rules/calendar-shape.md`, "The run's gap tolerance is
+# re-sourced from the projection", holds the argument these cases pin.
+
+#: A Monday, matching `DAY` above.
+SHAPE_MONDAY = date(2026, 7, 20)
+#: The Tuesday after it — a date `MONDAY_ONLY_SHAPE` offers nothing on.
+SHAPE_TUESDAY = date(2026, 7, 21)
+
+
+def _shape(days: list[str], durations: list[int]):
+    """A shape open 09:00-21:00 on ``days``, offering ``durations``."""
+    return validate_shape(
+        {
+            "version": 1,
+            "operating_blocks": [
+                {
+                    "days": days,
+                    "start_time": "09:00",
+                    "end_time": "21:00",
+                    "allowed_durations_mins": durations,
+                }
+            ],
+            "blackout_windows": [],
+        }
+    )
+
+
+HOUR_GRID_SHAPE = _shape(["MON"], [60])
+MONDAY_ONLY_SHAPE = HOUR_GRID_SHAPE
+HALF_HOUR_AND_HOUR_SHAPE = _shape(["MON"], [30, 60])
+
+
+def _consecutive_cap_config(shape) -> SpaceRuleConfig:
+    """A Space capping consecutive play at two hours, on ``shape``.
+
+    `max_consecutive_duration` is the observable this section reads the tolerance through: its
+    verdict depends on the run, the run depends on the tolerance, so a tolerance that silently
+    went to zero shows up here as a booking allowed where it should have been refused.
+    """
+    return SpaceRuleConfig(
+        timezone="UTC",
+        rules=(
+            SpaceRuleRow(
+                id=1,
+                rule_type="max_consecutive_duration",
+                params={"max_consecutive_minutes": 120},
+            ),
+        ),
+        shape=shape,
+    )
+
+
+def test_a_gap_under_the_shapes_shortest_offered_duration_merges_the_run():
+    """The silent-loosening case itself, end to end through `evaluate`.
+
+    One hour held, and a request for the hour starting five minutes after it ends. The shape
+    offers only 60-minute bookings, so a 5-minute gap is dead space nobody could construct a
+    booking to fill: the two are one 2h05 run and the two-hour cap refuses it. With the tolerance
+    left un-re-sourced at zero, the run would be the request alone at one hour and this booking
+    would be allowed.
+    """
+    config = _consecutive_cap_config(HOUR_GRID_SHAPE)
+    history = (request(at(9), at(10)),)
+
+    result = evaluate(request(at(10, 5), at(11, 5)), config, history)
+
+    assert not result.allowed
+    assert "consecutive" in result.message
+
+
+def test_a_gap_of_exactly_the_shortest_offered_duration_does_not_merge():
+    """The other side of the same bound. `merge_adjoining_spans` joins on `gap < tolerance`
+    **strictly**, so a gap a legal booking could actually occupy — exactly one offered length — is
+    a real gap and fractures the run, which is the correct answer rather than a leak."""
+    config = _consecutive_cap_config(HOUR_GRID_SHAPE)
+    history = (request(at(9), at(10)),)
+
+    result = evaluate(request(at(11), at(12, 5)), config, history)
+
+    assert result.allowed
+
+
+def test_the_tolerance_is_the_smallest_offered_duration_not_the_largest():
+    """A shape offering 30- and 60-minute bookings resolves **30**, the smallest.
+
+    The largest would merge across a 45-minute gap a member could genuinely have booked into,
+    which is the over-strict direction; the first-listed would be an accident of document order.
+    """
+    config = _consecutive_cap_config(HALF_HOUR_AND_HOUR_SHAPE)
+
+    assert _gap_tolerance(config, SHAPE_MONDAY) == timedelta(minutes=30)
+
+
+def test_a_date_the_shape_offers_nothing_on_resolves_a_zero_tolerance():
+    """No operating interval means no bookable length, so there is no gap a booking could occupy
+    and nothing to close: exact abutment, `max-duration-cannon.md`'s original decision 3."""
+    config = _consecutive_cap_config(MONDAY_ONLY_SHAPE)
+
+    assert _gap_tolerance(config, SHAPE_TUESDAY) == timedelta(0)
+
+
+def test_the_default_shape_resolves_its_own_offered_duration():
+    """A `SpaceRuleConfig` built without a shape behaves like the fresh Space it stands for.
+
+    `SpaceRuleConfig.shape` defaults to `DEFAULT_SHAPE` — open every day, 60-minute bookings —
+    rather than to `None`, because an absent shape would resolve to a tolerance of zero, and zero
+    is the *permissive* direction.
+    """
+    assert _gap_tolerance(SpaceRuleConfig(timezone="UTC"), SHAPE_MONDAY) == timedelta(minutes=60)

@@ -86,19 +86,22 @@ These hold everywhere and are not any one component's private business.
 **UTC everywhere.** Every datetime crossing a module boundary is timezone-aware with a **zero** UTC
 offset. Naive datetimes and non-zero offsets are rejected at construction (`UtcDateTime` in the
 schema, the interface dataclasses in the engine). Timezone is a UI presentation concern and no
-backend entity carries one. This is not pedantry: rules read `.hour` to enforce opening windows, so
-a `+02:00` value would yield a *local* hour and silently mis-enforce them. Convert at the boundary.
+backend entity carries one. This is not pedantry: a rule handed a `+02:00` value reads a *local*
+wall clock where it was promised an absolute instant, so every window it derives and every booking
+it counts is silently off by that offset. Convert at the boundary.
 
 **Instants carry no zone; recurring configuration does.** A stored datetime — a booking's `start_at`,
 `created_at`, any instant — is UTC and carries no timezone, full stop: an instant is an absolute
 point, and a zone on it would add ambiguity without adding information. The one exception is
 recurring wall-clock configuration, not an instant at all — a Space's operating hours are authored
-as local clock times against its own IANA zone (`.claude/rules/identity-and-access.md` has the full
-model) — and that split is exactly why it is the exception: a rule resolving to a different UTC
-instant per date is the one thing that needs a zone to resolve at all.
+as local clock times in its calendar shape and resolved against its own IANA zone
+(`.claude/rules/calendar-shape.md` has the full model) — and that split is exactly why it is the
+exception: a structure resolving to a different UTC instant per date is the one thing that needs a
+zone to resolve at all.
 
 **Conversion happens at the boundary, per date, never once at write time.** Resolving a Space's local
-calendar — its day, week and month bounds, a slot grid's anchor, a frequency cap's counting window —
+calendar — its day, week and month bounds, its shape's operating blocks, a frequency cap's counting
+window —
 to UTC instants is repeated for every date the question is asked about, not computed once and cached
 as a fixed offset. A cached offset is correct for the day it was computed and silently wrong the next
 time the zone's DST rule flips — the version of this bug that looks right in July and wrong in

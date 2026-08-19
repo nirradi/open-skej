@@ -37,8 +37,8 @@ The mapping of outcomes to status codes:
 **The rule-engine call's shape changes here, by design (task 4.13b).** It was
 ``evaluate(request)`` against the module-level ``DEFAULT_CANON``; it is now
 ``evaluate(request, config, history)`` against a canon assembled from the
-Space's own configuration — see ``app.identity.service.space_rule_config``
-(shared, task 6.9, with ``GET /spaces/{public_id}/schedule``) and
+Space's own configuration — see ``app.identity.service.space_rule_config``,
+whose only caller this module now is, and
 ``_load_space_history`` below. The verdict is still read the same way:
 ``verdict.allowed`` / ``verdict.message``.
 """
@@ -303,7 +303,11 @@ def create_resource_booking(
             content=BookingDenied(message=shape_verdict.reason).model_dump(),
         )
 
-    config = service.space_rule_config(session, space)
+    # `current_shape` rather than a second `service.live_shape` read: the gate above has already
+    # validated this exact document, and the engine reads it for the run's gap tolerance
+    # (`rules_stub._gap_tolerance`). Two reads would be two queries and two chances for the gate
+    # and the engine to disagree about what this one booking is judged against.
+    config = service.space_rule_config(session, space, shape=current_shape)
 
     # One instant, shared by the history query and the engine's own clock, so a
     # request straddling a window boundary cannot see one "now" build the

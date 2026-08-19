@@ -2,12 +2,10 @@
 
 from .canon import (
     DEFAULT_CANON,
-    AvailabilityHoursRule,
     BookingHorizonRule,
     MaxConsecutiveDurationRule,
     MaxDurationRule,
     NotInThePastRule,
-    SessionLengthRule,
     default_canon,
 )
 from .controller import RULE_ERROR_MESSAGE, ContextMismatchError, evaluate_request
@@ -59,8 +57,6 @@ __all__ = [
     "BookingHorizonRule",
     "MaxDurationRule",
     "MaxConsecutiveDurationRule",
-    "SessionLengthRule",
-    "AvailabilityHoursRule",
     "default_canon",
     "DEFAULT_CANON",
     # Exported but deliberately not in DEFAULT_CANON — see frequency.py.

@@ -56,9 +56,8 @@ into a pass defeats containment *silently* — it looks like a working rule that
   can express nothing — so a generated "no more than 3 hours a day" would count against the **UTC**
   day and be wrong for every venue that is not on UTC. Each pair is half-open and is rejected if
   inverted: these are two absolute instants with no wrap to describe, so an inversion is the caller
-  bug it looks like — the same reasoning the counting rules' window already gives, and (since
-  `AvailabilityHoursRule` moved onto plain minutes) nothing in this contract holds an invertible pair
-  at all any more. `end_minutes` **may exceed 1440 and is
+  bug it looks like — the same reasoning the counting rules' window already gives, and nothing in
+  this contract holds an invertible pair at all any more. `end_minutes` **may exceed 1440 and is
   never capped**: that is a booking running past local midnight, and representing it is the point.
   Every bound is resolved from local midnight and nothing else, so a day, a week and a month all
   begin when the *venue's* day begins; and because a local day is 23 or 25 hours across a DST
@@ -235,7 +234,7 @@ to UTC instants and handed to `MaxBookingsPerDayRule` / `MaxBookingsPerWeekRule`
 `MaxBookingsPerMonthRule`, which derive none of them, and the local day alone to
 `MaxDurationPerDayRule` (task 8.7), which needs no tolerance since it never merges (see
 `frequency.py`'s own section below). **It resolves the `LocalFrame`** every context carries —
-`_build_local_frame`, the general form of the per-type resolution above. Those five types get
+`_build_local_frame`, the general form of the per-type resolution above. Those four types get
 bespoke resolved parameters only because they were written before the frame existed; a type nobody
 hand-wrote has no such case and can express a local day through the frame or not at all. Every
 bound in it comes from
@@ -264,48 +263,36 @@ and `context.history.bookings` together, at evaluate time. `MaxDurationPerDayRul
 the one exception — it reads the same raw `context.history.bookings` but never calls
 `merge_adjoining_spans`, so it takes no tolerance at all (see `frequency.py`'s own section below).
 
-**The gap tolerance is that date's own resolved session length, zero when no `session_length` row
-governs the date — not exact abutment, even though the run's own design note (`max-duration-cannon.md`,
-decision 3) chose exact abutment first.** That decision rests on every booking landing on a grid,
-which is what makes a sub-session gap unconstructable; `session_length` is a per-Space row, not a
-property of the engine, so a Space configuring none has arbitrary start times, and a gap smaller than
-one session — 17:00-18:00 and 18:05-19:05, with a 5-minute gap — is dead space nobody could ever
-construct a booking to fill. Left as exact abutment, that gap would fracture every run-based rule for
-free. A tolerance equal to the session length closes it without branching on whether a grid exists:
-any gap a legal booking could actually occupy is at least that long, so a gap shorter than it is
-indistinguishable from no gap at all, and a Space with no `session_length` row gets `tolerance == 0`
-— exact abutment, unchanged.
+**The gap tolerance is the smallest duration that date's own calendar shape offers, zero on a date
+the shape offers nothing at all — not exact abutment, even though the run's own design note
+(`max-duration-cannon.md`, decision 3) chose exact abutment first.** That decision rests on every
+booking landing on a grid, which is what makes a sub-session gap unconstructable; a shape is a
+per-Space document, not a property of the engine, and two of its operating blocks may each keep
+their own anchor, so a gap smaller than the shortest length the venue offers — 17:00-18:00 and
+18:05-19:05, with a 5-minute gap — is dead space nobody could ever construct a booking to fill. Left
+as exact abutment, that gap would fracture every run-based rule for free. A tolerance equal to the
+shortest offered duration closes it without branching on whether one uniform grid exists: any gap a
+legal booking could actually occupy is at least that long, so a gap shorter than it is
+indistinguishable from no gap at all, and a date the shape offers nothing on gets `tolerance == 0` —
+exact abutment, unchanged.
 
-**Where a grid does exist the tolerance changes nothing, and that is worth knowing before anyone
-"simplifies" it away.** Every booking on the grid starts and ends on it, so every gap between two of
-them is a whole multiple of the session length, and `merge_adjoining_spans` joins on `gap <
-tolerance` strictly — so a gap of exactly one session does not merge, and the only gap that does is
-zero. A tolerance of one session and a tolerance of zero are therefore behaviourally identical for a
-Space with a grid. The tolerance earns its place on the Space that has no `session_length` row at
-all, which is the case it was written for.
+**Where one uniform grid does exist the tolerance changes nothing, and that is worth knowing before
+anyone "simplifies" it away.** Every booking on such a grid starts and ends on it, so every gap
+between two of them is a whole multiple of its step, and `merge_adjoining_spans` joins on `gap <
+tolerance` strictly — so a gap of exactly one step does not merge, and the only gap that does is
+zero. A tolerance of one step and a tolerance of zero are therefore behaviourally identical there.
+The tolerance earns its place on the Space whose shape offers several durations, or whose operating
+blocks keep separate anchors, which is the case it was written for.
 
-The resolution is read from
-`resolve_day_schedule(config, on_date).session_minutes` rather than re-derived here, including
-its combining rule (the LCM of every matching row's own length) — a second
-implementation of "what session length governs this date" would be exactly the drift this document
-keeps warning about. That same field is also reported over the wire by `GET
-/spaces/{public_id}/schedule`, along with a per-date coherence issue — a resolved session length
-longer than the resolved operating window means nothing on that date is bookable at all. **Nothing
-renders that endpoint any more**: the calendar grid draws a Space's own shape projection instead
-(`.claude/rules/calendar-shape.md`), so what is left of `resolve_day_schedule` is the gap tolerance
-this paragraph is about.
-
-`rules_stub.py` also holds one thing that is not a fifth translation onto `evaluate_request` — it
-never calls it. `resolve_day_schedule`, called by `GET /spaces/{public_id}/schedule` and by the run's
-own gap tolerance above, reports what a booking on a given date *would* be judged against — the
-slot size and operating window, resolved from that Space's own `space_rules` rows — for display, not
-judgment. It reuses `row_applies`, the identical `applies_to` matching `_build_canon` uses, so
-"which rows govern this date" cannot drift between the two call paths, but it never touches
-`REGISTRY`, `RuleType.build`, or `evaluate_request` itself, and it resolves in the Space's own local
-wall clock rather than converting to UTC — there is no instant to judge here, only a calendar date to
-describe. It lives in this module because this is already the one place that reads `space_rules` and
-already resolves `applies_to` against a date, not because reporting a schedule is part of the
-adapter's job of judging a booking.
+The value is read from that date's own projection rather than re-derived here:
+`app.rules_stub._gap_tolerance` takes the minimum `allowed_durations_mins` across
+`shape.project_day(config.shape, on_date)`'s operating intervals. That is the identical projection
+`.claude/rules/calendar-shape.md`'s availability gate enforces and the calendar grid draws, so what
+a booking is merged against and what its member was offered cannot drift apart. `SpaceRuleConfig`
+carries the Space's live `Shape` for this and for nothing else, defaulted to `DEFAULT_SHAPE` — the
+document a fresh Space actually holds — rather than to `None`: an absent shape would resolve to a
+tolerance of zero, and zero is the *permissive* direction here, since it stops the sweep merging and
+quietly loosens every run-based rule without failing anything.
 
 `ContextMismatchError` is deliberately not caught at this boundary: the adapter builds both the
 request and the context from one booking, so a mismatch is an adapter bug and must reach the error
@@ -313,36 +300,29 @@ tracker, not be served as a polite refusal.
 
 ## The canon
 
-`canon.py` holds six hand-written request-local rules: `NotInThePastRule()`,
-`BookingHorizonRule(days)`, `MaxDurationRule(max_duration)`,
-`MaxConsecutiveDurationRule(max_duration)`, `SessionLengthRule(session_minutes, anchor_minutes)`,
-`AvailabilityHoursRule(opens_at_minutes, closes_at_minutes)`. They are written by hand rather than
+`canon.py` holds four hand-written request-local rules: `NotInThePastRule()`,
+`BookingHorizonRule(days)`, `MaxDurationRule(max_duration)` and
+`MaxConsecutiveDurationRule(max_duration)`. They are written by hand rather than
 generated — they are the reference the generation loop is measured against, and the worked example
 of the rule shape.
 
 **Parameters live on the instance, never as module constants.** A Space allowing 45-minute bookings
 and one allowing two hours are the same rule with different arguments, so per-Space configuration is
 a change to how the canon is built rather than a change to any rule. `DEFAULT_CANON` is the reference
-assembly of four of these six at their default values — `SessionLengthRule` and
-`MaxConsecutiveDurationRule` are the two missing, for different reasons.
-`SessionLengthRule`'s `anchor_minutes` is the date's own resolved opening time, so a literal baked
-into a module-level constant at import time would be correct for the hours it was written against and
-silently wrong the day an admin changed them — the same cached-value mistake `CLAUDE.md` warns
-against elsewhere. It is therefore never part of `DEFAULT_CANON`, the same way the frequency rules in
-`frequency.py` are registered and importable but kept out of it: an adapter resolves the anchor per
-booking date and builds the rule fresh. `MaxConsecutiveDurationRule` is
-excluded for the reason every rule type added since Stream 6 has stayed out of it: `DEFAULT_CANON`
-is frozen at the four types it already asserts against, and adding a fifth would change what those
-assertions cover without anyone asking them to. The canon the API actually runs is built per Space
-(see Backend integration), where a type with no matching row is absent from the canon entirely and
-`SessionLengthRule` is constructed fresh, with a freshly resolved anchor, for every booking.
-`NotInThePastRule` is the only one always present — you can never book the past, whatever a Space
+assembly of three of these four at their default values — `MaxConsecutiveDurationRule` is the one
+missing, excluded for the reason every rule type added since Stream 6 has stayed out of it:
+`DEFAULT_CANON` is frozen at the types it already asserts against, and adding another would change
+what those assertions cover without anyone asking them to. The canon the API actually runs is built
+per Space (see Backend integration), where a type with no matching row is absent from the canon
+entirely. `NotInThePastRule` is the only one always present — you can never book the past, whatever a Space
 configures.
 
-**There is no rule that bounds a booking's length from below on its own.** A floor is what
-`SessionLengthRule` already produces: a booking that starts and ends on the grid cannot be shorter
-than one session, so a separate minimum-duration type would be a second way to say the same thing and
-a second row an admin has to keep consistent with the first. A rule that needs to judge a *run* of
+**There is no rule that bounds a booking's length from below, and none that puts it on a grid.**
+Both are the calendar shape's job now (`.claude/rules/calendar-shape.md`): a booking may only take a
+length the shape's `allowed_durations_mins` offers, at a start that shape's own grid produces, and
+the availability gate enforces that before this engine runs at all. A rule saying the same thing
+would be a second place to configure it that could disagree with the calendar a member is looking
+at, which is the state Stream 10 exists to end. A rule that needs to judge a *run* of
 adjoining bookings rather than one booking reads `context.run.duration`; that is a different question
 with a different remedy, and `MaxConsecutiveDurationRule` is the type that asks it.
 
@@ -359,7 +339,7 @@ configures `max_duration`, `max_consecutive_duration`, both, or neither, and con
 never silently changes what the old one already enforces, since a run always contains its own
 request and an inclusive bound on the run can never pass what the identical bound on the request
 alone would already have denied. The bound is inclusive, the same convention every duration rule in
-this canon shares. Priority 32, between `max_duration` (30) and `session_length` (35): a booking
+this canon shares. Priority 32, immediately after `max_duration` (30): a booking
 that breaks both duration rules at once is more usefully told to shorten itself — fixable by editing
 only this request — than to stop abutting a neighbour, which is fixable only by touching a booking
 that already exists, so `max_duration` keeps first refusal. **`reads_history=True`, though
@@ -371,35 +351,10 @@ joining an existing run must never read as "your one-hour booking is too long" �
 and this codebase's denial copy is contract (`rules/tests/test_denial_copy.py`, "Denial copy is
 contract" below).
 
-**`SessionLengthRule` denies a booking whose start or end is not on the grid** defined by
-`session_minutes` and `anchor_minutes` — both bounds are checked, so an aligned start with an
-off-grid end is denied on the end, and because both must land on the grid a booking is always a whole
-number of sessions and can never be shorter than one. It reads `context.local.start_minutes` /
-`end_minutes` against two plain integers and holds no datetime at all, exactly as
-`AvailabilityHoursRule` does; Python's `%` is non-negative for a negative left operand, so a start
-earlier than the anchor lands on the same extended grid with no special case.
-
-**The anchor is the date's own resolved opening time, and coupling the two rules is the point.** The
-adapter resolves it from that date's own `availability_hours` rows, falling back to local midnight
-when none governs the date. This is a deliberate coupling of two rule instances rather than an
-accident of implementation: a venue's sessions begin when the venue opens, so a grid anchored
-anywhere else describes a schedule nobody asked for — an opening time of 09:15 against a
-midnight-anchored hourly grid has no session starting at 09:15 at all. The `applies_to` objection
-that a midnight anchor would sidestep is answered by resolving per date rather than per Space: both
-values are already resolved for each date by `resolve_day_schedule`, which is the one implementation
-of "which rows govern this date", so two rows scoped to different days each get their own correct
-anchor.
-
-This closes a real gap rather than tightening a theoretical one: the grid was, until a rule enforced
-it, the one piece of a Space's configuration nothing on the server read — the calendar UI
-declined to *offer* an off-grid slot, but the API accepted one anyway, which is exactly the split
-this document warns about elsewhere (the grid is advisory, the engine is the only boundary that
-counts).
-
 **A rule type is registered, not just implemented.** `rules/rules/registry.py` gives each of the
-ten classes above a runtime identity separate from being importable Python. A registered type
+eight classes above a runtime identity separate from being importable Python. A registered type
 declares: a **stable string id** (`not_in_the_past`, `max_duration`,
-`max_consecutive_duration`, `session_length`, `availability_hours`, …) that a future
+`max_consecutive_duration`, `booking_horizon`, …) that a future
 `space_rules.rule_type` column stores — never the Python class
 name, since renaming the class must not silently orphan every row that named it; a **label** and a
 **description** — the description is prose for an admin choosing between rule types, "what it
@@ -423,29 +378,25 @@ the run never spells "history" anywhere in its own text, and checking for that w
 under-report `True` for it exactly as it would have for a hand-written `max_consecutive_duration`.
 That check can only ever raise the model's own declared claim, never lower it (the manifest call's
 own "AI generation loop" paragraph below has the mechanics).
-**`needs_local_resolution`**, true for `session_length` and the four history-reading
-rules from `frequency.py` — the five whose constructor needs values resolved against the Space's
-own zone and the booking's own date rather than the raw stored params, which is what keeps every
-local-to-UTC conversion at the adapter boundary instead of inviting a rule type to convert for
-itself. `availability_hours` is deliberately **not** one of them any more: it stores
-minutes from the venue's own local midnight directly and reads them off `context.local` inside its
-own `evaluate`, so its `build` function needs nothing resolved for it at all — the same local
-question every other type still needs an adapter to answer for it, this one answers for itself once
-handed a `LocalFrame`. **`is_single`**, advisory only and never a uniqueness constraint, since the
+**`needs_local_resolution`**, true for the four history-reading
+rules from `frequency.py` and nothing else — the four whose constructor needs values resolved
+against the Space's own zone and the booking's own date rather than the raw stored params, which is
+what keeps every local-to-UTC conversion at the adapter boundary instead of inviting a rule type to
+convert for itself. Every other type is deliberately **not** one of them: a type that needs a local
+answer reads it off `context.local` inside its own `evaluate`, so its `build` function needs nothing
+resolved for it at all — the same local question the four counting types still need an adapter to
+answer for them, the rest answer for themselves once handed a `LocalFrame`. **`is_single`**, advisory only and never a uniqueness constraint, since the
 engine's flat AND makes two instances of one type coherent — they AND to the stricter, which is true
 for every type whether or not it is flagged. For a type like `max_bookings_per_week` (or its daily
 and monthly siblings, or `max_duration_per_day`) a second instance is almost certainly not what an
-admin meant, so it is `is_single`; `availability_hours`,
-`max_duration`, `max_consecutive_duration` and `session_length` are deliberately
+admin meant, so it is `is_single`;
+`max_duration` and `max_consecutive_duration` are deliberately
 **not**, because scoping each
-instance to a different day or date set via `applies_to` — "Mon/Wed/Fri 10–15" and "Tue/Thu 8–12" as
-two `availability_hours` rows, or a finer grid on weekday evenings than on a Sunday morning — is the
+instance to a different day or date set via `applies_to` — a two-hour cap on weekday evenings and a
+three-hour one on a Sunday morning, as two `max_duration` rows — is the
 intended way to use them, not a mistake to warn about. And a **build function** from validated params
 (plus, for a type with `needs_local_resolution`, a second mapping of already-resolved values) to a
-constructed instance of the class it names. `session_minutes` must divide 1440 so a day holds a whole
-number of sessions; the schema has no field to express that bound, so it is stated twice — at the write
-boundary, where an admin gets a 422 naming the constraint (`identity-and-access.md`), and inside
-`SessionLengthRule`'s own constructor, which keeps it true for a row written by any other means.
+constructed instance of the class it names.
 
 **A generated type's label, description and parameter schema are authored by the model, not the
 admin's own prompt, and the parameter schema is derived rather than trusted.** The prompt that asked
@@ -471,32 +422,32 @@ against a history nobody queried, silently permissive in exactly the way this co
 **Rule order comes from a type's declared priority, never from row order, insertion order, or an
 admin's own arrangement.** An assembled canon sorts by priority, then by row id for two instances of
 the same type. Priorities are spaced in multiples of ten rather than assigned consecutively (`32`
-and `35` are the deliberate exceptions, `max_consecutive_duration`'s own and `session_length`'s —
-see below), so a later type can be inserted between two existing ones without renumbering the rest
-of the registry.
+and `42` are the deliberate exceptions, `max_consecutive_duration`'s own and
+`max_duration_per_day`'s — see below), so a later type can be inserted between two existing ones
+without renumbering the rest of the registry. **Retiring a type leaves its number unused rather than
+closing the gap** — `35` and `40` are free since the calendar shape replaced `session_length` and
+`availability_hours` — for exactly the reason the spacing exists: a renumbering is a silent change
+to which denial a member reads.
 
 **The order a canon assembled this way runs in reproduces `(NotInThePast, BookingHorizon,
-MaxDuration, MaxConsecutiveDuration, SessionLength, AvailabilityHours,
+MaxDuration, MaxConsecutiveDuration,
 MaxDurationPerDay, MaxBookingsPerDay, MaxBookingsPerWeek, MaxBookingsPerMonth)` because that is what
 each type's declared priority sorts to, and it arbitrates user-facing copy.** The controller is
 fail-fast, so the first rule to deny decides the single message shown when a request breaks several
 rules at once. The date rules run first because they reject a booking on *when* it is, which no
 shortening or shifting within the day can fix; telling someone to trim a three-hour booking that
-sits 90 days out sends them to fix the one thing that is not the problem. Duration (both flavours),
-session length and availability hours are all remedies the user can apply to an otherwise
-bookable date and time — shorten it, stop abutting a neighbour, line it up with the
-grid, pick another time — so they follow, in that order. `max_consecutive_duration` sits **after**
+sits 90 days out sends them to fix the one thing that is not the problem. The two duration rules are
+remedies the user can apply to an otherwise bookable date and time — shorten it, stop abutting a
+neighbour — so they follow, in that order. `max_consecutive_duration` sits **after**
 `max_duration` at priority 32, because the two can break on the same request and shortening it is a
 remedy `max_duration`'s copy can name that `max_consecutive_duration`'s cannot, so the rule naming
 the fixable-by-editing-this-request problem gets first refusal over the one whose fix means touching
-a booking that already exists. `session_length` sits at 35, beside the duration rules rather than
-with the date rules above it or the counting rules below, because "line up with the grid" is exactly
-as fixable-within-the-date as "shorten it" or "pick another time" is — and 32 and 35 both landed
-between existing tens without moving `max_duration` off 30 or `availability_hours` off 40, which is
-what the spacing discipline is for. `session_length` runs **before** `availability_hours`, so a
-booking that is both off-grid and outside opening hours is told about the grid first; both messages
-are actionable and the ordering is inherited rather than argued for. Past and horizon are mutually
-exclusive and never arbitrate against each other. **The four counting and total rules come last**
+a booking that already exists. Past and horizon are mutually
+exclusive and never arbitrate against each other. Nothing in this ordering has to arbitrate against
+*structure* any more: a booking outside the venue's operating hours, or of a length it does not
+offer, never reaches this canon at all — the availability gate refuses it one layer up
+(`.claude/rules/calendar-shape.md`), which is the same fail-fast arbitration performed one layer
+earlier, and for the same reason. **The four counting and total rules come last**
 because no shorter, earlier or later booking clears a frequency cap or a daily total on its own the
 way it clears every rule above — moving *when* the request is never fixes *how much* history there
 already is. Among the four, `max_duration_per_day` (42) and `max_bookings_per_day` (45) precede the
@@ -517,9 +468,11 @@ not a calendar date, not "UTC" — whatever the rule, hand-written or generated.
 timezone, so every datetime it holds is UTC, and a time it prints is UTC wearing no label: a Berlin
 member refused at 19:00 local was being told the club "closes at 17:00", which is neither the time
 they typed nor the time on the door, and nothing in the message told them which clock it was in.
-`AvailabilityHoursRule` therefore names *which* bound the booking missed in words — before we open,
-after we close — and points at the calendar for the hours themselves, which is where the venue's own
-zone is known and the only place they can be rendered honestly. A **duration is not an absolute
+A rule that has to name a bound therefore names *which* one the booking missed in words — before we
+open, after we close — and points at the calendar for the hours themselves, which is where the
+venue's own zone is known and the only place they can be rendered honestly. The shape's own denial
+copy is written to the identical register for the identical reason
+(`.claude/rules/calendar-shape.md`, "Fail closed"). A **duration is not an absolute
 time**: "at most 2 hours long" says the same thing everywhere and stays legal, and the check that
 enforces this has to tell the two apart or it will be loosened until it catches nothing.
 
@@ -531,30 +484,11 @@ neither collection, so the Generator's system prompt states the constraint as a 
 its own. Fixing the one rule that named an hour without teaching the Generator would have bought one
 venue and reintroduced the defect on every rule authored after it.
 
-**Availability hours are `LocalFrame` minutes, not clock times.** `opens_at_minutes` and
-`closes_at_minutes` are plain integers — minutes from the venue's own local midnight — compared
-against `context.local.start_minutes` / `end_minutes`. There is no UTC clock time in this rule at
-all, and nothing left for the adapter to resolve per booking date: a `space_rules` row's two params
-are read straight into the rule at construction (`needs_local_resolution=False`, "The canon" below).
-
-**`closes_at_minutes` may exceed 1440, and that is how a window past local midnight is represented**
-— 18:00 to 02:00 is `opens_at_minutes=1080, closes_at_minutes=1560`, plainly, with no inversion to
-read a meaning into. The constructor enforces `0 <= opens_at_minutes < 1440` and `opens_at_minutes <
-closes_at_minutes <= opens_at_minutes + 1440`: a window is at most 24 hours long and always starts on
-the day it is configured for, so what a bare pair of clock times could only express as an ambiguous
-inversion is now a value nothing can typo into existing at all. `evaluate` still has to pick between
-at most two candidate occurrences of the recurring window — today's own, or the tail of yesterday's,
-shifted back a full day (`closes_at_minutes - 1440`) — but that choice is between two non-overlapping
-integer ranges now, not a reconstruction from a bare `time` with its date stripped off.
-
-Because the range is enforced by the rule's own constructor, **the identical range is enforced again
-at the write boundary** (`identity-and-access.md`): a submission failing it is refused with a 422
-naming the problem rather than accepted and only discovered as `RULE_ERROR_MESSAGE` denying every
-booking the next time someone books — the same reasoning `session_length`'s own write-boundary check
-already gives for mirroring its rule's constructor bound. That write-boundary check is also the one
-place a venue open past its own local midnight is admitted deliberately, rather than arriving by
-accident through a typo — the same role it always played, now stated as a range rather than an
-ordering.
+**The venue's operating hours are no longer a rule at all.** `availability_hours` and
+`session_length` were retired on 2026-08-18 and the calendar shape says what both said, enforced by
+the availability gate ahead of this engine (`.claude/rules/calendar-shape.md`). No rule in this
+canon holds a clock time of any kind now; every remaining one bounds a duration, a count, or a
+distance from `now`.
 
 `frequency.py` holds four rules, the only ones whose verdict depends on anything beyond the
 request: three that **count** — `MaxBookingsPerDayRule(n, window_start, window_end, tolerance)`,
@@ -564,9 +498,8 @@ bar the window each is handed (task 8.7 added the day rule beside the pre-existi
 month ones) — and one that **sums**, `MaxDurationPerDayRule(max_duration, window_start,
 window_end)`, a *total* rather than a count and the one rule in this module that does not merge
 history into runs at all. They are **exported but deliberately absent from `DEFAULT_CANON`**, the
-reference canon of four of `canon.py`'s six hand-written rules (`SessionLengthRule` and
-`MaxConsecutiveDurationRule` are the other two missing, each excluded for its own, different reason — see
-"The canon" above). The API does not run `DEFAULT_CANON`; it assembles a per-Space canon that
+reference canon of three of `canon.py`'s four hand-written rules (`MaxConsecutiveDurationRule` is
+the other one missing — see "The canon" above). The API does not run `DEFAULT_CANON`; it assembles a per-Space canon that
 *includes* one of these four when a Space holds the matching `space_rules` row. Keeping them out
 of the reference canon is what lets the end-to-end suite assert against a seeded Space configured
 to those four rules' values without a history-reading rule silently changing the outcome.
@@ -579,13 +512,15 @@ Deriving it here is what made a local week wrong: a Sydney booking at 00:30 on M
 of one admitted a second booking in the same Sydney week — the identical miscount a day window
 would make for `max_bookings_per_day` / `max_duration_per_day` if either derived its own. A local
 day, week or month has no fixed UTC representation and the engine has no timezone to find one
-with, so the layer that does resolves it. This is the same boundary split availability hours
-already follow, and `CalendarContext` still carries **no timezone field** for the same reason it
+with, so the layer that does resolves it. This is the same boundary split the calendar shape itself
+follows — local wall-clock minutes in the document, converted once per date at the gate — and
+`CalendarContext` still carries **no timezone field** for the same reason it
 never did — a zone there would invite every rule, generated ones included, to convert for itself.
 
 An inverted pair is a **caller bug** here and is rejected at construction, for all four rules. A
-window here is two absolute instants, not a recurring daily one, so — like `AvailabilityHoursRule`
-since it moved onto plain minutes — it has no wrap to describe at all.
+window here is two absolute instants, not a recurring daily one, so it has no wrap to describe at
+all — and since these are the last rules in the canon holding a pair of anything, nothing in this
+contract holds an invertible pair that could mean a wrap.
 
 **A booking is counted (or summed) against the window it starts in, and the window is anchored on
 the request rather than on `now`.** A request three weeks out is judged against that week's

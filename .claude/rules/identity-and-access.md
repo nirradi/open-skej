@@ -123,22 +123,21 @@ A Space is not itself the thing booked. It is a **venue** — a club, a lab — 
 carrying **no configuration of its own**. `bookings.resource_id` is a foreign key onto `resources`
 and the overlap constraint is keyed on it, so two courts booked at the same hour do not collide while
 the same court twice does — and that overlap constraint is the *only* thing that still distinguishes
-two Resources in a Space. Everything else — operating hours, slot interval, every rule limit — lives
+two Resources in a Space. Everything else — the calendar shape, every rule limit — lives
 on the Space, and every court in it shares that one configuration. Creating a Space **auto-creates
 its first Resource**, so a fresh venue is never a dead end and no primary flow meets an empty state;
-the schema can represent a Space with no Resource, but nothing in the product produces one. It also
-seeds **two `space_rules` rows** — an unscoped `availability_hours` (09:00–17:00) and an unscoped
-`session_length` (60 minutes) — for the same reason: a venue is bookable on arrival rather than one an
-admin must visit the rules page to make usable. Those two and nothing else, so every limit a venue has
-not asked for stays absent. A Space genuinely meant to enforce no hours holds no such row and has to
-have the seeded one deleted — which is what `sandbox_seed` does to Space A, since "not enforced" is
-the absence of a row and never a row with an empty bound.
+the schema can represent a Space with no Resource, but nothing in the product produces one. It seeds
+**no `space_rules` row at all**, so every limit a venue has not asked for is absent from the day it
+is created: "not enforced" is the absence of a row here, exactly as it is for every rule type.
 
-**Space creation also writes one live `SpaceCalendarShape` row**, `DEFAULT_SHAPE`
+**Space creation instead writes one live `SpaceCalendarShape` row**, `DEFAULT_SHAPE`
 (`.claude/rules/calendar-shape.md`), in the same transaction as the rest. A Space with no live shape
 row is not a reachable state, matching the reasoning above for a fresh venue never meeting an empty
-Resource list — the shape is a third piece of a Space's starting configuration, alongside its first
-Resource and its two seeded rule rows, and all three are written atomically with the Space itself.
+Resource list — the shape is the second piece of a Space's starting configuration, alongside its
+first Resource, and both are written atomically with the Space itself. It is also the *whole* of
+what makes a fresh venue bookable on arrival rather than one an admin must visit the rules page to
+make usable: the structure a member books inside comes from this row, and a Space that wants
+different hours edits its shape rather than adding a rule.
 
 **Membership and roles stay at the Space, never the Resource.** You are admitted to the venue, not to
 one court, and a member may book any Resource in the Space. This is deliberate and load-bearing: the
@@ -150,11 +149,13 @@ Space and nowhere else, through `require_space_role` on the parent — which ext
 oracle-free **404, never 403** rule to a Resource id belonging to another tenant, resolved in one
 query so the timing does not leak either.
 
-**The timezone is the one genuinely per-Space column left; everything else a Space enforces is a rule
-instance.** A venue is in one physical place, so its timezone (an IANA name like `Europe/Berlin`,
-never a fixed offset that is right in July and wrong in January) is a column on `Space`. Operating
-hours, slot interval, and every rule-engine limit — a maximum booking duration, a booking horizon, a
-weekly or monthly frequency cap — are rows in `space_rules` instead: one row per *instance* of a rule
+**The timezone is the one genuinely per-Space column left; everything else a Space enforces is
+either its calendar shape or a rule instance.** A venue is in one physical place, so its timezone (an
+IANA name like `Europe/Berlin`, never a fixed offset that is right in July and wrong in January) is a
+column on `Space`. Its operating hours and the booking lengths it offers are its **shape**
+(`.claude/rules/calendar-shape.md`), not rules — a shape says what the venue offers and a rule says
+who may take it. Every rule-engine limit — a maximum booking duration, a booking horizon, a
+weekly or monthly frequency cap — is a row in `space_rules` instead: one row per *instance* of a rule
 type declared in `rules.registry.REGISTRY` (`rule-engine.md`, "The canon"), carrying that type's own
 JSON `params`, an `applies_to` narrowing which weekdays or dates it governs (`null` means always), and
 an `enabled` flag that is the entire pause mechanism — a disabled row is never assembled into the
@@ -166,12 +167,12 @@ user holds anywhere in the venue, across all its courts, never per court.
 `SpaceRead` serves the same three. No schedule value is reachable from either — a Space's rules are
 read and written only through the rules API below, and **there is deliberately no second way in**. A
 scalar field can only ever name a type's one *unscoped* (`applies_to IS NULL`) instance: it has
-nowhere to say which of two `availability_hours` rows it means, or to name one scoped to Saturdays,
+nowhere to say which of two `max_duration` rows it means, or to name one scoped to Saturdays,
 so keeping one alongside the rules API would leave two paths answering "what does this Space
 enforce" — the bug class this schema keeps writing down. `SpaceSettingsPanel` is the one screen that
 edits `name`, `description` and `timezone` — the three columns this endpoint serves and the only
 properties of a Space its owner calls truly configurable rather than a rule; every rule instance,
-including the six that were once columns on `spaces`, is created and edited at `/s/{public_id}/rules`
+including those that were once columns on `spaces`, is created and edited at `/s/{public_id}/rules`
 (`SpaceRulesPage`). A Resource has no configuration to edit;
 `PATCH /spaces/{public_id}/resources/{resource_id}` renames it and nothing more. `POST
 /spaces/{public_id}/resources`, admin+, adds one — its own panel on `/admin` (`ResourcesPanel`),
@@ -197,31 +198,10 @@ single-Resource redirect on `SpacePage` (below) counts only active ones — reti
 Resources in a Space turns it into a redirecting single-Resource Space, which is correct and needs no
 special case.
 
-**`opens_at_minutes` and `closes_at_minutes` are stored together, in one `availability_hours` row,
-required together.** Both are `required` parameters of that rule type, so a row holding one bound
-without the other is not a state the type can build from, and it is refused rather than stored. A
-Space enforcing no hours at all holds no `availability_hours` row at all: "not enforced" is the
-*absence* of a row here, exactly as it is for every other rule type, never a row with a bound left
-empty. Both are minutes from the Space's own local midnight (`rule-engine.md`), and
-`opens_at_minutes` must be earlier than `closes_at_minutes` by at most 24 hours — `0 <=
-opens_at_minutes < 1440` and `opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440` — and
-that range is enforced here or nowhere: a pair failing it is refused with **422**. This is not
-tidiness: `AvailabilityHoursRule`'s own constructor enforces the identical range, so a submission
-failing it here would otherwise be stored and only discovered as `RULE_ERROR_MESSAGE` denying every
-booking the next time someone books. This layer is what turns that into a 422 naming the problem
-while an admin is still looking at the form, instead of a Space that silently refuses everyone.
-
-The check is made on the **effective pair after the patch is applied**, not on the payload: a PATCH
-naming only `opens_at_minutes` is a legal partial update, and whether the pair still satisfies the
-range depends on the `closes_at_minutes` the row already holds. A venue open past its own local
-midnight — `closes_at_minutes > 1440` — is admitted by this same check today, not by relaxing it
-further: it is exactly as valid a value as any same-day window, since the range is measured in
-minutes rather than compared as clock times with a date stripped off
-(`ops/done/stream-7/passed-midnight.md`).
-
 A `timezone` is validated as a real IANA name at the boundary — an unknown name or a fixed offset
 (`+02:00`) is rejected, never stored — because a bad zone would only surface later as a broken
-operating-hours resolution far from where it was set.
+local-calendar resolution far from where it was set: it is what every date in a Space's shape and
+every counting window in its rules is resolved against.
 
 **The rules API is the only way a Space's rules are read or written.**
 `GET /rule-types` describes the product's registered rule types (`rules.REGISTRY`) — authenticated,
@@ -232,14 +212,12 @@ is Space-scoped and reads or writes one Space's own `space_rules` rows directly:
 against the row's own registered type's schema at the boundary — an unknown `rule_type`, a missing
 required parameter, an unknown parameter, or one of the wrong kind or below its declared `minimum`
 is refused with **422** naming the specific parameter, so a later admin form can attach the message
-to the right field rather than a generic complaint. `session_length`'s `session_minutes` must divide
-1440, enforced here rather than left to surface only at booking time. `availability_hours` carries
-the range check above — `opens_at_minutes` and `closes_at_minutes` failing `0 <= opens_at_minutes <
-1440` or `opens_at_minutes < closes_at_minutes <= opens_at_minutes + 1440` is a **422**, mirroring
-`AvailabilityHoursRule`'s own constructor bound exactly as `session_length`'s check mirrors
-`SessionLengthRule`'s. A `PATCH` naming only one of `opens_at_minutes`/`closes_at_minutes` resolves
-the effective pair against what the row already has stored, rather than failing "missing required" on
-a bound the caller never meant to touch. A rule id that names nothing, or names a row
+to the right field rather than a generic complaint. **The validation is entirely generic — there is
+no rule-type-specific check left on this path.** The two that were here, `session_length`'s
+divides-1440 bound and `availability_hours`'s opening-hours range, went with their types when the
+calendar shape replaced both; a `PATCH` is still resolved against the row's effective params after
+the merge rather than the payload alone, so a partial update is never refused for a parameter the
+caller never meant to touch. A rule id that names nothing, or names a row
 in another Space, gets the identical **404** on `PATCH`/`DELETE` — the same 404-not-403 treatment a
 foreign Resource id gets, since the lookup is scoped to `space_id` in one query and a foreign id
 discloses nothing about being live elsewhere. `DELETE` is a real delete, unlike everywhere else in

@@ -18,7 +18,6 @@ import type {
   CreateResourceBookingResult,
   CurrentUser,
   DayProjectionRead,
-  DayScheduleRead,
   GetCurrentUserResult,
   Invitation,
   InvitationStatus,
@@ -880,46 +879,12 @@ export async function listResources(
   )
 }
 
-/** `YYYY-MM-DD` in local time — the wire shape `GET .../schedule?from=` expects. */
+/** `YYYY-MM-DD` in local time — the wire shape `GET .../calendar?from=&to=` expects. */
 function formatDateParam(date: Date): string {
   const yyyy = String(date.getFullYear()).padStart(4, '0')
   const mm = String(date.getMonth() + 1).padStart(2, '0')
   const dd = String(date.getDate()).padStart(2, '0')
   return `${yyyy}-${mm}-${dd}`
-}
-
-/**
- * `GET /spaces/{public_id}/schedule?from=&days=` — what a booking on each
- * date in `[from, from+days)` would actually be judged against: the slot
- * size and operating window, plus any coherence issue, resolved server-side
- * against the Space's own `space_rules` rows (task 6.9). Member+, the same
- * gate as `listSpaceRules`.
- *
- * **Nothing renders this any more.** The calendar grid reads
- * `GET /spaces/{public_id}/calendar` (`getSpaceCalendar` below) instead —
- * see `.claude/rules/calendar-shape.md` for the shape that endpoint projects
- * and why this one no longer drives anything. This function and its type
- * stay in the client only because task 10.5, not this one, retires them from
- * the backend.
- *
- * `from` is a calendar date, not an instant — deliberately not passed
- * through `toISOString()` the way `listResourceBookings` passes its window,
- * since that would apply the *environment's* own zone to a value that must
- * name the same date regardless of which zone this code happens to run in.
- * `days` mirrors the backend's own bound (`MAX_SCHEDULE_DAYS`, currently 62)
- * but is not re-validated here — an out-of-range value is a client bug the
- * server's own 422 (`invalid_request`) reports, the same backstop every
- * other malformed-body case in this client relies on.
- */
-export async function getSpaceSchedule(
-  publicId: string,
-  from: Date,
-  days: number,
-): Promise<AuthenticatedResult<DayScheduleRead[]>> {
-  const query = new URLSearchParams({ from: formatDateParam(from), days: String(days) })
-  return authenticatedRequest<DayScheduleRead[]>(
-    `/spaces/${encodeURIComponent(publicId)}/schedule?${query}`,
-  )
 }
 
 /**
@@ -934,14 +899,16 @@ export async function getSpaceSchedule(
  * sent — `CalendarGrid.tsx`'s whole module docblock is about why the client
  * never re-derives any of it. See `.claude/rules/calendar-shape.md`.
  *
- * `from` and `to` are calendar dates, not instants — the identical reasoning
- * `getSpaceSchedule` already gives for not passing them through
- * `toISOString()`. `to` is **inclusive**, matching the shape schema's own
+ * `from` and `to` are calendar dates, not instants — deliberately not passed
+ * through `toISOString()` the way `listResourceBookings` passes its window,
+ * since that would apply the *environment's* own zone to a value that must
+ * name the same date regardless of which zone this code happens to run in.
+ * `to` is **inclusive**, matching the shape schema's own
  * `effective_from`/`effective_to` convention — this is a calendar range a
  * human typed, not a half-open instant window. The range is bounded by the
- * same `MAX_SCHEDULE_DAYS` the schedule endpoint uses, unvalidated here for
- * the same reason: an out-of-range value is a client bug the server's own
- * 400 reports.
+ * backend's own `MAX_SCHEDULE_DAYS`, unvalidated here: an out-of-range value
+ * is a client bug the server's own 400 reports, the same backstop every
+ * other malformed-body case in this client relies on.
  */
 export async function getSpaceCalendar(
   publicId: string,

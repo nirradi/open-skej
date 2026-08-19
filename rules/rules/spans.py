@@ -52,18 +52,18 @@ def merge_adjoining_spans(
     rather than a pairwise comparison — 17-18 and 18-19 held, a request for 19-20, is one 17-20 run.
 
     Why a tolerance at all, when ``max-duration-cannon.md``'s decision 3 chose exact abutment: that
-    decision rests on every booking landing on a slot grid, which makes a sub-slot gap
-    unconstructable. ``session_length`` is a per-Space row, not a property of the engine
-    (``ops/pending/bugs/grid-from-hours-and-min-duration.md`` replaced ``slot_alignment`` and
-    ``min_duration`` with it), so a Space configuring nothing has arbitrary start times — a
-    5-minute gap between 17:00-18:00 and 18:05-19:05 would break the run, nobody could ever
-    construct a booking to fill exactly that gap, and every run-based rule gets a free escape
-    hatch. A tolerance equal to the date's resolved session length closes it: any gap a legal
-    booking could actually occupy is at least that long, so a gap shorter than it is not "two
-    sessions with a short break between them", it is dead space nothing could ever book —
-    indistinguishable from no gap at all. A caller with no ``session_length`` row to resolve passes
-    ``tolerance == timedelta(0)``, which is exactly decision 3's original exact-abutment rule, so
-    this is a strict generalisation of it rather than a loosening.
+    decision rests on every booking landing on a grid, which makes a sub-grid gap unconstructable.
+    A Space's calendar shape (``rules/shape/``, ``.claude/rules/calendar-shape.md``) can offer
+    several durations or several differently anchored blocks, so a Space configuring one has
+    start times that are not all a fixed distance apart — a 5-minute gap between 17:00-18:00 and
+    18:05-19:05 would break the run, nobody could ever construct a booking to fill exactly that
+    gap, and every run-based rule gets a free escape hatch. A tolerance equal to the date's own
+    smallest offered duration closes it: any gap a legal booking could actually occupy is at least
+    that long, so a gap shorter than it is not "two sessions with a short break between them", it
+    is dead space nothing could ever book — indistinguishable from no gap at all. A caller with no
+    operating block to resolve on a date passes ``tolerance == timedelta(0)``, which is exactly
+    decision 3's original exact-abutment rule, so this is a strict generalisation of it rather than
+    a loosening.
     """
     if not spans:
         return []
