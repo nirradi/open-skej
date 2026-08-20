@@ -694,6 +694,25 @@ def read_shape_conversation(
     ).scalar_one_or_none()
 
 
+def open_shape_conversation(session: Session, space: Space) -> SpaceShapeConversation | None:
+    """Return this Space's one open conversation, if it has one.
+
+    This is intentionally a Space-scoped lookup rather than a global search by
+    user or conversation id. Admins already have authority to author this
+    Space's shape, so learning that *their* Space has an in-flight draft is not
+    new information; callers outside the Space never reach this service through
+    the router's authorization boundary. The partial unique index remains the
+    concurrency invariant — this is recovery/read convenience, not a preflight
+    that weakens ``create_shape_conversation``'s 409 race semantics.
+    """
+    return session.execute(
+        select(SpaceShapeConversation).where(
+            SpaceShapeConversation.space_id == space.id,
+            SpaceShapeConversation.status == ShapeConversationStatus.OPEN,
+        )
+    ).scalar_one_or_none()
+
+
 def list_shape_messages(
     session: Session, conversation: SpaceShapeConversation
 ) -> list[SpaceShapeMessage]:
@@ -715,6 +734,7 @@ def append_shape_message(
     *,
     role: ShapeMessageRole,
     content: str,
+    question: str | None = None,
     resulting_shape_version_id: int | None = None,
 ) -> SpaceShapeMessage:
     """Persist one visible message before or after its model call.
@@ -744,6 +764,7 @@ def append_shape_message(
         ordinal=ordinal,
         role=role,
         content=content,
+        question=question,
         resulting_shape_version_id=resulting_shape_version_id,
     )
     session.add(message)

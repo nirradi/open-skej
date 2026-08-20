@@ -28,6 +28,9 @@ import type {
   Resource,
   RuleDraftRead,
   RuleTypeRead,
+  ShapeConversationRead,
+  ShapeConversationTurnRead,
+  ShapeVersionRead,
   Space,
   SpacePreview,
   SpaceRuleCreateInput,
@@ -889,9 +892,9 @@ function formatDateParam(date: Date): string {
 
 /**
  * `GET /spaces/{public_id}/calendar?from=&to=` — the shape's own projection
- * (task 10.3) for each local date in `[from, to]`. Member+ for the live
- * shape; this client never requests `draft=true`, since only the shape
- * studio (task 10.9) previews a draft and it is not built yet.
+ * (task 10.3) for each local date in `[from, to]`. Member+ reads the live
+ * shape; the shape studio alone passes `draft: true`, which the server
+ * independently restricts to admin+ because a draft is private working state.
  *
  * **This is what the calendar grid reads.** `shape.project_day` resolves the
  * operating intervals, blackouts and offered starts for a date server-side,
@@ -914,11 +917,72 @@ export async function getSpaceCalendar(
   publicId: string,
   from: Date,
   to: Date,
+  options: { draft?: boolean } = {},
 ): Promise<AuthenticatedResult<DayProjectionRead[]>> {
   const query = new URLSearchParams({ from: formatDateParam(from), to: formatDateParam(to) })
+  if (options.draft) query.set('draft', 'true')
   return authenticatedRequest<DayProjectionRead[]>(
     `/spaces/${encodeURIComponent(publicId)}/calendar?${query}`,
   )
+}
+
+/** Open the Space's one shape conversation, seeded from its live document. Admin+. */
+export async function createShapeConversation(
+  publicId: string,
+): Promise<MutatingResult<ShapeConversationRead>> {
+  return mutatingRequest<ShapeConversationRead>(
+    `/spaces/${encodeURIComponent(publicId)}/shape-conversations`,
+    { method: 'POST', ...jsonBody({}) },
+  )
+}
+
+/** Find this Space's open conversation for reload recovery. Admin+. */
+export async function getOpenShapeConversation(
+  publicId: string,
+): Promise<AuthenticatedResult<ShapeConversationRead | null>> {
+  return authenticatedRequest<ShapeConversationRead | null>(
+    `/spaces/${encodeURIComponent(publicId)}/shape-conversations/current`,
+  )
+}
+
+/** Reload one persisted conversation and its current draft. Admin+. */
+export async function getShapeConversation(
+  publicId: string,
+  conversationId: number,
+): Promise<AuthenticatedResult<ShapeConversationRead>> {
+  return authenticatedRequest<ShapeConversationRead>(
+    `/spaces/${encodeURIComponent(publicId)}/shape-conversations/${conversationId}`,
+  )
+}
+
+/** Send one synchronous authoring turn; the returned draft is ready for preview. Admin+. */
+export async function createShapeConversationTurn(
+  publicId: string,
+  conversationId: number,
+  message: string,
+): Promise<MutatingResult<ShapeConversationTurnRead>> {
+  return mutatingRequest<ShapeConversationTurnRead>(
+    `/spaces/${encodeURIComponent(publicId)}/shape-conversations/${conversationId}/turns`,
+    { method: 'POST', ...jsonBody({ message }) },
+  )
+}
+
+/** Make the current draft the live calendar shape. Admin+. */
+export async function publishCalendarShape(
+  publicId: string,
+  options: { allowUnbookable?: boolean } = {},
+): Promise<MutatingResult<ShapeVersionRead>> {
+  return mutatingRequest<ShapeVersionRead>(
+    `/spaces/${encodeURIComponent(publicId)}/calendar-shape/publish`,
+    { method: 'POST', ...jsonBody({ allow_unbookable: options.allowUnbookable ?? false }) },
+  )
+}
+
+/** Discard the current draft and close its associated conversation. Admin+. */
+export async function discardCalendarShapeDraft(publicId: string): Promise<MutatingResult<null>> {
+  return mutatingRequest<null>(`/spaces/${encodeURIComponent(publicId)}/calendar-shape/draft`, {
+    method: 'POST',
+  })
 }
 
 /**

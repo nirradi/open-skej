@@ -228,7 +228,10 @@ router's job, matching how every other write in this module already splits the t
 are its only states, and `uq_space_shape_conversations_open` is a partial unique index over `open`
 rows, so a Space has one in-flight conversation even when two browser tabs race to start one.
 `space_shape_messages` records user and assistant messages in a unique, ordered ordinal sequence;
-the assistant summary points at the draft version its turn produced. `space_shape_exchanges` writes
+the assistant summary and nullable clarification question point at the draft version its turn
+produced. The question is durable actionable state, not text the browser derives from the summary:
+on recovery it determines whether an unbookable draft falls back to the live preview and requires
+explicit publish acknowledgement. `space_shape_exchanges` writes
 each prompt as `pending` **before dispatch**, then records its completion or transport failure as
 `completed` / `failed`; a malformed completion that triggers the agent's one validation retry is
 therefore retained along with a call that never answered. It references the existing sha256-keyed
@@ -237,7 +240,9 @@ the system prompt or adding a tracing service for tenant-authored text.
 
 All conversation routes are admin+ through `require_space_role`: `POST
 /spaces/{public_id}/shape-conversations` opens a conversation from the current live document;
-`GET .../shape-conversations/{id}` returns its transcript and current draft; and `POST
+`GET .../shape-conversations/current` returns that Space's open conversation or `null` for safe
+browser recovery; `GET .../shape-conversations/{id}` returns its transcript, current draft, and the
+authoritative current live `ShapeVersionRead`; and `POST
 .../shape-conversations/{id}/turns` stores the admin message, makes the bounded model call, and
 returns its summary, question and new draft synchronously. This differs deliberately from
 `rule_drafts.py`: generated rules require a multi-minute adversarial/sandbox job and polling,
@@ -469,8 +474,30 @@ nothing raises and no test that existed at the time fails. `SpaceRuleConfig.shap
 defaults to `DEFAULT_SHAPE`, the document a fresh Space actually holds, never to `None`: an absent
 shape resolves to a tolerance of zero, and zero is the permissive direction.
 
-## What later tasks in this stream add here
+## The shape studio
 
-* **10.8** — the shape studio, consuming the conversation and draft-preview APIs.
-* **10.9–10.10** — the benchmark asserted on the projection rather than the JSON, then the E2E
-  guard.
+`/s/{public_id}/shape` is the admin+ authoring surface for a Space's calendar shape. It keeps a
+durable conversation id as a browser-local pointer scoped to that Space, but recovers through
+`GET /spaces/{public_id}/shape-conversations/current` before creating one, so cleared browser
+storage cannot strand the Space's one open conversation. The product database, not browser storage,
+remains the source of truth for the transcript and working document. A missing or closed pointer is
+cleared rather than allowed to address a later conversation.
+
+The studio places the synchronous chat beside the shared `CalendarGrid` with `showBookings=false`.
+It obtains `GET /spaces/{public_id}/calendar?draft=true` whenever a draft exists and displays that
+projection after a bookable turn; otherwise it uses the live projection, so the preview is exactly
+the grid members use without inventing a dummy Resource or a second renderer. The preview refetches
+when the draft's `created_at` changes because ordinary turns update one draft row in place. An
+assistant summary and nullable question are transcript state; an unbookable candidate's question
+remains visible and the preview stays on its last useful calendar until the next bookable turn. On
+reload, the latest assistant question is read from that transcript, so when a frozen preview is
+unavailable the studio falls back to live rather than presenting the unbookable draft as useful.
+
+Publish compares the draft document exactly with the authoritative live document returned alongside
+the conversation, rather than comparing a displayed week: projections can coincide for one range
+while shape documents differ in a later season. Publish makes the draft the members' live calendar,
+and discard confirms before closing the conversation and deleting its working copy.
+
+The rules page remains separate and links here, while this page links back to rules. The chats are
+not merged or intent-routed: shapes describe what the venue offers, and rules describe who may take
+it and how much.

@@ -176,6 +176,15 @@ function Shell({ space, children }: { space?: Space; children: ReactNode }) {
         </h1>
         <p className="mt-2 mb-6 text-sm text-slate-600">
           Every booking constraint configured for this Space, one instance per row.
+          {space ? (
+            <>
+              {' '}
+              Need to change when the venue is open or what session lengths it offers?{' '}
+              <Link className="underline" to={`/s/${space.public_id}/shape`}>
+                Edit the calendar shape instead.
+              </Link>
+            </>
+          ) : null}
         </p>
         {children}
       </div>

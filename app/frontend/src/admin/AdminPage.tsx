@@ -45,13 +45,15 @@ type Load = { kind: 'spaces'; spaces: Space[] } | { kind: 'error'; message: stri
  * scopes every one of them, and stays above the section nav rather than
  * becoming a fourth-or-so entry in it.
  *
- * **`Rules` is a fourth entry in that nav list, and it is a link, not a
- * section.** Clicking it navigates to `/s/{public_id}/rules`
+ * **`Rules` and `Calendar shape` are link entries in that nav list, not
+ * sections.** Clicking Rules navigates to `/s/{public_id}/rules`
  * (`SpaceRulesPage`), which already carries its own back-link. It is
  * deliberately *not* pulled into this console — absorbing that page is a
  * bigger change than re-parenting these panels, and its save model is being
  * rewritten separately (task 9.7). Do not "helpfully" fold it into a fourth
- * in-place section later without revisiting that decision.
+ * in-place section later without revisiting that decision. `Calendar shape`
+ * opens `/s/{public_id}/shape`, the separate chat that authors what the venue
+ * offers; it does not merge shape authoring into the rules page.
  *
  * ## Resource management lives here, not on the Space page
  *
@@ -309,6 +311,13 @@ function SpaceAdmin({
             className={`${NAV_ITEM_BASE} mt-1 border-t border-slate-200 pt-3 text-slate-500 hover:bg-slate-100 hover:text-slate-700 md:mt-2`}
           >
             Rules ↗
+          </Link>
+          <Link
+            to={`/s/${space.public_id}/shape`}
+            data-testid="space-shape-link"
+            className={`${NAV_ITEM_BASE} text-slate-500 hover:bg-slate-100 hover:text-slate-700`}
+          >
+            Calendar shape ↗
           </Link>
         </nav>
 

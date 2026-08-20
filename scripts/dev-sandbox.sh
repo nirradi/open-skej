@@ -61,8 +61,9 @@ DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://skej:skej@localhost:5432/skej
 # conditionally, so a sandbox without this switch serves a genuine 404 and the
 # rules page's authoring panel hides itself — absent, not broken, which is right
 # in production and useless here. This stack exists to exercise the product, so
-# it opts in. The client stays `stub` unless asked otherwise: it answers with a
-# canned valid rule, deterministically, with no network call and no money spent.
+# it opts in. The client stays `stub` unless asked otherwise: both rule
+# authoring and the shape studio answer deterministically, with no network call
+# and no money spent.
 # `RULE_GENERATION_CLIENT=google ./scripts/dev-sandbox.sh` drives a real model
 # instead, and finds its key in `rules/.env` without this script handling it.
 RULE_GENERATION_CLIENT="${RULE_GENERATION_CLIENT:-stub}"
@@ -322,20 +323,7 @@ bold "Seeded Spaces"
 (cd "$BACKEND_DIR" && "$VENV_PY" - <<'PY'
 from app.db.bootstrap import DEFAULT_SPACE_PUBLIC_ID
 from app.db.session import get_session_factory
-from app.identity.models import Resource, Space, SpaceRule
-
-
-def clock(minutes):
-    """Render minutes-from-local-midnight as a local wall clock.
-
-    Both availability bounds are minutes from the Space's own local midnight, so
-    a venue closing after midnight is an ordinary value above 1440 rather than an
-    inverted pair. That gets a day marker rather than wrapping silently, which
-    would print a venue open 09:00-01:30 as if it shut before it opened.
-    """
-    return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}" + (
-        "+1d" if minutes >= 1440 else ""
-    )
+from app.identity.models import Resource, Space
 
 
 with get_session_factory()() as session:
@@ -351,34 +339,10 @@ with get_session_factory()() as session:
     )
     for space in spaces:
         state = " [archived]" if space.archived_at else ""
-        # A Space's schedule is `space_rules` rows, so it is read back from
-        # them. Only the unscoped rows are summarised here: an `applies_to`
-        # row is per-weekday or per-date and has no one line to print, and
-        # this listing exists to hand out working links, not to render the
-        # rules page.
-        rules = {
-            rule.rule_type: rule.params
-            for rule in session.query(SpaceRule)
-            .filter(
-                SpaceRule.space_id == space.id,
-                SpaceRule.applies_to.is_(None),
-                SpaceRule.enabled.is_(True),
-            )
-            .order_by(SpaceRule.id)
-            .all()
-        }
-        availability = rules.get("availability_hours")
-        hours = (
-            f"{clock(availability['opens_at_minutes'])}-"
-            f"{clock(availability['closes_at_minutes'])} local"
-            if availability
-            else "no availability window"
-        )
-        alignment = rules.get("slot_alignment")
-        slots = f"{alignment['slot_minutes']}m slots" if alignment else "default slot size"
         print(f"\n  {space.name}{state}")
-        print(f"    {space.timezone} · {hours} · {slots}")
+        print(f"    {space.timezone} · calendar shape configured")
         print(f"    http://localhost:5173/s/{space.public_id}")
+        print(f"    Shape studio (owner/admin): http://localhost:5173/s/{space.public_id}/shape")
         resources = (
             session.query(Resource)
             .filter(Resource.space_id == space.id, Resource.archived_at.is_(None))

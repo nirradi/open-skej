@@ -66,7 +66,7 @@
  * selection upward — a free range via `onSelectionChange`, and an existing
  * booking via `onBookingSelect` — and leaves both round trips to the panels.
  *
- * `showBookings` (default `true`) is the seam a chat preview (task 10.9) reuses
+ * `showBookings` (default `true`) is the seam the shape studio (task 10.8) reuses
  * this component through: with it off, the component issues no booking
  * request at all and draws no booking layer, so the surface a member books on
  * and the surface a draft shape is previewed with are the same component
@@ -147,11 +147,9 @@ export interface SelectedInterval {
  */
 const CLOSED_WEEK: WeekProjection = buildWeekProjection([], SYSTEM_TIME_ZONE)
 
-export interface CalendarGridProps {
+interface CalendarGridCommonProps {
   /** The Space this calendar's Resource belongs to. */
   publicId: string
-  /** The Resource whose bookings this grid renders. */
-  resourceId: number
   /**
    * The Monday of the week to render. Owned by the caller, not this
    * component — a refresh, a bookmark, a pasted link and Back all have to
@@ -174,16 +172,6 @@ export interface CalendarGridProps {
    * to get.
    */
   week?: WeekProjection
-  /**
-   * Whether this grid fetches and draws bookings at all. Defaults to `true`.
-   *
-   * With it `false`, the component issues no `listResourceBookings` request
-   * and renders no booking layer — the seam the chat preview (task 10.9)
-   * reuses this component through, so the surface a member books on and the
-   * surface a draft shape is previewed with cannot disagree about what the
-   * shape itself draws.
-   */
-  showBookings?: boolean
   /**
    * Notified when Previous, Next or "This week" is clicked, with the week
    * start it wants shown. This component does not act on its own click —
@@ -221,6 +209,15 @@ export interface CalendarGridProps {
    */
   refreshToken?: number
 }
+
+/**
+ * A booking calendar needs a Resource because its booking layer is Resource-scoped.
+ * The studio is Space-scoped and intentionally has no invented Resource: turning
+ * the layer off removes both the request and that otherwise meaningless prop.
+ */
+export type CalendarGridProps =
+  | (CalendarGridCommonProps & { showBookings?: boolean; resourceId: number })
+  | (CalendarGridCommonProps & { showBookings: false; resourceId?: never })
 
 /**
  * What the grid knows about the bookings for the displayed week.
@@ -278,18 +275,19 @@ function formatZonedDateTime(value: Date, timeZone: string): string {
   return `${day}, ${formatClockTime(value, timeZone)}`
 }
 
-export function CalendarGrid({
-  publicId,
-  resourceId,
-  weekStart,
-  now: nowProp,
-  week,
-  showBookings = true,
-  onWeekChange,
-  onSelectionChange,
-  onBookingSelect,
-  refreshToken = 0,
-}: CalendarGridProps) {
+export function CalendarGrid(props: CalendarGridProps) {
+  const {
+    publicId,
+    weekStart,
+    now: nowProp,
+    week,
+    onWeekChange,
+    onSelectionChange,
+    onBookingSelect,
+    refreshToken = 0,
+  } = props
+  const showBookings = props.showBookings ?? true
+  const resourceId = props.resourceId
   const resolvedWeek = week ?? CLOSED_WEEK
   const timeZone = resolvedWeek.timeZone
 
@@ -360,14 +358,17 @@ export function CalendarGrid({
    * slot count). At the pre-shape default (30-minute steps), this renders at
    * exactly the height the old slot grid did.
    */
-  const finestMinutes = useMemo(() => finestDurationMinutes(resolvedWeek, dateKeys), [resolvedWeek, dateKeys])
+  const finestMinutes = useMemo(
+    () => finestDurationMinutes(resolvedWeek, dateKeys),
+    [resolvedWeek, dateKeys],
+  )
   const pxPerMinute = pxPerMinuteFor(finestMinutes)
   const dayHeight = MINUTES_PER_DAY * pxPerMinute
 
   // ---- Loading the week's bookings -------------------------------------
 
   useEffect(() => {
-    if (!showBookings) return
+    if (!showBookings || resourceId === undefined) return
     let cancelled = false
     // Midnight-to-midnight on the Space's own clock, not the environment's —
     // the same reason `bookingsByDay` below goes through `dayBounds` rather
@@ -482,7 +483,11 @@ export function CalendarGrid({
     if (dayIndex === -1) return null
     const day = days[dayIndex]
     const start = localMinutesToInstant(day, selection.startMinutes, timeZone)
-    const end = localMinutesToInstant(day, selection.startMinutes + selection.durationMinutes, timeZone)
+    const end = localMinutesToInstant(
+      day,
+      selection.startMinutes + selection.durationMinutes,
+      timeZone,
+    )
     return { start, end }
   }, [days, selection, timeZone])
 
@@ -696,7 +701,10 @@ export function CalendarGrid({
           const { start: dayStart } = dayBounds(day, timeZone)
 
           return (
-            <div key={dateKey} className="min-w-24 flex-1 border-r border-slate-200 last:border-r-0">
+            <div
+              key={dateKey}
+              className="min-w-24 flex-1 border-r border-slate-200 last:border-r-0"
+            >
               <div className="border-b border-slate-200">
                 <div
                   className={`flex ${HEADER_ROW_HEIGHT_CLASS} items-center justify-center text-xs font-medium text-slate-600`}
@@ -766,7 +774,9 @@ export function CalendarGrid({
                   const clickDuration = smallestDurationAt(dayProjection, startMinutes) ?? 0
                   const nextStart = nextStartAfter(dayProjection, startMinutes)
                   const cappedDuration =
-                    nextStart !== null ? Math.min(clickDuration, nextStart - startMinutes) : clickDuration
+                    nextStart !== null
+                      ? Math.min(clickDuration, nextStart - startMinutes)
+                      : clickDuration
                   const top = startMinutes * pxPerMinute
                   const height = Math.max(
                     0,

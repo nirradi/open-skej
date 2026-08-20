@@ -148,11 +148,17 @@ def test_second_turn_carries_the_first_turn_and_refines_the_draft(
     api: Api, session: Session, alice: User, space_a: Space
 ) -> None:
     conversation_id = _open(api, alice, space_a)
-    assert _turn(api, alice, space_a, conversation_id, "open at 10").status_code == 200
+    first = _turn(api, alice, space_a, conversation_id, "open at 10")
+    assert first.status_code == 200
     response = _turn(api, alice, space_a, conversation_id, "open at 11")
 
     assert response.status_code == 200
     assert response.json()["draft"]["document"]["operating_blocks"][0]["start_time"] == "11:00"
+    # An ordinary turn updates the same draft row. `created_at` is the visible
+    # revision marker the studio keys its refetch on, so it must change even
+    # though the row id remains stable.
+    assert response.json()["draft"]["id"] == first.json()["draft"]["id"]
+    assert response.json()["draft"]["created_at"] != first.json()["draft"]["created_at"]
     exchanges = list(
         session.execute(
             select(SpaceShapeExchange)
@@ -245,6 +251,61 @@ def test_foreign_conversation_is_404_and_second_open_conversation_is_refused(
     _open(api, alice, space_a)
     second = api.as_user(alice).post(f"/spaces/{space_a.public_id}/shape-conversations", json={})
     assert second.status_code == 409
+
+
+def test_current_open_conversation_is_admin_scoped_and_nullable(
+    api: Api, alice: User, bob: User, carol: User, space_a: Space
+) -> None:
+    current_url = f"/spaces/{space_a.public_id}/shape-conversations/current"
+
+    empty = api.as_user(alice).get(current_url)
+    assert empty.status_code == 200
+    assert empty.json() is None
+
+    conversation_id = _open(api, alice, space_a)
+    current = api.as_user(alice).get(current_url)
+    assert current.status_code == 200
+    assert current.json()["id"] == conversation_id
+    assert current.json()["draft"] is None
+    # The response carries the stored live document for an exact Publish
+    # comparison; it is not inferred from whichever week happens to be shown.
+    assert current.json()["live"]["status"] == "live"
+    assert current.json()["live"]["document"]["version"] == 1
+
+    member = api.as_user(carol).get(current_url)
+    assert member.status_code == 403
+
+    outsider = api.as_user(bob).get(current_url)
+    assert outsider.status_code == 404
+
+
+def test_current_open_conversation_recovers_an_unbookable_assistant_question(
+    api: Api, session: Session, alice: User, space_a: Space
+) -> None:
+    """The live fallback must come from durable question state, not local browser copy."""
+    conversation_id = _open(api, alice, space_a)
+    draft = service.upsert_draft(
+        session,
+        space_a,
+        {"version": 1, "operating_blocks": [], "blackout_windows": []},
+        alice,
+        conversation_id=conversation_id,
+    )
+    service.append_shape_message(
+        session,
+        session.get(SpaceShapeConversation, conversation_id),
+        role=ShapeMessageRole.ASSISTANT,
+        content="I closed every offered block.",
+        question="Should the venue be closed all week?",
+        resulting_shape_version_id=draft.id,
+    )
+
+    response = api.as_user(alice).get(f"/spaces/{space_a.public_id}/shape-conversations/current")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["draft"]["document"]["operating_blocks"] == []
+    assert payload["messages"][-1]["question"] == "Should the venue be closed all week?"
 
 
 def test_discard_deletes_the_draft_but_keeps_and_closes_its_transcript(

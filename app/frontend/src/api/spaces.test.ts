@@ -28,20 +28,27 @@ import {
   createInvitation,
   createResource,
   createResourceBooking,
+  createShapeConversation,
+  createShapeConversationTurn,
   createSpace,
   denyAccessRequest,
   getSpace,
+  getOpenShapeConversation,
+  getShapeConversation,
+  getSpaceCalendar,
   listAccessRequests,
   listInvitations,
   listMembers,
   listSpaces,
   previewSpace,
+  publishCalendarShape,
   removeMember,
   requestAccess,
   revokeInvitation,
   updateMemberRole,
   updateResource,
   updateSpace,
+  discardCalendarShapeDraft,
 } from './client'
 import type { AccessRequest, Invitation, Member, Resource, Space, SpacePreview } from './types'
 
@@ -694,6 +701,94 @@ describe('requestAccess', () => {
       outcome: 'conflict',
       message: 'You already have a pending request for this Space.',
     })
+  })
+})
+
+describe('shape studio API', () => {
+  const conversation = {
+    id: 41,
+    status: 'open' as const,
+    created_at: '2026-08-20T09:00:00Z',
+    closed_at: null,
+    messages: [],
+    draft: null,
+  }
+
+  it('requests a draft calendar only when explicitly asked', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, []))
+
+    await getSpaceCalendar(space.public_id, new Date(2026, 7, 17), new Date(2026, 7, 23), {
+      draft: true,
+    })
+
+    expect(lastRequest().url).toBe(
+      `${API_BASE_URL}/spaces/${space.public_id}/calendar?from=2026-08-17&to=2026-08-23&draft=true`,
+    )
+  })
+
+  it('opens, reloads, and turns a shape conversation on its Space-scoped routes', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse(201, conversation))
+      .mockResolvedValueOnce(jsonResponse(200, conversation))
+      .mockResolvedValueOnce(jsonResponse(200, conversation))
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          summary: 'The venue now opens at 04:00.',
+          question: null,
+          draft: {
+            id: 17,
+            document: { version: 1, operating_blocks: [], blackout_windows: [] },
+            status: 'draft',
+            created_at: '2026-08-20T09:00:00Z',
+            source_conversation_id: 41,
+          },
+        }),
+      )
+
+    await createShapeConversation(space.public_id)
+    expect(lastRequest().url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/shape-conversations`)
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual({})
+
+    await getOpenShapeConversation(space.public_id)
+    expect(lastRequest().url).toBe(
+      `${API_BASE_URL}/spaces/${space.public_id}/shape-conversations/current`,
+    )
+
+    await getShapeConversation(space.public_id, 41)
+    expect(lastRequest().url).toBe(
+      `${API_BASE_URL}/spaces/${space.public_id}/shape-conversations/41`,
+    )
+
+    const turn = await createShapeConversationTurn(space.public_id, 41, 'open at 4')
+    expect(lastRequest().url).toBe(
+      `${API_BASE_URL}/spaces/${space.public_id}/shape-conversations/41/turns`,
+    )
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual({ message: 'open at 4' })
+    expect(turn.outcome).toBe('ok')
+  })
+
+  it('uses explicit publish acknowledgement and 204 discard', async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: 17,
+          document: { version: 1, operating_blocks: [], blackout_windows: [] },
+          status: 'live',
+          created_at: '2026-08-20T09:00:00Z',
+          source_conversation_id: 41,
+        }),
+      )
+      .mockResolvedValueOnce(noContentResponse())
+
+    await publishCalendarShape(space.public_id, { allowUnbookable: true })
+    expect(lastRequest().url).toBe(
+      `${API_BASE_URL}/spaces/${space.public_id}/calendar-shape/publish`,
+    )
+    expect(JSON.parse(lastRequest().init.body as string)).toEqual({ allow_unbookable: true })
+
+    const discard = await discardCalendarShapeDraft(space.public_id)
+    expect(lastRequest().url).toBe(`${API_BASE_URL}/spaces/${space.public_id}/calendar-shape/draft`)
+    expect(discard).toEqual({ outcome: 'ok', data: null })
   })
 })
 

@@ -510,7 +510,9 @@ class SpaceShapeMessage(Base):
     """One visible user or assistant turn in a shape conversation.
 
     The model's raw completion belongs in the exchange table below; the assistant message stores
-    the concise summary the chat renders, linked to the draft version that resulted from it.
+    the concise summary the chat renders, linked to the draft version that resulted from it. An
+    assistant's nullable clarification question is separate from that summary: it is actionable
+    state the studio must recover after browser storage is cleared, not prose the client may infer.
     """
 
     __tablename__ = "space_shape_messages"
@@ -520,6 +522,7 @@ class SpaceShapeMessage(Base):
     ordinal: Mapped[int] = mapped_column(Integer)
     role: Mapped[ShapeMessageRole] = mapped_column(_SHAPE_MESSAGE_ROLE_TYPE)
     content: Mapped[str] = mapped_column(Text)
+    question: Mapped[Optional[str]] = mapped_column(Text, default=None)
     resulting_shape_version_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("space_calendar_shapes.id", ondelete="SET NULL"), default=None
     )

@@ -228,6 +228,16 @@ describe('AdminPage', () => {
     expect(screen.getByTestId('requests-panel')).toBeTruthy()
   })
 
+  it('links to the separate calendar-shape studio without turning it into a console section', async () => {
+    renderAdminPage()
+    await screen.findByTestId('requests-panel')
+
+    const shapeLink = screen.getByTestId('space-shape-link')
+    expect(shapeLink.tagName).toBe('A')
+    expect(shapeLink.getAttribute('href')).toBe('/s/sp_7f3a9c/shape')
+    expect(screen.queryByTestId('admin-nav-shape')).toBeNull()
+  })
+
   it('hides every admin control from a plain member, including the section nav', async () => {
     vi.mocked(listSpaces).mockResolvedValue(ok([makeSpace({ my_role: 'member' })]))
 
@@ -245,6 +255,7 @@ describe('AdminPage', () => {
     expect(screen.queryByTestId('resources-panel')).toBeNull()
     expect(screen.queryByTestId('archive-panel')).toBeNull()
     expect(screen.queryByTestId('space-rules-link')).toBeNull()
+    expect(screen.queryByTestId('space-shape-link')).toBeNull()
   })
 
   it('does not even ask the server for what a member may not see', async () => {

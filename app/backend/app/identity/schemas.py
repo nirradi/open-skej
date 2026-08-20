@@ -795,6 +795,7 @@ class ShapeMessageRead(BaseModel):
     ordinal: int
     role: ShapeMessageRole
     content: str
+    question: Optional[str]
     resulting_shape_version_id: Optional[int]
     created_at: datetime
 
@@ -804,13 +805,21 @@ class ShapeMessageRead(BaseModel):
             ordinal=message.ordinal,
             role=message.role,
             content=message.content,
+            question=message.question,
             resulting_shape_version_id=message.resulting_shape_version_id,
             created_at=message.created_at,
         )
 
 
 class ShapeConversationRead(BaseModel):
-    """The reload-safe conversation transcript and the Space's current draft, if any."""
+    """The reload-safe conversation, current draft, and authoritative live baseline.
+
+    The studio compares ``draft.document`` with ``live.document`` before
+    enabling Publish. A calendar projection is deliberately not that comparison:
+    two documents can draw the same displayed week while differing in a later
+    season, so only the stored documents answer whether publishing would change
+    the Space's configuration.
+    """
 
     id: int
     status: ShapeConversationStatus
@@ -818,6 +827,7 @@ class ShapeConversationRead(BaseModel):
     closed_at: Optional[datetime]
     messages: list[ShapeMessageRead]
     draft: Optional[ShapeVersionRead]
+    live: ShapeVersionRead
 
     @classmethod
     def build(
@@ -825,6 +835,7 @@ class ShapeConversationRead(BaseModel):
         conversation: SpaceShapeConversation,
         messages: list[SpaceShapeMessage],
         draft: Optional[SpaceCalendarShape],
+        live: SpaceCalendarShape,
     ) -> "ShapeConversationRead":
         return cls(
             id=conversation.id,
@@ -833,6 +844,7 @@ class ShapeConversationRead(BaseModel):
             closed_at=conversation.closed_at,
             messages=[ShapeMessageRead.build(message) for message in messages],
             draft=ShapeVersionRead.build(draft) if draft is not None else None,
+            live=ShapeVersionRead.build(live),
         )
 
 
