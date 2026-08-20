@@ -68,7 +68,10 @@ app/frontend/    React SPA
                    than one form per type. The same page also carries a panel to author a rule
                    type in English rather than only configure one from a declared schema: a
                    prompt, a polled generation job, and a hand-off into the same "Add a rule" flow
-                   once it succeeds
+                   once it succeeds. `/s/{public_id}/shape` is the separate admin+ calendar-shape
+                   studio: its synchronous durable conversation sits beside the shared CalendarGrid
+                   with bookings disabled, previews draft or live calendar projection, and publishes
+                   or discards the Space's working shape
 app/e2e/         Playwright suite driving the real backend, not a mock
 rules/rules/
   interfaces.py  The rule contract — authoritative, read before writing any rule

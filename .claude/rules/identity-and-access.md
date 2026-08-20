@@ -228,10 +228,11 @@ not have to exist at all.
 /spaces/{public_id}/shape-conversations`, `POST .../turns`, `POST
 /spaces/{public_id}/calendar-shape/publish`, and `POST .../calendar-shape/draft` all use
 `require_space_role(MembershipRole.ADMIN)`: spending a Space's model calls and changing what its
-members may book are venue-management decisions. `GET .../shape-conversations/{id}` has the same
-floor because it exposes an admin's unfinished configuration. A member who is below that floor gets
-403; a non-member still gets the shared 404. Conversation lookup itself is scoped to `space_id` in
-one query, so a conversation id from another Space gets the identical 404 as an absent one.
+members may book are venue-management decisions. `GET .../shape-conversations/current` and `GET
+.../shape-conversations/{id}` have the same floor because they expose an admin's unfinished
+configuration. A member who is below that floor gets 403; a non-member still gets the shared 404.
+Conversation lookup itself is scoped to `space_id` in one query, so a conversation id from another
+Space gets the identical 404 as an absent one.
 
 **No `ON DELETE CASCADE` on the booking foreign keys.** `bookings.resource_id` and `bookings.user_id`
 reference `resources.id` and `users.id`, and neither cascades — nothing here is deleted, and a

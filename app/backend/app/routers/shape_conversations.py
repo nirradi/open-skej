@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session
 from app.db.session import get_session
 from app.identity import service
 from app.identity.authz import SpaceContext, require_space_role
-from app.identity.models import MembershipRole, ShapeConversationStatus, ShapeMessageRole
+from app.identity.models import (
+    MembershipRole,
+    ShapeConversationStatus,
+    ShapeMessageRole,
+    SpaceShapeConversation,
+)
 from app.identity.schemas import (
     CalendarShapePublish,
     ShapeConversationCreate,
@@ -59,6 +64,18 @@ def _archived() -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=ARCHIVED_DETAIL)
 
 
+def _conversation_read(
+    session: Session, context: SpaceContext, conversation: SpaceShapeConversation
+) -> ShapeConversationRead:
+    """Build the one read shape, including the live baseline Publish compares exactly."""
+    return ShapeConversationRead.build(
+        conversation,
+        service.list_shape_messages(session, conversation),
+        service.draft_shape(session, context.space),
+        service.live_shape_version(session, context.space),
+    )
+
+
 @router.post(
     "/{public_id}/shape-conversations",
     response_model=ShapeConversationRead,
@@ -79,9 +96,22 @@ def create_shape_conversation(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=CONVERSATION_IN_FLIGHT_DETAIL
         )
-    return ShapeConversationRead.build(
-        conversation, [], service.draft_shape(session, context.space)
-    )
+    return _conversation_read(session, context, conversation)
+
+
+@router.get("/{public_id}/shape-conversations/current", response_model=ShapeConversationRead | None)
+def read_open_shape_conversation(
+    context: AdminContext, session: SessionDep
+) -> ShapeConversationRead | None:
+    """Return this Space's one open conversation, or ``null`` when none exists. Admin+.
+
+    It is deliberately a recovery read, not an id discovery route: a caller is
+    already an admin of this Space, the query is scoped to that Space, and an
+    absent open conversation is an ordinary ``null``. The POST route keeps its
+    named 409 when concurrent creators race the partial unique index.
+    """
+    conversation = service.open_shape_conversation(session, context.space)
+    return _conversation_read(session, context, conversation) if conversation is not None else None
 
 
 @router.get(
@@ -96,11 +126,7 @@ def read_shape_conversation(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=CONVERSATION_NOT_FOUND_DETAIL
         )
-    return ShapeConversationRead.build(
-        conversation,
-        service.list_shape_messages(session, conversation),
-        service.draft_shape(session, context.space),
-    )
+    return _conversation_read(session, context, conversation)
 
 
 @router.post(
@@ -187,6 +213,7 @@ def create_shape_conversation_turn(
         conversation,
         role=ShapeMessageRole.ASSISTANT,
         content=summary,
+        question=question,
         resulting_shape_version_id=version.id,
     )
     return ShapeConversationTurnRead(

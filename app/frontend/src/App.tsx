@@ -1,6 +1,6 @@
 import { BrowserRouter, Route, Routes } from 'react-router-dom'
 
-import { AdminPage, SpaceRulesPage } from './admin'
+import { AdminPage, SpaceRulesPage, SpaceShapePage } from './admin'
 import { AccountPage, PostLoginRedirect, ProtectedRoute } from './auth'
 import { NotFoundPage, SpaceNotFoundRoute } from './NotFoundPage'
 import { ResourceCalendarRoute, SpaceListPage, SpacePage } from './space'
@@ -99,6 +99,14 @@ function App() {
           element={
             <ProtectedRoute>
               <SpaceRulesPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/s/:publicId/shape"
+          element={
+            <ProtectedRoute>
+              <SpaceShapePage />
             </ProtectedRoute>
           }
         />

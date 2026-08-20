@@ -85,6 +85,18 @@ def test_upgrade_head_creates_both_halves(alembic_config, engine):
         command.downgrade(alembic_config, "base")
 
 
+def test_upgrade_head_persists_shape_assistant_questions(alembic_config, engine):
+    """The recovery question is an actual nullable transcript column at migration head."""
+    from alembic import command
+
+    command.upgrade(alembic_config, "head")
+    try:
+        columns = {column["name"] for column in inspect(engine).get_columns("space_shape_messages")}
+        assert "question" in columns
+    finally:
+        command.downgrade(alembic_config, "base")
+
+
 def test_shape_exchange_downgrade_removes_shape_prompt_versions(alembic_config, engine):
     """A real shape exchange does not make the old three-value agent CHECK impossible to restore."""
     from alembic import command

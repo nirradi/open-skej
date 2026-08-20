@@ -511,6 +511,55 @@ export interface DayProjectionRead {
   bookable: boolean
 }
 
+/** Mirrors `ShapeConversationStatus` in `app/identity/models.py`. */
+export type ShapeConversationStatus = 'open' | 'closed'
+
+/** Mirrors `ShapeMessageRole` in `app/identity/models.py`. */
+export type ShapeMessageRole = 'user' | 'assistant'
+
+/** One stored, versioned shape document returned to the authoring studio. */
+export interface ShapeVersionRead {
+  id: number
+  /** Raw validated document; the preview itself always comes from `/calendar`. */
+  document: Record<string, unknown>
+  status: 'draft' | 'live' | 'superseded'
+  created_at: string
+  source_conversation_id: number | null
+}
+
+/** One visible message in the durable shape-authoring transcript. */
+export interface ShapeMessageRead {
+  ordinal: number
+  role: ShapeMessageRole
+  content: string
+  /** Assistant-only actionable clarification; null means its draft is bookable. */
+  question: string | null
+  resulting_shape_version_id: number | null
+  created_at: string
+}
+
+/**
+ * Reload-safe conversation state, including the authoritative live document
+ * that the studio compares with a draft before enabling Publish.
+ */
+export interface ShapeConversationRead {
+  id: number
+  status: ShapeConversationStatus
+  created_at: string
+  closed_at: string | null
+  messages: ShapeMessageRead[]
+  draft: ShapeVersionRead | null
+  live: ShapeVersionRead
+}
+
+/** The synchronous result of one shape-authoring turn. */
+export interface ShapeConversationTurnRead {
+  summary: string
+  /** Non-null when the candidate is deliberately unbookable and needs refinement. */
+  question: string | null
+  draft: ShapeVersionRead
+}
+
 /**
  * The body of `PATCH /spaces/{public_id}/rules/{id}`. Mirrors `SpaceRuleUpdate`.
  *

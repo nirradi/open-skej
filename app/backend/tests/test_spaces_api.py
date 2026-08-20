@@ -199,6 +199,7 @@ ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
     ("DELETE", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
     ("GET", "/spaces/{public_id}/calendar"): MembershipRole.MEMBER,
     ("POST", "/spaces/{public_id}/shape-conversations"): MembershipRole.ADMIN,
+    ("GET", "/spaces/{public_id}/shape-conversations/current"): MembershipRole.ADMIN,
     ("GET", "/spaces/{public_id}/shape-conversations/{conversation_id}"): MembershipRole.ADMIN,
     (
         "POST",
