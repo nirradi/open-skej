@@ -1029,6 +1029,14 @@ hands the model back its own failing source plus the validator or pytest output 
 both the entire prompt-debugging surface and the only evidence of why a rule now enforcing a venue's
 bookings reads the way it does. `user_prompt` is therefore stored untruncated.
 
+`RecordingClient` also exposes a pre-dispatch request hook and an `LLMCallError` hook. Its default
+hooks remain best-effort: rule generation must not fail a booking-affecting authoring run merely
+because optional reporting storage is unavailable. Shape conversations opt into strict hooks
+instead: they commit a pending exchange before dispatch, complete it after a response, and mark it
+failed on a transport error. That is the one consumer for which prompt provenance is part of the
+state-changing conversation contract, so a failed pre-dispatch write prevents the model call rather
+than creating an unrecorded one.
+
 A system prompt is stored **once, by sha256**, in `prompt_versions` rather than copied onto every
 exchange. Size is the smaller half of the argument — the Generator's is ~5.7 kB against up to eight
 calls per generation — and the join is the real one: *which system-prompt version produced which

@@ -15,6 +15,7 @@ from app.identity.router import rule_types_router
 from app.rule_catalog import catalog
 from app.rule_generation import sweep_orphaned_generation_jobs
 from app.routers import resource_bookings
+from app.routers import shape_conversations
 from app.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ app.add_middleware(
 app.include_router(resource_bookings.router)
 app.include_router(spaces_router)
 app.include_router(rule_types_router)
+app.include_router(shape_conversations.router)
 
 if get_settings().sandbox_auth:
     # Conditional on purpose: `/sandbox/token` must not exist at all on a

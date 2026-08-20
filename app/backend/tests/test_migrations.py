@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from app.db.models import Base
 
@@ -81,6 +81,70 @@ def test_upgrade_head_creates_both_halves(alembic_config, engine):
         tables = set(inspect(engine).get_table_names())
         assert IDENTITY_TABLES <= tables, f"identity tables missing: {IDENTITY_TABLES - tables}"
         assert BOOKING_TABLE in tables, "the bookings table was not created by any migration"
+    finally:
+        command.downgrade(alembic_config, "base")
+
+
+def test_shape_exchange_downgrade_removes_shape_prompt_versions(alembic_config, engine):
+    """A real shape exchange does not make the old three-value agent CHECK impossible to restore."""
+    from alembic import command
+
+    command.upgrade(alembic_config, "head")
+    try:
+        with engine.begin() as connection:
+            user_id = connection.execute(
+                text(
+                    "INSERT INTO users (auth0_sub, email, created_at) "
+                    "VALUES ('auth0|shape-migration', 'shape-migration@example.com', now()) "
+                    "RETURNING id"
+                )
+            ).scalar_one()
+            space_id = connection.execute(
+                text(
+                    "INSERT INTO spaces "
+                    "(public_id, name, timezone, created_by_user_id, created_at) "
+                    # 22 characters, matching `ck_spaces_public_id_length`.
+                    "VALUES ('shape-migration-000001', 'Shape migration fixture', 'UTC', "
+                    ":user_id, now()) "
+                    "RETURNING id"
+                ),
+                {"user_id": user_id},
+            ).scalar_one()
+            prompt_version_id = connection.execute(
+                text(
+                    "INSERT INTO prompt_versions (sha256, agent, text, first_seen_at) "
+                    "VALUES (:sha256, 'shape', 'shape system prompt', now()) "
+                    "RETURNING id"
+                ),
+                {"sha256": "a" * 64},
+            ).scalar_one()
+            conversation_id = connection.execute(
+                text(
+                    "INSERT INTO space_shape_conversations (space_id, user_id, status, created_at) "
+                    "VALUES (:space_id, :user_id, 'open', now()) RETURNING id"
+                ),
+                {"space_id": space_id, "user_id": user_id},
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO space_shape_exchanges "
+                    "(conversation_id, prompt_version_id, user_prompt, status, response_text, "
+                    "model, created_at) "
+                    "VALUES (:conversation_id, :prompt_version_id, 'prompt', 'completed', "
+                    "'response', "
+                    "'stub', now())"
+                ),
+                {"conversation_id": conversation_id, "prompt_version_id": prompt_version_id},
+            )
+
+        command.downgrade(alembic_config, "e2c9a4f10b73")
+        with engine.connect() as connection:
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM prompt_versions WHERE agent = 'shape'")
+                ).scalar_one()
+                == 0
+            )
     finally:
         command.downgrade(alembic_config, "base")
 

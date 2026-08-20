@@ -46,10 +46,12 @@ app/backend/app/
                    is never written into, and the one place a stored rule is turned back into
                    executable code — re-validated and run in a restricted namespace each time
   db/            Declarative Base, session, UtcDateTime, driver abstraction
-  routers/       Booking endpoints. `resource_bookings.py` is Space-scoped and authenticated: a
+  routers/       Booking endpoints and shape authoring. `resource_bookings.py` is Space-scoped and authenticated: a
                    booking is made against a Resource inside a Space the caller belongs to, resolved
                    through `require_space_role`. It is the only booking router — there is no unscoped
-                   route and no default Resource or user for one to carry
+                   route and no default Resource or user for one to carry. `shape_conversations.py`
+                   is the admin-only synchronous conversation and publish boundary for a Space's
+                   versioned calendar shape; it records model exchanges in the product database.
   rules_stub.py  Adapter onto `rules/`: converts to UTC, supplies the allow-path copy, and
                    assembles the canon from the Space's own configuration rather than running a
                    module-level one. Name is historical; it holds no rule logic

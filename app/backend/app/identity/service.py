@@ -35,12 +35,16 @@ from app.identity.models import (
     InvitationStatus,
     MembershipRole,
     Resource,
+    ShapeConversationStatus,
+    ShapeMessageRole,
     ShapeStatus,
     Space,
     SpaceAccessRequest,
     SpaceCalendarShape,
     SpaceInvitation,
     SpaceMembership,
+    SpaceShapeConversation,
+    SpaceShapeMessage,
     SpaceRule,
     User,
 )
@@ -57,6 +61,14 @@ FIRST_RESOURCE_NAME = "Main"
 
 class SpaceArchivedError(Exception):
     """A mutation was attempted on a Space that has been archived."""
+
+
+class DraftChangedError(Exception):
+    """The draft changed while a synchronous shape turn was waiting for its model response."""
+
+
+class ConversationClosedError(Exception):
+    """A shape turn tried to publish its result after its conversation was closed."""
 
 
 class UnknownRuleTypeError(Exception):
@@ -221,6 +233,19 @@ class NoDraftToPublishError(Exception):
 
 def _require_active(space: Space) -> None:
     if space.archived_at is not None:
+        raise SpaceArchivedError(space.public_id)
+
+
+def _lock_active_space(session: Session, space: Space) -> None:
+    """Serialize a mutation on the Space row and reject a freshly observed archive.
+
+    Shape model calls deliberately happen outside this lock. Every write boundary therefore uses
+    this helper instead of trusting the request's potentially stale ORM object.
+    """
+    archived_at = session.execute(
+        select(Space.archived_at).where(Space.id == space.id).with_for_update()
+    ).scalar_one()
+    if archived_at is not None:
         raise SpaceArchivedError(space.public_id)
 
 
@@ -434,6 +459,21 @@ def space_rule_config(session: Session, space: Space, *, shape: Shape) -> SpaceR
 ShapeVersion = SpaceCalendarShape
 
 
+def live_shape_version(session: Session, space: Space) -> ShapeVersion:
+    """This Space's current live shape row.
+
+    The conversation API seeds a new transcript from this stored document, while the booking gate
+    uses :func:`live_shape`'s validated value.  Keeping the lookup here means neither consumer
+    grows its own version-status query.
+    """
+    return session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one()
+
+
 def live_shape(session: Session, space: Space) -> Shape:
     """This Space's current live shape, validated fresh on every read.
 
@@ -451,12 +491,7 @@ def live_shape(session: Session, space: Space) -> Shape:
     into a refusal, which is what "fail closed" asks for here — a shape that cannot be trusted is
     exactly as unusable as a shape that says the venue is never open.
     """
-    row = session.execute(
-        select(SpaceCalendarShape).where(
-            SpaceCalendarShape.space_id == space.id,
-            SpaceCalendarShape.status == ShapeStatus.LIVE,
-        )
-    ).scalar_one()
+    row = live_shape_version(session, space)
     return validate_shape(row.document)
 
 
@@ -483,6 +518,10 @@ def upsert_draft(
     user: User,
     *,
     conversation_id: Optional[int] = None,
+    check_draft_unchanged: bool = False,
+    expected_draft_id: Optional[int] = None,
+    expected_draft_created_at: Optional[datetime] = None,
+    commit: bool = True,
 ) -> ShapeVersion:
     """Validate ``document`` and write or replace this Space's single draft row.
 
@@ -496,18 +535,55 @@ def upsert_draft(
     replaces the first in place — updating ``document``, ``created_at`` and
     ``source_conversation_id`` on the existing row — rather than superseding it the way publishing
     does; a draft is a single working copy, not its own version history, and nothing downstream
-    reads a superseded *draft*.
+    reads a superseded *draft*. Conversation turns pass ``commit=False`` so their assistant message
+    commits the draft and transcript atomically while the finalization locks remain held.
     """
-    _require_active(space)
+    # A shape call can take seconds. Re-read and lock database state instead of trusting objects
+    # resolved before it started, so archive/discard committed meanwhile wins cleanly.
+    _lock_active_space(session, space)
+    if conversation_id is not None:
+        conversation_status = session.execute(
+            select(SpaceShapeConversation.status)
+            .where(
+                SpaceShapeConversation.id == conversation_id,
+                SpaceShapeConversation.space_id == space.id,
+            )
+            .with_for_update()
+        ).scalar_one_or_none()
+        if conversation_status is not ShapeConversationStatus.OPEN:
+            raise ConversationClosedError(conversation_id)
     validate_shape(document)
 
-    existing = draft_shape(session, space)
+    draft_query = select(SpaceCalendarShape).where(
+        SpaceCalendarShape.space_id == space.id,
+        SpaceCalendarShape.status == ShapeStatus.DRAFT,
+    )
+    if check_draft_unchanged:
+        # The comparison and replacement are one atomic optimistic-write check. Without the row
+        # lock, two turns can both observe the same snapshot before either UPDATE executes and the
+        # second UPDATE silently wins despite the checks below.
+        draft_query = draft_query.with_for_update()
+    existing = session.execute(draft_query).scalar_one_or_none()
+    if check_draft_unchanged and (
+        (expected_draft_id is None and existing is not None)
+        or (expected_draft_id is not None and existing is None)
+        or (
+            existing is not None
+            and (
+                existing.id != expected_draft_id or existing.created_at != expected_draft_created_at
+            )
+        )
+    ):
+        raise DraftChangedError(space.public_id)
     if existing is not None:
         existing.document = document
         existing.created_at = utcnow()
         existing.created_by_user_id = user.id
         existing.source_conversation_id = conversation_id
-        session.commit()
+        if commit:
+            session.commit()
+        else:
+            session.flush()
         return existing
 
     row = SpaceCalendarShape(
@@ -518,7 +594,12 @@ def upsert_draft(
         source_conversation_id=conversation_id,
     )
     session.add(row)
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        # The caller needs the id for its assistant-message foreign key while retaining the Space,
+        # conversation and draft locks until that message commits the whole finalization.
+        session.flush()
     return row
 
 
@@ -541,7 +622,7 @@ def publish_draft(session: Session, space: Space, user: User) -> ShapeVersion:
     Raises :class:`NoDraftToPublishError` when there is nothing to publish, rather than treating
     the call as a no-op — see that exception's own docstring.
     """
-    _require_active(space)
+    _lock_active_space(session, space)
 
     draft = draft_shape(session, space)
     if draft is None:
@@ -561,6 +642,7 @@ def publish_draft(session: Session, space: Space, user: User) -> ShapeVersion:
     draft.status = ShapeStatus.LIVE
     draft.published_at = now
     draft.published_by_user_id = user.id
+    _close_open_shape_conversation(session, space)
     session.commit()
     return draft
 
@@ -574,12 +656,112 @@ def discard_draft(session: Session, space: Space) -> None:
     references and never became a version anyone published, the same "an instance is really
     deleted" reasoning ``SpaceRule``'s own docstring gives for a rule instance nobody points at.
     """
-    _require_active(space)
+    _lock_active_space(session, space)
     draft = draft_shape(session, space)
-    if draft is None:
-        return
-    session.delete(draft)
+    if draft is not None:
+        session.delete(draft)
+    _close_open_shape_conversation(session, space)
     session.commit()
+
+
+def create_shape_conversation(session: Session, space: Space, user: User) -> SpaceShapeConversation:
+    """Open this Space's one in-flight shape conversation.
+
+    The caller maps the database's unique-index race to the same 409 as the friendly lookup.
+    This service deliberately does not pre-check it: the index is the invariant and a duplicated
+    check would only create a second place that has to stay in agreement with it.
+    """
+    _lock_active_space(session, space)
+    conversation = SpaceShapeConversation(space_id=space.id, user_id=user.id)
+    session.add(conversation)
+    session.commit()
+    return conversation
+
+
+def read_shape_conversation(
+    session: Session, space: Space, conversation_id: int
+) -> SpaceShapeConversation | None:
+    """Resolve a conversation in one query scoped to its Space.
+
+    A foreign id and an absent id intentionally both become ``None``.  The router translates
+    that one value to its one 404 so neither path becomes a tenant-information oracle.
+    """
+    return session.execute(
+        select(SpaceShapeConversation).where(
+            SpaceShapeConversation.id == conversation_id,
+            SpaceShapeConversation.space_id == space.id,
+        )
+    ).scalar_one_or_none()
+
+
+def list_shape_messages(
+    session: Session, conversation: SpaceShapeConversation
+) -> list[SpaceShapeMessage]:
+    """The visible transcript in its durable, strictly ordered form."""
+    return list(
+        session.execute(
+            select(SpaceShapeMessage)
+            .where(SpaceShapeMessage.conversation_id == conversation.id)
+            .order_by(SpaceShapeMessage.ordinal)
+        )
+        .scalars()
+        .all()
+    )
+
+
+def append_shape_message(
+    session: Session,
+    conversation: SpaceShapeConversation,
+    *,
+    role: ShapeMessageRole,
+    content: str,
+    resulting_shape_version_id: int | None = None,
+) -> SpaceShapeMessage:
+    """Persist one visible message before or after its model call.
+
+    The user message is committed before the shape agent runs, so a process failure still leaves
+    the request that was about to be sent. Every append locks and rechecks the conversation before
+    choosing its ordinal; this serializes transcript writers with finalization and close, while the
+    unique ordinal index remains the database backstop.
+    """
+    conversation_status = session.execute(
+        select(SpaceShapeConversation.status)
+        .where(SpaceShapeConversation.id == conversation.id)
+        .with_for_update()
+    ).scalar_one()
+    if conversation_status is not ShapeConversationStatus.OPEN:
+        raise ConversationClosedError(conversation.id)
+    ordinal = (
+        session.execute(
+            select(func.coalesce(func.max(SpaceShapeMessage.ordinal), 0)).where(
+                SpaceShapeMessage.conversation_id == conversation.id
+            )
+        ).scalar_one()
+        + 1
+    )
+    message = SpaceShapeMessage(
+        conversation_id=conversation.id,
+        ordinal=ordinal,
+        role=role,
+        content=content,
+        resulting_shape_version_id=resulting_shape_version_id,
+    )
+    session.add(message)
+    session.commit()
+    return message
+
+
+def _close_open_shape_conversation(session: Session, space: Space) -> None:
+    """Close the one current conversation inside the publish/discard transaction."""
+    conversation = session.execute(
+        select(SpaceShapeConversation).where(
+            SpaceShapeConversation.space_id == space.id,
+            SpaceShapeConversation.status == ShapeConversationStatus.OPEN,
+        )
+    ).scalar_one_or_none()
+    if conversation is not None:
+        conversation.status = ShapeConversationStatus.CLOSED
+        conversation.closed_at = utcnow()
 
 
 def _validate_rule_params(rule_type_id: str, params: dict) -> None:
