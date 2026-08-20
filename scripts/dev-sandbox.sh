@@ -44,6 +44,18 @@ BACKEND_DIR="$REPO_ROOT/app/backend"
 FRONTEND_DIR="$REPO_ROOT/app/frontend"
 VENV_PY="$BACKEND_DIR/venv/bin/python"
 
+# The backend dependency is normally an editable install of this sibling tree, but editable
+# metadata records the packages that existed when pip last installed it. A checkout can therefore
+# gain a new package (such as Stream 10's `shape`) while an older venv still imports `rules` and
+# looks healthy. The development stack always runs the source in this checkout explicitly, so a
+# pull never requires reinstalling local package metadata. The generated-rule subprocess strips
+# PYTHONPATH in `rules.sandbox`; this path does not weaken that isolation boundary.
+if [ -n "${PYTHONPATH:-}" ]; then
+  export PYTHONPATH="$REPO_ROOT/rules:$PYTHONPATH"
+else
+  export PYTHONPATH="$REPO_ROOT/rules"
+fi
+
 BACKEND_PORT=8000
 FRONTEND_PORT=5173
 POSTGRES_PORT=5432
@@ -214,13 +226,10 @@ docker info >/dev/null 2>&1 || die "the Docker daemon is not running — start D
 [ -x "$VENV_PY" ] || die "backend venv missing. Create it:
        python3 -m venv app/backend/venv && app/backend/venv/bin/pip install -r app/backend/requirements.txt"
 [ -d "$FRONTEND_DIR/node_modules" ] || die "frontend dependencies missing. Run: npm ci --prefix app/frontend"
-# The rule engine is an editable install of the sibling tree (`-e ../../rules` in
-# requirements.txt), so it is the one dependency a venv can be missing while looking complete —
-# and `app.routers.resource_bookings` imports it, so the failure lands as a uvicorn traceback
-# 60 seconds into the run rather than here.
-"$VENV_PY" -c 'import rules' >/dev/null 2>&1 || die "the backend venv cannot import the \`rules\` engine.
-       It is installed from the sibling tree, not an index. Run:
-         (cd app/backend && ./venv/bin/pip install -e ../../rules)"
+# Validate every package shipped by the sibling distribution. Checking only `rules` misses a stale
+# editable package map and lets the failure land later during migration or seed startup.
+"$VENV_PY" -c 'import generation, rules, shape' >/dev/null 2>&1 ||
+  die "the backend venv cannot import rules, generation and shape from the checkout"
 info "docker, backend venv and frontend deps all present"
 
 stop_recorded
