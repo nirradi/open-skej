@@ -38,10 +38,15 @@ from app.identity.models import (
     Resource,
     RuleGenerationJob,
     RuleGenerationJobStatus,
+    ShapeConversationStatus,
+    ShapeMessageRole,
     Space,
+    SpaceCalendarShape,
     SpaceAccessRequest,
     SpaceInvitation,
     SpaceMembership,
+    SpaceShapeConversation,
+    SpaceShapeMessage,
     SpaceRule,
     User,
 )
@@ -746,3 +751,94 @@ class RuleDraftRead(BaseModel):
             created_at=job.created_at,
             updated_at=job.updated_at,
         )
+
+
+class ShapeConversationCreate(BaseModel):
+    """Open a shape conversation.  The empty body is intentional: it starts from the live shape."""
+
+
+class ShapeConversationTurnCreate(BaseModel):
+    """One admin-authored message in a shape conversation."""
+
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class CalendarShapePublish(BaseModel):
+    """An explicit acknowledgement is required before publishing an unbookable shape."""
+
+    allow_unbookable: bool = False
+
+
+class ShapeVersionRead(BaseModel):
+    """A stored shape version, with raw JSON preserved for the studio preview."""
+
+    id: int
+    document: dict
+    status: str
+    created_at: datetime
+    source_conversation_id: Optional[int]
+
+    @classmethod
+    def build(cls, row: SpaceCalendarShape) -> "ShapeVersionRead":
+        return cls(
+            id=row.id,
+            document=row.document,
+            status=row.status.value,
+            created_at=row.created_at,
+            source_conversation_id=row.source_conversation_id,
+        )
+
+
+class ShapeMessageRead(BaseModel):
+    """One persisted visible transcript message."""
+
+    ordinal: int
+    role: ShapeMessageRole
+    content: str
+    resulting_shape_version_id: Optional[int]
+    created_at: datetime
+
+    @classmethod
+    def build(cls, message: SpaceShapeMessage) -> "ShapeMessageRead":
+        return cls(
+            ordinal=message.ordinal,
+            role=message.role,
+            content=message.content,
+            resulting_shape_version_id=message.resulting_shape_version_id,
+            created_at=message.created_at,
+        )
+
+
+class ShapeConversationRead(BaseModel):
+    """The reload-safe conversation transcript and the Space's current draft, if any."""
+
+    id: int
+    status: ShapeConversationStatus
+    created_at: datetime
+    closed_at: Optional[datetime]
+    messages: list[ShapeMessageRead]
+    draft: Optional[ShapeVersionRead]
+
+    @classmethod
+    def build(
+        cls,
+        conversation: SpaceShapeConversation,
+        messages: list[SpaceShapeMessage],
+        draft: Optional[SpaceCalendarShape],
+    ) -> "ShapeConversationRead":
+        return cls(
+            id=conversation.id,
+            status=conversation.status,
+            created_at=conversation.created_at,
+            closed_at=conversation.closed_at,
+            messages=[ShapeMessageRead.build(message) for message in messages],
+            draft=ShapeVersionRead.build(draft) if draft is not None else None,
+        )
+
+
+class ShapeConversationTurnRead(BaseModel):
+    """The immediate result of one synchronous model turn."""
+
+    summary: str
+    question: Optional[str]
+    draft: ShapeVersionRead

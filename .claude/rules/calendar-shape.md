@@ -179,7 +179,7 @@ and presenting a caller bug as a polite refusal would hide the bug instead of su
 
 `space_calendar_shapes` (`app.identity.models.SpaceCalendarShape`) holds one row per **version** of
 a Space's shape, never one row per Space. `status` is `draft` | `live` | `superseded`. A Space's
-current shape is its one `live` row; a chat turn (task 10.8) writes or replaces its one `draft` row;
+current shape is its one `live` row; a chat turn writes or replaces its one `draft` row;
 publishing turns a `draft` into `live` and the row it replaces into `superseded` — nothing is ever
 deleted, so the full sequence of a Space's `live` rows, in `created_at` order, is the whole "what
 changed and when" answer with no second table for it.
@@ -221,6 +221,59 @@ document nobody re-checked. `draft_shape`, `upsert_draft`, `publish_draft` and `
 out the write side; every one refuses on an archived Space through the existing
 `SpaceArchivedError` path, and none of them re-checks the caller's role — authorization is the
 router's job, matching how every other write in this module already splits the two.
+
+## The conversation API and its provenance
+
+`space_shape_conversations` is the durable, Space-scoped transcript owner: `open` and `closed`
+are its only states, and `uq_space_shape_conversations_open` is a partial unique index over `open`
+rows, so a Space has one in-flight conversation even when two browser tabs race to start one.
+`space_shape_messages` records user and assistant messages in a unique, ordered ordinal sequence;
+the assistant summary points at the draft version its turn produced. `space_shape_exchanges` writes
+each prompt as `pending` **before dispatch**, then records its completion or transport failure as
+`completed` / `failed`; a malformed completion that triggers the agent's one validation retry is
+therefore retained along with a call that never answered. It references the existing sha256-keyed
+`prompt_versions` row, with the `shape` `PromptAgent` label, rather than storing a second copy of
+the system prompt or adding a tracing service for tenant-authored text.
+
+All conversation routes are admin+ through `require_space_role`: `POST
+/spaces/{public_id}/shape-conversations` opens a conversation from the current live document;
+`GET .../shape-conversations/{id}` returns its transcript and current draft; and `POST
+.../shape-conversations/{id}/turns` stores the admin message, makes the bounded model call, and
+returns its summary, question and new draft synchronously. This differs deliberately from
+`rule_drafts.py`: generated rules require a multi-minute adversarial/sandbox job and polling,
+while a shape turn is one completion plus at most one schema correction. An unreachable or timed-out
+model produces a plain renderable error and is not retried. `SHAPE_CONVERSATION_TIMEOUT_SECONDS`
+(30 seconds by default) is applied to the selected transport, so the underlying socket or subprocess
+is bounded rather than only the HTTP wrapper waiting for it.
+
+The recorder writes a pending exchange before dispatch and completes it afterwards, before draft
+persistence. Strict recorder hooks refuse to dispatch if this product-database provenance cannot be
+written, so a model call that would be impossible to account for never occurs. A process that dies
+mid-turn still leaves the exact prompt; a transport failure leaves its failed row. Before a model
+response becomes a draft, the service locks and re-reads the Space and conversation, then compares
+the draft it read before dispatch with the current one. An archive or discard race cannot publish a
+new draft, and an overlapping turn receives 409 rather than silently overwriting a later draft.
+Publish, discard and conversation-open mutations take the same Space lock, so none can commit from
+a stale pre-archive ORM object. The resulting draft and assistant transcript message commit in that
+same locked finalization transaction; publish or discard cannot slip between them and leave a
+message pointing at a deleted working copy. Every transcript append takes the conversation lock
+before assigning its ordinal, so a concurrent turn cannot collide with that final assistant append
+or write into a conversation that closed while its request was being authorized. Conversation ids
+are always loaded in one query scoped to `space_id`, so a foreign id and an absent id receive the
+same 404.
+
+A discarded draft is the domain's deliberate deletion exception. Its assistant messages remain as
+the transcript, but their `resulting_shape_version_id` foreign key becomes null (`ON DELETE SET
+NULL`): the message still records what was said, while it must not make a working copy impossible
+to discard.
+
+`POST /spaces/{public_id}/calendar-shape/publish` publishes the one draft and closes its open
+conversation in the same transaction. It refuses `NoDraftToPublishError`, an archived Space, and a
+shape with no offered time unless the caller explicitly sends `allow_unbookable: true`; closing a
+venue is valid, silently publishing an accidental all-closed shape is not. `POST
+/spaces/{public_id}/calendar-shape/draft` discards the working copy and closes the conversation.
+Neither route examines existing bookings; that warning remains the deferred concern attached to the
+single publish moment, not a hidden fourth publish policy.
 
 ## The shape agent
 
@@ -418,5 +471,6 @@ shape resolves to a tolerance of zero, and zero is the permissive direction.
 
 ## What later tasks in this stream add here
 
-* **10.7** — the shape benchmark, asserted on the projection rather than the JSON.
-* **10.8–10.10** — the conversation API, the shape studio, and the E2E guard.
+* **10.8** — the shape studio, consuming the conversation and draft-preview APIs.
+* **10.9–10.10** — the benchmark asserted on the projection rather than the JSON, then the E2E
+  guard.

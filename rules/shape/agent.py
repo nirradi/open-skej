@@ -27,6 +27,7 @@ __all__ = [
     "ShapeAgentResponseError",
     "build_prompt",
     "generate_shape",
+    "is_unbookable",
     "parse_shape_response",
     "strip_json_fence",
 ]
@@ -240,7 +241,7 @@ def parse_shape_response(completion: str) -> ShapeAgentResult:
         question = question.strip()
 
     document = validate_shape(envelope["document"])
-    unbookable = _is_unbookable(document)
+    unbookable = is_unbookable(document)
     if unbookable and question is None:
         raise _response_error("question must be set when the document is unbookable")
     if not unbookable and question is not None:
@@ -304,7 +305,7 @@ def generate_shape(
     raise AssertionError("the two-attempt shape-agent loop must return or raise")
 
 
-def _is_unbookable(shape: Shape) -> bool:
+def is_unbookable(shape: Shape) -> bool:
     """Whether no date a valid shape can project has an offered start."""
     for block in shape.operating_blocks:
         for on_date in _representative_dates(block, shape.blackout_windows):

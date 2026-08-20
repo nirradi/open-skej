@@ -198,6 +198,14 @@ ROLE_TABLE: dict[tuple[str, str], MembershipRole] = {
     ("PATCH", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
     ("DELETE", "/spaces/{public_id}/rules/{rule_id}"): MembershipRole.ADMIN,
     ("GET", "/spaces/{public_id}/calendar"): MembershipRole.MEMBER,
+    ("POST", "/spaces/{public_id}/shape-conversations"): MembershipRole.ADMIN,
+    ("GET", "/spaces/{public_id}/shape-conversations/{conversation_id}"): MembershipRole.ADMIN,
+    (
+        "POST",
+        "/spaces/{public_id}/shape-conversations/{conversation_id}/turns",
+    ): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/calendar-shape/publish"): MembershipRole.ADMIN,
+    ("POST", "/spaces/{public_id}/calendar-shape/draft"): MembershipRole.ADMIN,
 }
 
 # One rank below each non-member minimum — the caller the under-privileged half
@@ -325,8 +333,8 @@ def _fill(path: str, public_id: str, member: User) -> str:
 
     ``{user_id}`` resolves to a genuine member of the Space under test, so a 404
     cannot be explained away as "that user does not exist". ``{request_id}``,
-    ``{invitation_id}``, ``{resource_id}``, ``{booking_id}`` and ``{rule_id}``
-    are arbitrary integers — the authorization dependency rejects the caller
+    ``{invitation_id}``, ``{resource_id}``, ``{booking_id}``, ``{rule_id}`` and
+    ``{conversation_id}`` are arbitrary integers — the authorization dependency rejects the caller
     before any row with that id is looked up, which is the property being
     asserted.
 
@@ -344,6 +352,7 @@ def _fill(path: str, public_id: str, member: User) -> str:
         .replace("{resource_id}", "1")
         .replace("{booking_id}", "1")
         .replace("{rule_id}", "1")
+        .replace("{conversation_id}", "1")
     )
 
 

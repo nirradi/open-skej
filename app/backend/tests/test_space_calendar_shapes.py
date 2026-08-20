@@ -179,11 +179,14 @@ def test_upsert_draft_replaces_the_existing_draft_rather_than_adding_a_second(
     session: Session, space: Space, alice: User
 ):
     first = service.upsert_draft(session, space, _ALTERNATE_DOCUMENT, alice)
-    second = service.upsert_draft(session, space, DEFAULT_SHAPE, alice, conversation_id=42)
+    conversation = service.create_shape_conversation(session, space, alice)
+    second = service.upsert_draft(
+        session, space, DEFAULT_SHAPE, alice, conversation_id=conversation.id
+    )
 
     assert first.id == second.id
     assert second.document == DEFAULT_SHAPE
-    assert second.source_conversation_id == 42
+    assert second.source_conversation_id == conversation.id
 
     rows = _shape_rows(session, space)
     assert sum(1 for row in rows if row.status == ShapeStatus.DRAFT) == 1

@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # None means "leave the selected client's own default model alone", the same
     # convention `rules/benchmark.py`'s optional flags already keep.
     rule_generation_model: str | None = None
+    # A shape turn is synchronous: unlike a rule-generation job it may never hold a request open
+    # for the transport's benchmark-sized default timeout. The configured client still owns socket
+    # cancellation; this is the shorter bound applied to that client for shape conversations only.
+    shape_conversation_timeout_seconds: float = Field(default=30.0, gt=0)
 
     # The Vite dev server's default origin. A list rather than a single value so
     # task 2.8's frontend can be served from a second port without a code change.

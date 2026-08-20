@@ -149,6 +149,35 @@ class PromptAgent(str, enum.Enum):
     GENERATOR = "generator"
     TESTER = "tester"
     MANIFEST = "manifest"
+    SHAPE = "shape"
+
+
+class ShapeConversationStatus(str, enum.Enum):
+    """Whether a shape conversation can still accept turns.
+
+    ``open`` is deliberately the only in-flight state.  A partial unique index over it makes
+    one conversation per Space a database fact, rather than a racy router-side read.  Publishing
+    or discarding closes the conversation; its messages and exchanges stay as the provenance of
+    the draft that was considered.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class ShapeMessageRole(str, enum.Enum):
+    """The two speakers persisted in a shape conversation transcript."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ShapeExchangeStatus(str, enum.Enum):
+    """The durable state of a model call whose prompt was already dispatched."""
+
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 def _string_enum(enum_cls: type[enum.Enum], name: str, length: int) -> Enum:
@@ -180,6 +209,11 @@ _RULE_GENERATION_JOB_STATUS_TYPE = _string_enum(
 )
 _PROMPT_AGENT_TYPE = _string_enum(PromptAgent, "prompt_agent", 16)
 _SHAPE_STATUS_TYPE = _string_enum(ShapeStatus, "space_calendar_shape_status", 16)
+_SHAPE_CONVERSATION_STATUS_TYPE = _string_enum(
+    ShapeConversationStatus, "space_shape_conversation_status", 16
+)
+_SHAPE_MESSAGE_ROLE_TYPE = _string_enum(ShapeMessageRole, "space_shape_message_role", 16)
+_SHAPE_EXCHANGE_STATUS_TYPE = _string_enum(ShapeExchangeStatus, "space_shape_exchange_status", 16)
 
 
 class User(Base):
@@ -384,11 +418,10 @@ class SpaceCalendarShape(Base):
     exist under every Space from the moment it ships). A row written through the API or the chat
     (task 10.8) always sets both.
 
-    ``source_conversation_id`` is a **plain nullable integer with no ``ForeignKey``** — task 10.8
-    adds the conversations table this will eventually reference; adding the constraint now would
-    mean either forward-declaring a table this task does not own or leaving the column pointing at
-    nothing until 10.8 lands. It is null for the default row this table's own migration writes and
-    for any row written outside a chat turn (a direct API write, once one exists).
+    ``source_conversation_id`` is a nullable foreign key to the conversation that authored this
+    draft. It is null for the default row this table's own migration writes and for any row written
+    outside a chat turn. The foreign key preserves provenance without creating a delete cascade:
+    conversations are closed and retained, never removed.
 
     No ``ON DELETE CASCADE`` on ``space_id``, matching every other foreign key onto ``spaces.id``
     in this schema — nothing here is deleted, so there is no delete to cascade, and a cascade
@@ -408,9 +441,9 @@ class SpaceCalendarShape(Base):
     published_by_user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id"), default=None
     )
-    # No ForeignKey target exists yet — task 10.8 adds the conversations table. Plain nullable
-    # integer until then; see the class docstring.
-    source_conversation_id: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    source_conversation_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("space_shape_conversations.id"), default=None
+    )
 
     __table_args__ = (
         # "Which shape versions belong to this Space?" — every read this table serves — filters
@@ -440,6 +473,95 @@ class SpaceCalendarShape(Base):
             f"SpaceCalendarShape(id={self.id!r}, space_id={self.space_id!r},"
             f" status={self.status.value!r})"
         )
+
+
+class SpaceShapeConversation(Base):
+    """One admin's bounded, Space-scoped shape-authoring conversation.
+
+    A conversation is a transcript and provenance record, not a second draft store: the one
+    mutable candidate remains ``SpaceCalendarShape(status='draft')``.  The partial unique index
+    permits exactly one ``open`` conversation per Space while retaining all closed conversations
+    for the history of a published or discarded draft.
+    """
+
+    __tablename__ = "space_shape_conversations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    space_id: Mapped[int] = mapped_column(ForeignKey("spaces.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    status: Mapped[ShapeConversationStatus] = mapped_column(
+        _SHAPE_CONVERSATION_STATUS_TYPE, default=ShapeConversationStatus.OPEN
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(UtcDateTime, default=None)
+
+    __table_args__ = (
+        Index("ix_space_shape_conversations_space", "space_id"),
+        Index(
+            "uq_space_shape_conversations_open",
+            "space_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+        ),
+    )
+
+
+class SpaceShapeMessage(Base):
+    """One visible user or assistant turn in a shape conversation.
+
+    The model's raw completion belongs in the exchange table below; the assistant message stores
+    the concise summary the chat renders, linked to the draft version that resulted from it.
+    """
+
+    __tablename__ = "space_shape_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("space_shape_conversations.id"))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    role: Mapped[ShapeMessageRole] = mapped_column(_SHAPE_MESSAGE_ROLE_TYPE)
+    content: Mapped[str] = mapped_column(Text)
+    resulting_shape_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("space_calendar_shapes.id", ondelete="SET NULL"), default=None
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+    __table_args__ = (
+        Index(
+            "uq_space_shape_messages_conversation_ordinal",
+            "conversation_id",
+            "ordinal",
+            unique=True,
+        ),
+    )
+
+
+class SpaceShapeExchange(Base):
+    """One shape-agent dispatch, persisted before the model receives it.
+
+    ``prompt_versions`` owns the de-duplicated system prompt, exactly as it does for rule
+    generation.  A row begins ``pending`` before the model call, then becomes ``completed`` with
+    its response or ``failed`` with its transport error.  Thus a process dying mid-turn leaves the
+    exact prompt it had sent rather than only completed calls.
+    """
+
+    __tablename__ = "space_shape_exchanges"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("space_shape_conversations.id"), index=True
+    )
+    prompt_version_id: Mapped[int] = mapped_column(ForeignKey("prompt_versions.id"))
+    user_prompt: Mapped[str] = mapped_column(Text)
+    status: Mapped[ShapeExchangeStatus] = mapped_column(
+        _SHAPE_EXCHANGE_STATUS_TYPE, default=ShapeExchangeStatus.PENDING
+    )
+    response_text: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    error: Mapped[Optional[str]] = mapped_column(Text, default=None)
+    model: Mapped[str] = mapped_column(String(255))
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, default=None)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 
 
 class GeneratedRuleType(Base):

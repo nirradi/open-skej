@@ -31,6 +31,7 @@ from .agent import (
     ShapeAgentResult,
     build_prompt,
     generate_shape,
+    is_unbookable,
     parse_shape_response,
     strip_json_fence,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "ShapeAgentResponseError",
     "build_prompt",
     "generate_shape",
+    "is_unbookable",
     "parse_shape_response",
     "strip_json_fence",
     "StubShapeLLMClient",

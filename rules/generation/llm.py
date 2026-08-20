@@ -241,16 +241,21 @@ class RecordingClient:
     ``on_exchange``, when given, is called with each ``RecordedExchange`` immediately after the
     call that produced it returns — which is how the backend's job runner persists one exchange row
     per model call as a multi-minute generation run progresses, rather than only once at the end
-    when there would be nothing left to resume from if the process died mid-run. A hook that raises
-    is caught and logged rather than left to propagate: the hook is a side effect of recording,
-    never a step the generation loop itself depends on, and letting a database write failure abort
-    an in-flight model call would fail the *booking* feature (rule generation) for a *reporting*
-    reason (an exchange could not be persisted) — the opposite of this project's fail-closed
-    posture, which reserves failing hard for cases where the outcome itself cannot be trusted.
+    when there would be nothing left to resume from if the process died mid-run. ``before_request``
+    and ``on_error`` additionally let a caller write a pending prompt before dispatch and mark it
+    failed when the transport raises ``LLMCallError``. Hooks are best-effort by default, preserving
+    rule generation's reporting-only behavior. A caller may opt into ``strict_hooks`` where prompt
+    provenance is a precondition for its mutation: then a recorder failure escapes, and a failed
+    pre-dispatch hook prevents the model call itself.
     """
 
     wrapped: LLMClient
     on_exchange: Callable[[RecordedExchange], None] | None = None
+    # These hooks make durable request provenance possible for callers that need it.  Existing
+    # generation callers leave them unset and retain the historical best-effort recording policy.
+    before_request: Callable[[str, str, str], None] | None = None
+    on_error: Callable[[str, str, str, LLMCallError], None] | None = None
+    strict_hooks: bool = False
     exchanges: list[RecordedExchange] = field(default_factory=list)
 
     @property
@@ -264,7 +269,13 @@ class RecordingClient:
         return self.wrapped.default_model
 
     def complete(self, *, system: str, prompt: str, model: str | None = None) -> LLMResponse:
-        response = self.wrapped.complete(system=system, prompt=prompt, model=model)
+        requested_model = model or self.default_model
+        self._run_hook("before_request", self.before_request, system, prompt, requested_model)
+        try:
+            response = self.wrapped.complete(system=system, prompt=prompt, model=model)
+        except LLMCallError as exc:
+            self._run_hook("on_error", self.on_error, system, prompt, requested_model, exc)
+            raise
         # `response.model`, not the `model` argument: that argument may be None, meaning "whatever
         # the wrapped client defaults to", and a recorded exchange saying the model was None is
         # exactly the row someone reads a year later when asking which model wrote a live rule.
@@ -272,15 +283,23 @@ class RecordingClient:
             system=system, prompt=prompt, model=response.model, response=response
         )
         self.exchanges.append(exchange)
-        if self.on_exchange is not None:
-            try:
-                self.on_exchange(exchange)
-            except Exception:
-                logger.exception(
-                    "on_exchange hook raised while recording a completion; the exchange is kept "
-                    "in memory (see `exchanges`) but may not have been persisted."
-                )
+        self._run_hook("on_exchange", self.on_exchange, exchange)
         return response
+
+    def _run_hook(self, name: str, hook: Callable[..., None] | None, *args: object) -> None:
+        """Run an optional recorder hook, keeping legacy recording best-effort by default."""
+        if hook is None:
+            return
+        try:
+            hook(*args)
+        except Exception:
+            if self.strict_hooks:
+                raise
+            logger.exception(
+                "%s hook raised while recording a model call; the call outcome is still kept "
+                "in memory but may not be persisted.",
+                name,
+            )
 
     @property
     def responses(self) -> list[LLMResponse]:
