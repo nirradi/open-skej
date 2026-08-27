@@ -501,3 +501,51 @@ and discard confirms before closing the conversation and deleting its working co
 The rules page remains separate and links here, while this page links back to rules. The chats are
 not merged or intent-routed: shapes describe what the venue offers, and rules describe who may take
 it and how much.
+
+## Benchmarking the shape agent
+
+`rules/shape_benchmark.py` is a hand-invoked, checkpointed benchmark over the shape agent. It stays
+at the top level of `rules/`, beside `benchmark.py` and outside the distributed packages, so a live
+model harness never becomes part of the booking API's import surface. Its `RecordingClient` records
+the calls the agent actually made, including a candidate-correction call, without teaching the shape
+agent or projection about benchmarking. The report records its client, model, applied temperature,
+and seed only when the selected client actually receives one; Google AI Studio receives a temperature
+but no reliable seed, so its report records `seed: null` rather than a value it did not apply.
+
+**The benchmark asserts on the projection, never on JSON.** `GoldenShapeExample` holds a single-turn
+prompt and pure `OffersExactly`, `OffersProjectionExactly`, `OffersNothing`, or `Permits`
+expectations. Each calls `project_day` or `permits`, the same answer the grid renders and the booking
+gate enforces. A teacher break represented by one blackout or by two operating blocks with a hole is
+therefore equally correct when it offers the same calendar; comparing documents would instead measure
+an arbitrary encoding and push the authoring prompt toward it. These assertions are free of network
+calls and LLM judges, so they are also unit-tested against hand-written shapes.
+
+The fixed thin set is deliberately ordered and contains only the core, static vocabulary:
+
+| Prompt | Projection expectation |
+|---|---|
+| Teacher | 20-minute slots from 18:00–20:00, with the 19:30–19:40 break removing the straddling 19:20 start. |
+| Lab equipment | One long 30-minute grid, with cooldowns at 10:00, 13:00, and 15:00 removing their overlapping starts. |
+| Music room | A morning one-hour block and an evening one- or two-hour block; a two-hour offer is reachable only in the evening. |
+
+The seasonal, relative-date, past-effective-date-refusal, and multi-turn preservation cases remain
+the deferred tough benchmark. They need a reference-date and conversation contract; the thin set
+does not claim to validate either one. Appending, editing, or reordering the fixed cases changes the
+baseline and is a new benchmark decision, not routine prompt editing.
+
+An invalid candidate gets the shape agent's one correction attempt and reports `gave_up` if it still
+cannot produce a valid envelope. A valid document that offers the wrong calendar remains a completed
+measurement (`verified` with `succeeded: false`), while an `LLMCallError` is a non-run: it aborts the
+remaining examples for that model as `skipped` and exits non-zero. `--checkpoint` writes after every
+example and refuses a client, seed, temperature, or golden-set fingerprint mismatch on resume. The
+fingerprint is a sha256 identity of the exact ordered prompts and expectation data, so cached
+examples never survive a changed assertion or reordered baseline. Model ids are not part of that
+identity: a matching checkpoint can add another model because each model has its own completed rows.
+
+| Client | Model | Temperature | Seed | Thin-set result | Usage and latency | Shape benchmark default |
+|---|---|---:|---|---|---|---|
+| Google AI Studio | `gemini-3.1-flash-lite` | 0.0 | unset | 3/3 succeeded; every example validated and met its projection expectations on its first call, with no correction retry. | 3 calls; 5,028 input tokens; 891 output tokens; cost and model duration unavailable; 4,165 ms total wall time. | Selected for the thin static benchmark. |
+
+`gemini-3.1-flash-lite` is the evidence-based default for this thin static benchmark. The result
+does not validate the deferred tough cases or establish a default for relative-date interpretation
+or multi-turn preservation.
