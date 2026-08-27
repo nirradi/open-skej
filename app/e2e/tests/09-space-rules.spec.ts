@@ -178,11 +178,12 @@ test.describe('the cross-Resource consecutive-duration guard', () => {
     ).toBeGreaterThanOrEqual(2)
     const [court1, court2] = resourceIds
 
-    // A day comfortably future and well inside `SPACE_A_BOOKING_HORIZON_DAYS`.
-    const start1 = localInstantDaysFromNow(10, 17, 0)
-    const end1 = localInstantDaysFromNow(10, 18, 0)
-    const end2 = localInstantDaysFromNow(10, 19, 0)
-    const end3 = localInstantDaysFromNow(10, 20, 0)
+    // Prior bookings stay inside `rules.history_window`; upper is always at least now + 7 days.
+    const DAYS_AHEAD = 2
+    const start1 = localInstantDaysFromNow(DAYS_AHEAD, 17, 0)
+    const end1 = localInstantDaysFromNow(DAYS_AHEAD, 18, 0)
+    const end2 = localInstantDaysFromNow(DAYS_AHEAD, 19, 0)
+    const end3 = localInstantDaysFromNow(DAYS_AHEAD, 20, 0)
 
     // 17:00-18:00 on Court 1 — the opening booking of the run.
     await createBookingViaApi(api, start1, end1, court1)
