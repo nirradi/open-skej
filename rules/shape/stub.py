@@ -2,8 +2,10 @@
 
 The stub has no network, subprocess, clock, or randomness. It recognises two deliberately narrow
 prompt patterns: ``open at <time>`` changes the opening minute and ``from <time> to <time>`` changes
-both bounds. An unqualified ``open at 4`` means 04:00, matching the production agent's ambiguity
-policy and making an E2E preview visibly move without pretending this test double understands prose.
+both bounds. An optional ``<minutes> minute slots`` phrase changes the offered duration; when it is
+absent, the stub uses 60 minutes. An unqualified ``open at 4`` means 04:00, matching the production
+agent's ambiguity policy and making an E2E preview visibly move without pretending this test double
+understands prose.
 """
 
 from __future__ import annotations
@@ -29,11 +31,12 @@ _FROM_TO = re.compile(
     r"(?P<end_meridiem>am|pm)?\b",
     re.IGNORECASE,
 )
+_MINUTE_SLOTS = re.compile(r"\b(?P<minutes>[1-9]\d*)\s*-?\s*minute(?:s)?\s+slots?\b", re.IGNORECASE)
 _EVERY_DAY = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
 
 class StubShapeLLMClient:
-    """A canned valid shape response, responsive only to the documented time patterns above."""
+    """A canned valid shape response, responsive only to the documented patterns above."""
 
     default_model = DEFAULT_STUB_MODEL
 
@@ -45,6 +48,7 @@ class StubShapeLLMClient:
             )
 
         start, end = _bounds_from_prompt(prompt)
+        duration = _duration_from_prompt(prompt)
         document = {
             "version": 1,
             "operating_blocks": [
@@ -52,7 +56,7 @@ class StubShapeLLMClient:
                     "days": _EVERY_DAY,
                     "start_time": _format_time(start),
                     "end_time": _format_time(end),
-                    "allowed_durations_mins": [60],
+                    "allowed_durations_mins": [duration],
                 }
             ],
             "blackout_windows": [],
@@ -60,7 +64,8 @@ class StubShapeLLMClient:
         envelope = {
             "document": document,
             "summary": (
-                f"Open {_format_time(start)}–{_format_time(end)} every day with 60-minute bookings."
+                f"Open {_format_time(start)}–{_format_time(end)} every day with "
+                f"{duration}-minute bookings."
             ),
             "question": None,
         }
@@ -87,6 +92,11 @@ def _bounds_from_prompt(prompt: str) -> tuple[int, int]:
         return start, start + 8 * 60
 
     return 9 * 60, 17 * 60
+
+
+def _duration_from_prompt(prompt: str) -> int:
+    match = _MINUTE_SLOTS.search(prompt)
+    return int(match["minutes"]) if match is not None else 60
 
 
 def _parse_time(hour_text: str, minute_text: str | None, meridiem: str | None) -> int:

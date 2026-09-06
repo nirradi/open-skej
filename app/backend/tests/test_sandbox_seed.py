@@ -19,13 +19,20 @@ from app.identity.models import (
     AccessRequestStatus,
     InvitationStatus,
     MembershipRole,
+    PromptAgent,
+    PromptVersion,
     Resource,
+    ShapeExchangeStatus,
+    ShapeMessageRole,
     ShapeStatus,
     Space,
     SpaceAccessRequest,
     SpaceCalendarShape,
     SpaceInvitation,
     SpaceMembership,
+    SpaceShapeConversation,
+    SpaceShapeExchange,
+    SpaceShapeMessage,
     User,
 )
 from app.sandbox_seed import (
@@ -51,6 +58,7 @@ from app.sandbox_seed import (
     SPACE_B_TIMEZONE,
     STRANGER_AUTH0_SUB,
     STRANGER_EMAIL,
+    _reset,
     run,
 )
 
@@ -321,3 +329,59 @@ def test_seed_is_idempotent_reset_not_accumulate(session):
     # just some row with the same count.
     assert session.get(User, DEFAULT_USER_ID) is not None
     assert session.get(Resource, DEFAULT_RESOURCE_ID) is not None
+
+
+def test_reset_deletes_shape_history_before_its_fk_parents(session):
+    """A shape-authoring run can be reset after it leaves transcript history."""
+    run(session)
+    owner = session.execute(select(User).where(User.auth0_sub == OWNER_AUTH0_SUB)).scalar_one()
+    space = session.execute(select(Space).where(Space.name == SPACE_A_NAME)).scalar_one()
+    live_shape = session.execute(
+        select(SpaceCalendarShape).where(
+            SpaceCalendarShape.space_id == space.id,
+            SpaceCalendarShape.status == ShapeStatus.LIVE,
+        )
+    ).scalar_one()
+
+    conversation = SpaceShapeConversation(space_id=space.id, user_id=owner.id)
+    session.add(conversation)
+    session.flush()
+    prompt = PromptVersion(
+        sha256="a" * 64,
+        agent=PromptAgent.SHAPE,
+        prompt_text="sandbox shape prompt",
+    )
+    session.add(prompt)
+    session.flush()
+    session.add(
+        SpaceShapeExchange(
+            conversation_id=conversation.id,
+            prompt_version_id=prompt.id,
+            user_prompt="open at nine",
+            status=ShapeExchangeStatus.COMPLETED,
+            response_text="shape",
+            model="sandbox",
+        )
+    )
+    session.add(
+        SpaceShapeMessage(
+            conversation_id=conversation.id,
+            ordinal=1,
+            role=ShapeMessageRole.ASSISTANT,
+            content="shape",
+            resulting_shape_version_id=live_shape.id,
+        )
+    )
+    live_shape.source_conversation_id = conversation.id
+    session.commit()
+
+    _reset(session)
+
+    for model in (
+        SpaceShapeMessage,
+        SpaceShapeExchange,
+        SpaceShapeConversation,
+        SpaceCalendarShape,
+        PromptVersion,
+    ):
+        assert _count(session, model) == 0

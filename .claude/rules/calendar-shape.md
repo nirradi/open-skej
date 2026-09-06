@@ -313,8 +313,10 @@ admin can see and refine the exact reading rather than starting another conversa
 
 `shape.stub.StubShapeLLMClient` is CI's model client. It sits at the same `LLMClient` seam, is
 deterministic, and makes no network or subprocess call. It recognises only `open at <time>` and
-`from <time> to <time>` in the prompt so typing a recognisable time moves the returned operating
-block and exercises the chat-to-preview wiring; it is a test double, not a natural-language parser.
+`from <time> to <time>` operating patterns, plus an optional `<minutes> minute slots` phrase. The
+time patterns move the returned operating block and the duration phrase changes its offered
+duration; when the phrase is absent the stub returns 60-minute bookings. It is a test double, not a
+natural-language parser.
 
 ## The availability gate, and the endpoint the calendar reads
 

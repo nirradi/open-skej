@@ -233,6 +233,16 @@ def test_stub_is_deterministic_and_recognisably_time_responsive():
     assert ranged.document.operating_blocks[0].end_time == 17 * 60
 
 
+def test_stub_recognises_explicit_slot_duration():
+    result = generate_shape("Open from 10 to 12, 30 minute slots", client=StubShapeLLMClient())
+
+    block = result.document.operating_blocks[0]
+    assert block.start_time == 10 * 60
+    assert block.end_time == 12 * 60
+    assert block.allowed_durations_mins == (30,)
+    assert result.summary == "Open 10:00–12:00 every day with 30-minute bookings."
+
+
 def test_stub_rejects_an_unrecognised_agent_prompt():
     with pytest.raises(LLMCallError):
         StubShapeLLMClient().complete(system="not the shape agent", prompt="open at 9")
