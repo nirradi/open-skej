@@ -102,6 +102,9 @@ from app.identity.models import (
     Resource,
     RuleGenerationExchange,
     RuleGenerationJob,
+    SpaceShapeConversation,
+    SpaceShapeExchange,
+    SpaceShapeMessage,
     ShapeStatus,
     Space,
     SpaceAccessRequest,
@@ -288,8 +291,10 @@ def _reset(session: Session) -> None:
 
     Children before parents: bookings before the Resources and users they
     reference, the three per-Space queues before the Spaces and users they
-    reference, ``space_rules``, ``space_calendar_shapes`` and Resources before
-    Spaces (task 6.6 gave ``space_rules.space_id`` a foreign key onto
+    reference, shape-conversation messages and exchanges before their
+    conversations and prompt versions, ``space_rules``,
+    ``space_calendar_shapes`` and Resources before Spaces (task 6.6 gave
+    ``space_rules.space_id`` a foreign key onto
     ``spaces.id`` with no cascade, matching every other FK in this schema —
     task 10.2's ``space_calendar_shapes.space_id`` is the identical shape),
     Spaces before users (``created_by_user_id``), users last. One
@@ -320,7 +325,15 @@ def _reset(session: Session) -> None:
     session.execute(delete(SpaceInvitation))
     session.execute(delete(SpaceMembership))
     session.execute(delete(SpaceRule))
+    # Shape transcripts are retained in production, but the sandbox owns and
+    # wipes its disposable fixtures. Messages and exchanges reference their
+    # conversation (and messages may reference a shape); a live/draft shape
+    # may in turn reference its source conversation. Delete the full child
+    # chain before either parent so a second E2E run cannot violate an FK.
+    session.execute(delete(SpaceShapeMessage))
+    session.execute(delete(SpaceShapeExchange))
     session.execute(delete(SpaceCalendarShape))
+    session.execute(delete(SpaceShapeConversation))
     session.execute(delete(RuleGenerationExchange))
     session.execute(delete(RuleGenerationJob))
     session.execute(delete(GeneratedRuleType))
